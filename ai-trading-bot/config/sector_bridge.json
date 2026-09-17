@@ -1,0 +1,63 @@
+{
+  "_comment": "미국 섹터 ↔ 국내 업종 대응표. 한 run은 두 시장을 다룬다(한 쪽 준비 + 다른 쪽 회고). 방금 닫힌 시장에서 움직인 것이 이쪽 무엇에 걸리는지를 **미리** 못 박아 둔다.",
+  "_why": "매 run 즉흥으로 짝을 지으면 그날 서사에 맞는 짝만 고르게 된다 — 반도체가 빠진 날엔 '미국 기술주는 원래 따로 논다'고 하고, 오른 날엔 '미국을 따라간다'고 하는 식이다. 짝을 파일에 고정해 두면 그날의 기분이 아니라 **어제 정한 가설**로 오늘을 본다.",
+  "_status": "이건 법칙이 아니라 가설이다. 부호가 반대로 나온 날은 노트 §9에 '역행'으로 세고, 같은 짝이 3회 역행하면 이 파일에서 내린다. 그 기록이 없으면 틀린 대응표를 영원히 쓴다.",
+  "_units": "sign: '+' 같은 방향 기대 / '-' 반대 방향 기대. confidence: high(직접 대응) / mid(부분 겹침) / low(느슨함 — 판단 근거로 단독 사용 금지).",
+  "schema_version": "1.0",
+
+  "_note_us": "미국은 업종 지수 TR이 없다. GICS 11섹터를 SPDR 셀렉트 ETF로, 필요한 세부 테마는 대표 ETF로 대신 잰다. ETF는 지수가 아니라 상품이라 배당락·환금성 차이가 섞이지만, 국면을 재는 용도로는 충분하다.",
+  "us_sectors": {
+    "XLK":  {"name": "기술",          "excd": "AMS", "gics": true},
+    "XLF":  {"name": "금융",          "excd": "AMS", "gics": true},
+    "XLV":  {"name": "헬스케어",       "excd": "AMS", "gics": true},
+    "XLY":  {"name": "경기소비재",     "excd": "AMS", "gics": true},
+    "XLP":  {"name": "필수소비재",     "excd": "AMS", "gics": true},
+    "XLE":  {"name": "에너지",         "excd": "AMS", "gics": true},
+    "XLI":  {"name": "산업재",         "excd": "AMS", "gics": true},
+    "XLB":  {"name": "소재",          "excd": "AMS", "gics": true},
+    "XLU":  {"name": "유틸리티",       "excd": "AMS", "gics": true},
+    "XLRE": {"name": "부동산",         "excd": "AMS", "gics": true},
+    "XLC":  {"name": "커뮤니케이션",    "excd": "AMS", "gics": true},
+
+    "SMH":  {"name": "반도체",         "excd": "NAS", "gics": false},
+    "ITA":  {"name": "방산·항공",      "excd": "AMS", "gics": false},
+    "LIT":  {"name": "배터리·리튬",    "excd": "AMS", "gics": false},
+    "TAN":  {"name": "태양광",         "excd": "AMS", "gics": false}
+  },
+
+  "_note_kr": "코드는 KRX 업종 분류(브로커 FHPUP02140000이 주는 것). 이름은 참고용이고 진실은 코드다 — 브로커가 이름을 바꾸면 코드로 따라간다.",
+  "links": [
+    {"us": "SMH",  "kr": "0013", "kr_name": "전기·전자",     "sign": "+", "confidence": "high", "note": "가장 강한 고리. 삼성전자·SK하이닉스가 이 업종이고 미국 반도체와 같은 수요를 본다."},
+    {"us": "XLK",  "kr": "0029", "kr_name": "IT 서비스",     "sign": "+", "confidence": "mid",  "note": "소프트웨어·플랫폼. 국내는 내수 비중이 커 미국만큼 안 따라간다."},
+    {"us": "XLU",  "kr": "0017", "kr_name": "전기·가스",     "sign": "+", "confidence": "mid",  "note": "AI 전력 수요 축이 지나가는 자리. 다만 국내는 한전 요금 규제가 별도 변수라 미국만으로 안 설명된다."},
+    {"us": "XLE",  "kr": "0008", "kr_name": "화학",          "sign": "+", "confidence": "low",  "note": "혼재. 유가 상승은 정유(S-Oil·SK이노)에 +, 순수 화학엔 원가 −. KOSPI 화학은 둘을 같이 담아 정유 쪽이 지수를 끈다고 보고 +로 둔다 — 역행이 쌓이면 내릴 것."},
+    {"us": "XLF",  "kr": "0021", "kr_name": "금융",          "sign": "+", "confidence": "high", "note": "금리 축을 공유한다."},
+    {"us": "XLF",  "kr": "0024", "kr_name": "증권",          "sign": "+", "confidence": "mid",  "note": "거래대금에 더 민감해 미국 금융보다 국내 수급에 좌우된다."},
+    {"us": "XLF",  "kr": "0025", "kr_name": "보험",          "sign": "+", "confidence": "mid",  "note": "장기금리 방향이 핵심. 생보가 손보보다 민감하다."},
+    {"us": "XLV",  "kr": "0009", "kr_name": "제약",          "sign": "+", "confidence": "mid",  "note": null},
+    {"us": "XLV",  "kr": "0014", "kr_name": "의료·정밀기기",  "sign": "+", "confidence": "mid",  "note": null},
+    {"us": "XLY",  "kr": "0016", "kr_name": "유통",          "sign": "+", "confidence": "low",  "note": "국내 유통은 내수·소비심리가 지배적이다."},
+    {"us": "XLY",  "kr": "0030", "kr_name": "오락·문화",      "sign": "+", "confidence": "low",  "note": null},
+    {"us": "XLY",  "kr": "0006", "kr_name": "섬유·의류",      "sign": "+", "confidence": "low",  "note": "OEM(한세·영원무역)은 미국 소비에 직접 걸리지만 업종 지수 전체는 느슨하다."},
+    {"us": "XLP",  "kr": "0005", "kr_name": "음식료·담배",    "sign": "+", "confidence": "mid",  "note": null},
+    {"us": "XLI",  "kr": "0012", "kr_name": "기계·장비",      "sign": "+", "confidence": "mid",  "note": null},
+    {"us": "XLI",  "kr": "0018", "kr_name": "건설",          "sign": "+", "confidence": "low",  "note": "국내 건설은 부동산 정책·PF가 지배적이라 미국 산업재와 자주 어긋난다."},
+    {"us": "XLI",  "kr": "0019", "kr_name": "운송·창고",      "sign": "+", "confidence": "mid",  "note": "해운·항공 운임 사이클을 공유한다."},
+    {"us": "XLB",  "kr": "0011", "kr_name": "금속",          "sign": "+", "confidence": "mid",  "note": null},
+    {"us": "XLB",  "kr": "0010", "kr_name": "비금속",        "sign": "+", "confidence": "low",  "note": null},
+    {"us": "XLB",  "kr": "0007", "kr_name": "종이·목재",      "sign": "+", "confidence": "low",  "note": null},
+    {"us": "XLRE", "kr": "0028", "kr_name": "부동산",         "sign": "+", "confidence": "mid",  "note": "금리 축을 공유하나 국내는 규제 변수가 크다."},
+    {"us": "XLC",  "kr": "0020", "kr_name": "통신",          "sign": "+", "confidence": "low",  "note": "국내 통신은 요금 규제·배당이 주가를 끌어 미국 커뮤니케이션과 성격이 다르다."},
+    {"us": "ITA",  "kr": "0015", "kr_name": "운송장비·부품",  "sign": "+", "confidence": "mid",  "note": "한화에어로·현대로템 등 방산이 이 업종에 있다. 자동차도 같이 있어 신호가 섞인다."},
+    {"us": "LIT",  "kr": "0013", "kr_name": "전기·전자",      "sign": "+", "confidence": "low",  "note": "LG엔솔·삼성SDI가 전기·전자에 속해 반도체 신호와 한 칸에서 섞인다. 2차전지는 업종 지수로는 분리가 안 되므로 **테마 축(market_map)으로 따로 추적**할 것."},
+    {"us": "TAN",  "kr": "0008", "kr_name": "화학",          "sign": "+", "confidence": "low",  "note": "한화솔루션이 화학에 속한다. 지수 전체를 흔들 만한 비중은 아니다."}
+  ],
+
+  "_note_gaps": "대응이 없다는 것 자체가 신호다 — 그 축의 한쪽을 국내에서 살 수단이 없다는 뜻이고, 노트 §4의 '유니버스 방향 공백' 우선순위로 올라간다.",
+  "kr_without_us": [
+    {"kr": "0026", "kr_name": "일반서비스", "why": "미국 GICS엔 대응 범주가 없다. 국내 지주·엔터·교육이 섞인 잡箱 업종이라 한 ETF로 못 잰다."}
+  ],
+  "us_without_kr": [
+    {"us": "XLE", "why": "국내엔 순수 에너지(석유·가스 생산) 업종이 없다 — 화학 안에 정유가 들어가 있을 뿐이다. 유가 축을 국내 업종 지수로 직접 살 수단이 없다."}
+  ]
+}

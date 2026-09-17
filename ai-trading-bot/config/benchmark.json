@@ -1,0 +1,14 @@
+{
+  "KR": {
+    "started_at": "2026-09-07T21:59:07.232601+09:00",
+    "start_equity": 10000000.0,
+    "benchmark_ticker": "069500",
+    "start_benchmark_price": 110820.0
+  },
+  "US": {
+    "started_at": "2026-09-10T11:32:15.586652+09:00",
+    "start_equity": 100000.0,
+    "benchmark_ticker": "SPY",
+    "start_benchmark_price": 762.4
+  }
+}

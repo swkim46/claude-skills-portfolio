@@ -1,0 +1,47 @@
+{
+  "_meta": {"note": "비봉인 — 백그라운드 gate-audit Agent용 빡빡 검수. 계속 자라는 검사표.",
+    "seeded_from": ["research-source-check audit_rubric (도메인 무관 lens 이식)", "범용화 신설 lens: 시효·출처위계·재인용체인·계획정합·비가역"]},
+  "verdict": {
+    "deliverable_glob": "{report}",
+    "global_directives": [
+      "너는 검수 결과를 *떨어뜨리려는* 적대적 메타검수자다 — 통과는 흠을 *못 찾았을 때만*.",
+      "관대한 PASS 금지: 각 lens는 산출물의 해당 줄을 *그대로 인용* 못 하면 PASS.",
+      "추측 금지: 인용 없는 FAIL 무효. high lens 하나라도 위반이면 subverdict=FAIL.",
+      "이 산출물은 *일상·실무 정보*(여행·구매·행정 등) 검증 리포트다. 기업 공시 기준을 들이대지 말고, 아래 lens로만 판정하라."
+    ],
+    "lenses": [
+      {"id": "content-not-reachability", "severity": "high", "cite_or_pass": true,
+       "ask": "각 항목이 링크 접속성(200/404)이 아니라 인용 *내용*(수치·문구·조건)을 출처 원문과 대조했는가? 링크가 열린다는 사실만으로 '확인됨/정합'으로 통과시킨 항목을 인용 적발(★ 최빈 누락)."},
+      {"id": "staleness-axis", "severity": "high", "cite_or_pass": true, "needs_fetch": true,
+       "ask": "시효 있는 사실(요금·운영시간·휴무일·운행/운항 스케줄·규정·환율·연락처)에 출처 기준일(as-of)과 *이용 시점*(여행일·구매일) 두 축이 대조됐는가? 날짜 표기 없이 '맞음'으로 처리된 항목, 계절 운영시간(하계/동계)·정기 휴무 요일·현지 공휴일을 안 본 항목을 적발. '출처와 일치하지만 이용 시점에 무효'인 것을 MISMATCH로 잘못 올렸거나, 반대로 STALE을 그냥 MATCH로 통과시킨 것도 적발."},
+      {"id": "authority-tier", "severity": "high", "cite_or_pass": true, "needs_fetch": true,
+       "ask": "load-bearing 사실의 출처가 T1(그 사실을 결정하는 주체 — 시설·업체 공식, 정부·대사관 고시, 운송사 공식 시간표, 제조사 스펙)까지 올라갔는가? 개인 블로그·카페·리뷰·유튜브·AI 요약·검색 스니펫(T3)만 근거인데 아무 강등 표시 없이 통과시킨 항목을 적발. T2(예약 플랫폼·위키·언론·가이드북)에 머문 채 T1 교체를 시도조차 안 한 항목도 적발."},
+      {"id": "citation-chain", "severity": "med", "cite_or_pass": true,
+       "ask": "재인용 체인이 근원까지 추적됐는가 — 블로그가 블로그를 인용하는 고리를 따라가지 않고 '여러 곳에 같은 내용이 있으니 맞다'는 식으로 처리한 정황을 적발(반복은 근거가 아니라 복제의 증거)."},
+      {"id": "unsourced-or-unlinked", "severity": "high", "cite_or_pass": true,
+       "ask": "load-bearing 주장(수치·요금·시간·날짜·규정·한정자·평가) 중 (a) 출처가 아예 없거나 (b) 출처를 말로만 지명하고 클릭 링크가 빠진(named-source-without-link) 것을 적발 — '○○ 공식 안내에 따르면'이라 써놓고 URL 없는 항목(미검증·페이월·봇차단이어도 링크는 있어야 함). [자체계산]·[추정] 라벨과 자명 진술만 면제."},
+      {"id": "access-label-correct", "severity": "high", "cite_or_pass": true,
+       "ask": "접근성 라벨이 봇차단↔페이월↔죽은링크를 혼동했는가 — 403·타임아웃·Cloudflare 챌린지('Just a moment')를 '유료/페이월'이나 '죽은 링크'로 적은 항목을 적발('유료'는 200+로그인 게이트 실제 확인 시에만, '죽은 링크'는 DNS 실패·영구 404만). 404를 곧바로 '사실 없음/날조'로 판정하고 정확 URL 재도출(슬러그 절단·리다이렉트 추적)을 시도 안 한 것도 적발."},
+      {"id": "context-not-just-grep", "severity": "high", "cite_or_pass": true,
+       "ask": "raw '문자열 존재' grep만으로 MATCH 판정하고 앞뒤 문장·어순을 대조 안 한 정황을 적발 — 같은 숫자가 다른 맥락(다른 요금 종류·다른 지점·다른 시즌·페이지 부가정보)에서 나온 것을 실착지로 오판했는지. 각 MATCH에 '무엇의 값인지' 맥락이 명시됐는지 확인."},
+      {"id": "condition-preserved", "severity": "high", "cite_or_pass": true,
+       "ask": "요금·시간 인용에서 원문의 단서(성인/아동·내국인/외국인·성수기/비수기·온라인/현장·요일·회원/비회원·구간)가 탈락한 채 숫자만 옮겨졌는데 MATCH로 통과한 항목을 적발. 단서 없는 숫자는 MATCH가 아니다."},
+      {"id": "entity-identity", "severity": "med", "cite_or_pass": true,
+       "ask": "동명·유사 대상 혼동을 적발 — 같은 이름의 다른 지점·다른 시설·다른 모델·다른 노선의 정보를 가져왔는데 주소·식별자로 동일성을 확정하지 않은 항목."},
+      {"id": "derived-value-labeled", "severity": "med", "cite_or_pass": true,
+       "ask": "자체계산·파생 수치(합계·1인당·통화환산·할인 후 금액·소요시간 합)를 원문 진술처럼 출처에 귀속([자체계산]/[추정] 라벨 없이)한 것을 적발 — 원문엔 입력값만 있고 그 파생값은 없는데 출처 링크만 단 경우."},
+      {"id": "pertinence-attribution", "severity": "high", "cite_or_pass": true,
+       "ask": "인용이 verbatim 정확해도 *그 문장의 바로 그 주장*을 뒷받침하는지(pertinence)를 적발 — 유형이 다른 근거를 붙인 것(예: '예약 가능'으로 '당일 입장 가능'을 주장, 개요 페이지의 범주 라벨로 세부 사실을 귀속). 사건·사례의 존재 확인이 *범주 판정*까지 입증하지 않는데 그렇게 처리한 것도 적발."},
+      {"id": "plan-internal-consistency", "severity": "high", "cite_or_pass": true,
+       "ask": "일정·예산 산출물인데 계획 자체의 정합성을 안 본 정황을 적발 — 이동시간 vs 일정 간격, 운영시간·**마지막 입장 시각** vs 방문 시각, 체크인/아웃·항공 도착일 연속성, 시차·현지시각 표기, 항목 합계 vs 총액, 예약 필수·정원·연령 제한과 계획의 충돌. 출처는 다 맞는데 실행 불가인 계획이 통과했는지 확인. (일정·예산 산출물이 아니면 이 lens는 PASS.)"},
+      {"id": "irreversible-stake", "severity": "high", "cite_or_pass": true, "needs_fetch": true,
+       "ask": "되돌릴 수 없는 항목(비자·입국요건·전자여행허가·여권 잔여 유효기간·예약 필수·최소인원·연령/자격 제한·안전 공지·휴무일에 배치된 방문)이 T1 공식 출처 + 확인일자로 확정되고 🔴로 표시됐는가? T2/T3 근거로 넘어갔거나 심각도가 🟡 이하로 낮춰진 것을 적발."},
+      {"id": "absence-claim-challenged", "severity": "med", "cite_or_pass": true,
+       "ask": "'정보 없음'·'공식 안내 없음'·'확인 불가' 단정이 쿼리 변형(동의어·현지어·정식 명칭·별칭)을 소진한 뒤 내려졌는가? 한 표현으로 안 나온 것을 '존재하지 않음'으로 적은 정황을 적발."},
+      {"id": "verdict-vocabulary-honest", "severity": "high", "cite_or_pass": true,
+       "ask": "4값 판정이 정직하게 쓰였는가 — 원문을 못 읽었는데 UNVERIFIABLE 대신 MATCH/MISMATCH로 처리한 항목, 낡은 것(STALE)을 틀린 것(MISMATCH)으로 올린 항목, 집계 라인('MISMATCH N건 · STALE N건 · 🔴 N건')이 실제 표 내용과 어긋나는 것을 적발."},
+      {"id": "comparison-symmetry", "severity": "med", "cite_or_pass": true,
+       "ask": "여러 대상을 비교하는 산출물에서 한 대상만 깊이 조사되고 나머지는 얕게 처리돼 없는 차이가 생긴 정황을 적발 — '못 찾음'이 '없음'으로 기록된 칸."}
+    ]
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "report": {
+    "intent": "사후 감사를 모델 추측이 아니라 stepgate.py audit(룰베이스)로 수행했는가",
+    "observations": [
+      {
+        "id": "jsonl",
+        "ask": "감사한 세션 JSONL 경로(또는 --latest로 선택된 파일)"
+      },
+      {
+        "id": "ran_audit",
+        "variants": [
+          {
+            "ask": "stepgate.py audit를 실제로 실행해 그 출력을 근거로 진단했는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "stepgate.py audit를 실행하지 않은 채로 진단을 냈는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "eyeballed",
+        "variants": [
+          {
+            "ask": "audit 스크립트 없이 transcript를 눈으로 훑어 추측으로 진단했는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "진단이 전부 audit 스크립트 출력에 근거하는가 — transcript를 눈으로 훑은 추측이 섞이지 않았으면 Y (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "adjudicated",
+        "variants": [
+          {
+            "ask": "룰이 플래그한 항목을 모델이 임의로 '괜찮음/위반'이라 단정해 덮었는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "룰이 플래그한 항목을 임의 판단으로 덮지 않고 그대로 보고했는가 (Y/N)",
+            "must": "Y"
+          }
+        ]
+      }
+    ],
+    "criteria": []
+  }
+}

@@ -1,0 +1,34 @@
+# --- secrets (never commit) ---
+.env
+*.env
+.env.*
+!.env.example
+*token*.json
+*credential*.json
+*.pem
+*.key
+
+# --- python / os ---
+__pycache__/
+*.py[cod]
+.DS_Store
+.claude/settings.local.json
+
+# --- runtime output: kept out of the portfolio; .gitkeep marks the dirs ---
+ai-trading-bot/data/*
+ai-trading-bot/analysis/*
+ai-trading-bot/logs/*
+ai-trading-bot/dashboard/*
+ai-trading-bot/_raw_sources/*
+ai-trading-bot/signals/*
+ai-trading-bot/journal/*
+ai-trading-bot/config/KILL
+ai-trading-bot/config/.run_auto.lock
+ai-trading-bot/config/.dashboard.json
+ai-trading-bot/config/FAIL_*
+gmail-newsletter-analyzer/_raw_sources/*
+gmail-newsletter-analyzer/세상공부/*
+!**/.gitkeep
+!ai-trading-bot/signals/_sample_signal.json
+!ai-trading-bot/journal/market_map.json
+!ai-trading-bot/journal/theses.json

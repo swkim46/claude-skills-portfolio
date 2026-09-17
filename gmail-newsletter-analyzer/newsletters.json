@@ -1,0 +1,176 @@
+{
+  "_comment": [
+    "Newsletter roster for the digest. Proposed from a 90-day scan on 2026-08-27",
+    "(594 messages, 72 distinct senders) — see _raw_sources/sender_scan_20260827.json.",
+    "Flip `enabled` to include or exclude a source. Rates are observed over that",
+    "90-day window, not the publisher's stated schedule.",
+    "Re-run the scan any time: python3 scan_senders.py --days 90",
+    "2026-09-08: Axios 3종 추가. Apple Hide My Email 릴레이 경유라 List-Unsubscribe/List-Id가 없어 scan_senders.py가 분류하지 못한다 — 수동 등록이다. 재스캔 결과로 지우지 말 것.",
+    "Axios는 뉴스레터마다 발신 주소가 다르고(macro@·closer@·markets@·mike@·finishline@) Apple Hide My Email이 각각에 별도 릴레이를 발급한다. 릴레이는 <local>_at_axios_com_<account-key>_<alias-hash>@icloud.com 꼴이지만 from: 부분일치·와일드카드가 안 되므로 주소를 하나씩 등록해야 한다. 2026-09-16: Axios Markets 릴레이 등록 완료(9/8 첫 도착 뒤 8일간 미등록으로 7통 누락). 이제 digest.py가 수집 때마다 명단 밖의 뉴스레터형 발신자(릴레이·List-Unsubscribe)를 stderr로 경고하고, 스팸함도 같은 명단으로 훑어 건진다(2026-09-16 실측: Macro 9/14·9/15, Closer 9/11·9/14·9/15, Markets 9/10이 스팸함에 있었음). 주석은 절차가 아니다 — 경고가 뜨면 등록하고 다시 수집할 것.",
+    "subject_name_re: 한 릴레이로 여러 발행물이 오는 발신자(mike@ → Axios AM·PM·Finish Line)는 제목에서 발행물 이름을 뽑아 재료 헤더의 이름으로 쓴다. 없으면 name 그대로.",
+    "공개 저장소 주석: Axios 계열 sender는 Apple Hide My Email 릴레이 주소라 <account-key>·<alias-hash> 자리표시자로 바꿨다. 실제 값은 iCloud 설정 > Hide My Email에서 각 별칭을 복사해 넣는다. 릴레이 판별 정규식은 digest.py RELAY_RE. excluded 목록도 실제 받은편지함 메타데이터라 형식 예시 2건으로 줄였다."
+  ],
+  "newsletters": [
+    {
+      "id": "uppity",
+      "name": "UPPITY 머니레터",
+      "sender": "moneyletter@uppity.co.kr",
+      "topic": "경제·금융",
+      "observed_90d": 84,
+      "observed_rate": "주중 거의 매일",
+      "enabled": true,
+      "use_for": [
+        "study",
+        "trade"
+      ]
+    },
+    {
+      "id": "booding",
+      "name": "BOODING",
+      "sender": "everybody@booding.co",
+      "topic": "부동산·주거",
+      "observed_90d": 23,
+      "observed_rate": "주 1~2회",
+      "enabled": true,
+      "use_for": [
+        "study"
+      ]
+    },
+    {
+      "id": "startup-weekly",
+      "name": "STARTUP WEEKLY",
+      "sender": "<redacted-personal-sender>@glance.media",
+      "topic": "스타트업·투자",
+      "observed_90d": 13,
+      "observed_rate": "주 1회",
+      "enabled": true,
+      "use_for": [
+        "study",
+        "trade"
+      ]
+    },
+    {
+      "id": "claude-team",
+      "name": "Claude Team",
+      "sender": "no-reply@email.claude.com",
+      "topic": "AI 제품 소식",
+      "observed_90d": 6,
+      "observed_rate": "2주 1회 안팎",
+      "enabled": false,
+      "note": "편집 콘텐츠가 아니라 제품 공지에 가까움. 원하시면 true로.",
+      "use_for": [
+        "study"
+      ]
+    },
+    {
+      "id": "quora-digest",
+      "name": "Quora Digest",
+      "sender": "english-personalized-digest@quora.com",
+      "topic": "잡다한 Q&A",
+      "observed_90d": 3,
+      "observed_rate": "비정기",
+      "enabled": false,
+      "note": "이미 그 자체가 알고리즘 다이제스트라 재요약 가치가 낮다고 판단함.",
+      "use_for": [
+        "study"
+      ]
+    },
+    {
+      "id": "axios-macro",
+      "name": "Axios Macro",
+      "sender": "macro_at_axios_com_<account-key>_<alias-hash>@icloud.com",
+      "topic": "미국 거시경제",
+      "observed_90d": 0,
+      "observed_rate": "미실측(2026-09-07 구독)",
+      "enabled": true,
+      "note": "★ Apple Hide My Email 릴레이. 원 발신 macro@axios.com. List-Unsubscribe·List-Id가 제거돼 scan_senders.py가 영구히 분류하지 못한다 — 수동 등록이며 재스캔 시 excluded로 되돌리지 말 것. 매매 재료로는 이게 1순위(ET 오전 발행 = KST 저녁 도착 → 당일 미국장 재료).",
+      "use_for": [
+        "study",
+        "trade"
+      ]
+    },
+    {
+      "id": "axios-closer",
+      "name": "Axios Closer",
+      "sender": "closer_at_axios_com_<account-key>_<alias-hash>@icloud.com",
+      "topic": "미국장 마감 시황",
+      "observed_90d": 0,
+      "observed_rate": "평일 오후(ET) — 환영메일 문구 'each weekday afternoon'",
+      "enabled": true,
+      "note": "★ 릴레이(위와 동일 주의). KST 새벽 도착 = **어제** 미국장 마감 내용이다 — 오늘 미국장의 실시간 재료가 아님.",
+      "use_for": [
+        "study",
+        "trade"
+      ]
+    },
+    {
+      "id": "axios-markets",
+      "name": "Axios Markets",
+      "sender": "markets_at_axios_com_<account-key>_<alias-hash>@icloud.com",
+      "topic": "미국 시장 아침 브리핑",
+      "observed_90d": 0,
+      "observed_rate": "평일 ET 아침 ~07:30(KST 저녁 ~20:30) — 2026-09-08~15 실측 6통",
+      "enabled": true,
+      "note": "★ 릴레이. 원 발신 markets@axios.com(Emily Peck·Matt Phillips). 미국장 개장 전 재료라 매매 US 회차(22:35 KST)에 신선함. 2026-09-08 첫 도착·09-16 등록 — 그 사이 7통(9/10분은 스팸함) 누락, 260916 보충 노트로 흡수.",
+      "use_for": [
+        "study",
+        "trade"
+      ]
+    },
+    {
+      "id": "axios-business-suite",
+      "name": "Axios Business Suite",
+      "sender": "newsletters_at_axios_com_<account-key>_<alias-hash>@icloud.com",
+      "topic": "비즈니스 일반",
+      "observed_90d": 0,
+      "observed_rate": "미실측",
+      "enabled": true,
+      "note": "★★ 릴레이 + 원 발신이 macro@/closer@가 아니라 newsletters@axios.com이다. Axios가 이 주소로 다른 뉴스레터를 보내면 같은 릴레이로 들어와 Business Suite로 오분류된다 — 첫 2주간 subject로 교차 확인할 것.",
+      "use_for": [
+        "study",
+        "trade"
+      ]
+    },
+    {
+      "id": "axios-pm",
+      "name": "Axios PM",
+      "sender": "mike_at_axios_com_<account-key>_<alias-hash>@icloud.com",
+      "topic": "미국 오후 브리핑",
+      "observed_90d": 0,
+      "observed_rate": "평일 오후(ET) — 첫 수신 2026-09-07",
+      "enabled": true,
+      "note": "★★ 발신자 표시 이름이 'Mike Allen'이라 'axios'가 안 들어간다 — from:axios 검색으로는 안 잡힌다. 실제로 2026-09-08에 이 건만 누락됐다. Axios 계열은 릴레이 주소를 통째로 등록할 것. 같은 릴레이로 Axios AM·Finish Line도 온다 → subject_name_re로 헤더 이름을 가른다(2026-09-16).",
+      "use_for": [
+        "study",
+        "trade"
+      ],
+      "subject_name_re": "(Axios (?:AM|PM|Finish Line))"
+    },
+    {
+      "id": "axios-finish-line",
+      "name": "Axios Finish Line",
+      "sender": "finishline_at_axios_com_<account-key>_<alias-hash>@icloud.com",
+      "topic": "일·삶 인사이트",
+      "observed_90d": 0,
+      "observed_rate": "미실측(2026-09-07 구독)",
+      "enabled": true,
+      "note": "★ 릴레이. 환영 메일만 수신했고 본 발행분은 아직 없음.",
+      "use_for": [
+        "study"
+      ]
+    }
+  ],
+  "excluded": [
+    {
+      "sender": "messages-noreply@linkedin.com",
+      "count_90d": 65,
+      "reason": "LinkedIn 알림 — 편집 콘텐츠 아님"
+    },
+    {
+      "sender": "noreply-accounts@google.com",
+      "count_90d": 10,
+      "reason": "계정 보안 알림"
+    }
+  ],
+  "_comment_use_for": "use_for = 이 소스를 어느 작업의 재료로 쓸 것인가. study=세상 공부 노트, trade=매매 판단. 없으면 양쪽 모두로 본다(새 소스 태그를 깜빡했을 때 조용히 빠지는 것보다 낫다). 매매에서 뺀 기준은 '현재 유니버스(반도체·플랫폼) 판단에 근거가 되는가'다 — 유니버스에 건설·리츠를 넣으면 BOODING을 trade에도 넣을 것. 2026-09-08 실측: 매매용 재료 1,241행 중 BOODING·잘쓸레터 290행이 판단에 한 줄도 쓰이지 않았다."
+}

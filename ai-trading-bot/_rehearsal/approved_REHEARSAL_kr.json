@@ -1,0 +1,48 @@
+{
+  "schema_version": "1.0",
+  "market": "KR",
+  "generated_at": "2026-09-03T17:42:30.959252+09:00",
+  "signal_ref": "signals/signal_REHEARSAL_kr.json",
+  "snapshot_ref": "data/snapshot_REHEARSAL_kr.json",
+  "limits_sha256": "2b35c12f54784da7d585abb667dca7b6ff2214896100b91eecc1c719a97dc0bd",
+  "orders": [
+    {
+      "ticker": "000660",
+      "name": "SK하이닉스",
+      "market": "KR",
+      "excd": null,
+      "action": "BUY",
+      "qty": 2,
+      "price": 181000,
+      "source": "llm",
+      "proposal": {
+        "ticker": "000660",
+        "name": "SK하이닉스",
+        "action": "BUY",
+        "order_type": "limit",
+        "limit_price": 181000,
+        "weight_target_pct": 5.0,
+        "thesis": "HBM 공급 계약 흐름과 3분기 메모리 가격 반등의 직접 수혜. 근거가 출처 1건에만 기대어 confidence는 낮게 둠.",
+        "evidence": [
+          {
+            "claim": "HBM 공급 계약 소식 지속, 메모리 가격 3분기 반등 흐름",
+            "source_url": "https://example.com/hbm-news",
+            "tier": "T2",
+            "verdict": "MATCH"
+          },
+          {
+            "claim": "HBM은 DRAM 다이를 수직 적층하고 TSV로 연결한 고대역폭 메모리 규격",
+            "source_url": "https://semiconductor.samsung.com/dram/hbm/",
+            "tier": "T1",
+            "verdict": "MATCH"
+          }
+        ],
+        "confidence": 0.58,
+        "horizon_days": 20,
+        "risk_notes": "메모리 현물가 하락 전환 또는 HBM 계약의 경쟁사 이전 시 무효"
+      },
+      "exempt_from_count_limit": false
+    }
+  ],
+  "rejected": []
+}

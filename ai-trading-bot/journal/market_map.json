@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "_comment": "합성 견본 — 회귀 테스트(㊿ 교차 시장 사슬)가 축 조인 키를 확인하는 데만 쓴다. 실제 지도는 stage.py / market_map.py 가 run마다 생성해 이 파일을 덮어쓴다.",
+  "axes": [
+    {
+      "id": "ai_memory",
+      "name": "AI 메모리 수요 (견본)",
+      "thesis": "AI 서버 투자 → 고대역폭 메모리 수요 → 국내 메모리 · 미국 하이퍼스케일러가 한 축에 걸린다 (견본)",
+      "indicators": [],
+      "names": [
+        {
+          "ticker": "005930",
+          "name": "삼성전자"
+        },
+        {
+          "ticker": "MSFT",
+          "name": "Microsoft"
+        }
+      ],
+      "updated": "2026-09-01"
+    }
+  ],
+  "sectors": []
+}

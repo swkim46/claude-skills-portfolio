@@ -1,0 +1,66 @@
+{
+  "schema_version": "1.0",
+  "run_id": "SAMPLE-kr",
+  "market": "KR",
+  "generated_at": "2026-09-03T17:00:58.289709+09:00",
+  "no_trade": false,
+  "analysis_refs": {
+    "material": "data/material_TEST_kr.md",
+    "note": "analysis/분석노트_TEST_kr.md",
+    "factcheck_report": "analysis/검증리포트_TEST_kr.md"
+  },
+  "proposals": [
+    {
+      "ticker": "000660",
+      "name": "SK하이닉스",
+      "action": "BUY",
+      "weight_target_pct": 6.0,
+      "thesis": "합성 테스트용 제안. HBM 수요 관련 T1 근거 1건 부착 상태를 가정.",
+      "confidence": 0.68,
+      "horizon_days": 20,
+      "risk_notes": "메모리 가격 하락 전환 시 무효",
+      "evidence": [
+        {
+          "claim": "테스트 클레임",
+          "source_url": "https://example.com",
+          "tier": "T1",
+          "verdict": "MATCH"
+        }
+      ]
+    },
+    {
+      "ticker": "035420",
+      "name": "NAVER",
+      "action": "BUY",
+      "weight_target_pct": 4.0,
+      "thesis": "근거 등급이 낮은 제안 — 거부되어야 정상.",
+      "confidence": 0.55,
+      "horizon_days": 30,
+      "risk_notes": "-",
+      "evidence": [
+        {
+          "claim": "블로그 전언",
+          "source_url": "https://blog.example.com",
+          "tier": "T3",
+          "verdict": "MATCH"
+        }
+      ]
+    }
+  ],
+  "watchlist_candidates": [
+    {
+      "ticker": "373220",
+      "name": "LG에너지솔루션",
+      "why": "뉴스에서 발굴 — 사용자 승인 전까지 매매 대상 아님",
+      "evidence": [
+        {
+          "claim": "x",
+          "source_url": "https://example.com",
+          "tier": "T2",
+          "verdict": "MATCH"
+        }
+      ]
+    }
+  ],
+  "_comment": "trade-run 스킬이 산출해야 할 시그널 JSON의 형식 견본. generated_at은 매 run마다 현재 시각으로. 이 파일 자체는 run_id가 TEST여서 실행 대상이 아니다."
+}

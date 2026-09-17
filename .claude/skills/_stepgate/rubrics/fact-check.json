@@ -1,0 +1,168 @@
+{
+  "verdict": {
+    "intent": "링크 접속성만 확인하고 끝내는 최빈 실패를 차단한다 — 내용 대조(②)·시효(③)·출처 위계(④)까지 실제로 수행했는지 확인하고, 판정 어휘(MATCH/MISMATCH/STALE/UNVERIFIABLE)와 집계가 산출물에 실재하는지 디스크에서 직접 재검증한다.",
+    "mode": "async",
+    "observations": [
+      {
+        "id": "content_checked",
+        "variants": [
+          {
+            "ask": "링크가 열리는지 확인하는 데서 멈추지 않고, 각 클레임의 수치·문구를 출처 원문(curl raw grep / PDF 추출 / 페이지 본문)과 실제로 대조했는가? (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "수치·문구를 출처 원문(curl raw grep / PDF 추출 / 페이지 본문)과 대조하지 않고 링크가 열리는지 확인하는 데서 멈춘 클레임이 있는가? (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "reachability_only",
+        "variants": [
+          {
+            "ask": "링크가 200이라는 사실만 근거로 '정합/확인됨'으로 통과시킨 항목이 하나라도 있는가? (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "'정합/확인됨' 판정이 전부 원문 내용 대조에 근거하는가 — 링크가 200이라는 사실만으로 통과시킨 항목이 하나도 없으면 Y? (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "stale_axis",
+        "variants": [
+          {
+            "ask": "시효 있는 사실(요금·운영시간·휴무·스케줄·규정)에 대해 출처 기준일(as-of)과 이용 시점 두 축을 대조했는가? (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "시효 있는 사실(요금·운영시간·휴무·스케줄·규정) 중 출처 기준일(as-of)과 이용 시점 두 축을 대조하지 않은 것이 있는가? (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "tier_checked",
+        "variants": [
+          {
+            "ask": "load-bearing 사실마다 출처 티어(T1 공식 / T2 집계 / T3 UGC·AI요약)를 판정해 산출물에 표기했는가? (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "load-bearing 사실 중 출처 티어(T1 공식 / T2 집계 / T3 UGC·AI요약) 표기가 빠진 것이 있는가? (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "blog_as_primary",
+        "variants": [
+          {
+            "ask": "개인 블로그·커뮤니티·리뷰·AI 요약(T3)만 근거인 사실을 아무 표시나 강등 없이 그대로 통과시켰는가? (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "개인 블로그·커뮤니티·리뷰·AI 요약(T3)만 근거인 사실에 전부 표시나 강등을 붙였는가? 그런 사실이 없었으면 Y. (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "unsourced_swept",
+        "variants": [
+          {
+            "ask": "출처가 아예 없는 load-bearing 주장과, 출처를 말로만 지명하고 클릭 링크가 빠진 주장(named-source-without-link)을 전수 훑었는가? (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "출처가 아예 없는 load-bearing 주장이나 출처를 말로만 지명하고 클릭 링크가 빠진 주장(named-source-without-link)을 훑지 않고 남겨 뒀는가? (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "paywall_mislabel",
+        "variants": [
+          {
+            "ask": "403·타임아웃·Cloudflare 챌린지 등 자동 fetch 실패를 '유료/페이월'로 적은 항목이 있는가? (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "403·타임아웃·Cloudflare 챌린지 등 자동 fetch 실패를 페이월이 아니라 fetch 실패 그대로 적었는가? 그런 실패가 없었으면 Y. (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "guessed_verdict",
+        "variants": [
+          {
+            "ask": "원문을 실제로 읽지 못했는데 UNVERIFIABLE 대신 MATCH 또는 MISMATCH로 판정한 항목이 있는가? (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "원문을 실제로 읽지 못한 항목을 전부 UNVERIFIABLE로 판정했는가? 그런 항목이 없었으면 Y. (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "internal_consistency",
+        "variants": [
+          {
+            "ask": "일정·예산 산출물이면 계획 자체의 정합성(이동시간 vs 일정 간격, 운영시간 vs 방문 시각, 날짜 연속성, 금액 합계)을 점검했는가? 해당 없으면 Y로 답하고 리포트에 N-A로 표기. (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "일정·예산 산출물인데 계획 자체의 정합성(이동시간 vs 일정 간격, 운영시간 vs 방문 시각, 날짜 연속성, 금액 합계)을 점검하지 않고 넘어갔는가? 해당 없으면 N으로 답하고 리포트에 N-A로 표기. (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "count_line",
+        "check": "quote",
+        "file": "{deliverable}",
+        "minlen": 14,
+        "ask": "산출물에서 MISMATCH·STALE 건수를 집계한 문장을 *그대로* 붙여넣어라(0건이면 0건이라 쓴 그 문장)."
+      }
+    ],
+    "criteria": [
+      {
+        "check": "exists",
+        "path": "{deliverable}"
+      },
+      {
+        "check": "contains",
+        "file": "{deliverable}",
+        "pat": "MISMATCH",
+        "min": 1
+      },
+      {
+        "check": "contains",
+        "file": "{deliverable}",
+        "pat": "STALE",
+        "min": 1
+      },
+      {
+        "check": "contains",
+        "file": "{deliverable}",
+        "pat": "(T1|T2|T3|공식|1차)",
+        "min": 1
+      },
+      {
+        "check": "contains",
+        "file": "{deliverable}",
+        "pat": "(기준일|확인일|as-of|as of|이용 시점|이용시점)",
+        "min": 1
+      },
+      {
+        "check": "contains",
+        "file": "{deliverable}",
+        "pat": "(🔴|🟡|⏳|🔵|⚪)",
+        "min": 2
+      }
+    ]
+  }
+}

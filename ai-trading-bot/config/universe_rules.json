@@ -1,0 +1,117 @@
+{
+  "_comment": "유니버스 자동 편입·제외의 하드 규칙. limits.json과 같이 **운영자가 정하는 규칙 파일이다**. 재료를 읽는 도중에는 고치지 않는다 — 뉴스레터 본문이 규칙을 바꾸는 경로가 생기면 인젝션 방어가 무너진다. 규칙 변경은 재료와 분리된 자리에서 한다.",
+  "_why": "무인 운영에서 사람이 워치리스트를 승인하면 그게 병목이 된다. 그렇다고 AI가 자유롭게 종목을 넣게 하면, 뉴스레터 본문(신뢰 불가 입력)이 '이 종목을 사라'고 했을 때 그대로 주문으로 이어진다 — 워치리스트가 그 유일한 관문이었기 때문이다. 그래서 방어를 '사람의 승인'에서 '코드의 검증'으로 옮긴다. AI는 후보를 제안할 뿐이고, 편입 여부는 **브로커가 주는 사실**로만 판정한다. 뉴스레터는 지수 편입·시가총액·관리종목 여부를 바꿀 수 없다.",
+  "schema_version": "1.0",
+  "auto_apply": true,
+  "_note_size": "시장별 유니버스 크기. 하한이 있는 이유: 제외가 누적돼 판단할 대상이 사라지는 것을 막는다.",
+  "max_universe": {
+    "KR": 35,
+    "US": 25
+  },
+  "min_universe": {
+    "KR": 3,
+    "US": 2
+  },
+  "max_adds_per_run": 4,
+  "max_removes_per_run": 2,
+  "_note_cooling": "후보가 **서로 다른 이틀에 걸쳐** 제안돼야 편입된다(run 횟수가 아니라 날짜 수). ★ 2026-09-09에 1일로 낮췄다가 되돌렸다 — 회귀 테스트가 잡았다. 냉각이 막는 것은 운영자가 직접 시딩하는 경로가 아니라 **AI가 재료를 읽고 제안하는 경로**, 즉 인젝션 표면 그 자체다. 1일이면 악의적 뉴스레터 한 통이 같은 run에서 바로 유니버스에 들어온다. 유니버스를 41종목으로 넓힌 것과 냉각을 푸는 것은 별개 문제이고, 넓히려면 운영자가 watchlist.json을 직접 쓰면 된다 — 그 경로는 냉각을 거치지 않는다.",
+  "cooling_days": 2,
+  "_note_kr": "국내 편입 조건. KOSPI200 요구가 핵심 방어다 — 지수 편입은 거래소가 정하고 뉴스레터가 못 건드린다. 금액 단위: 시가총액 억원(hts_avls), 거래대금 원(acml_tr_pbmn).",
+  "KR": {
+    "require_market": [
+      "KOSPI200"
+    ],
+    "min_market_cap_100m_krw": 20000,
+    "min_daily_turnover_krw": 10000000000,
+    "forbid_flags": {
+      "mang_issu_cls_code": "N",
+      "sltr_yn": "N",
+      "invt_caful_yn": "N",
+      "mrkt_warn_cls_code": "00"
+    }
+  },
+  "_note_us": "해외는 지수 편입 정보를 TR이 주지 않아 시가총액·거래대금·브로커의 매매가능 판정으로 대신한다. 금액 단위: USD.",
+  "US": {
+    "require_orderable": true,
+    "min_market_cap_usd": 50000000000,
+    "min_daily_turnover_usd": 100000000,
+    "_note_etf": "ETF는 `tomv`(시가총액)가 AUM으로 오므로 개별주 500억 달러 기준을 그대로 적용하면 SOXL(수십억)도 못 들어온다. 이름에 ETF·Shares·Fund·Trust가 있으면 `min_market_cap_usd_etf`를 쓴다.",
+    "min_market_cap_usd_etf": 3000000000
+  },
+  "_note_price": "1주 가격이 자산의 이 비중을 넘으면 편입하지 않는다 — 분할 진입이 불가능해 '살까 말까'가 아니라 '자산의 N%를 한 번에 걸까'가 되기 때문이다(2026-09-08: SK하이닉스 1주가 계좌의 18.5%).",
+  "max_single_share_pct_of_equity": 10.0,
+  "_note_forbid": "★ 2026-09-14 사용자 결정: **선물형만** 이름으로 배제한다. 레버리지·인버스는 편입 가능 — 대신 `leverage_patterns`로 배수를 판별해 limits.json의 레버리지 규칙(호흡 상한·비중 상한 나눔·축 노출 배수 반영)이 붙는다. 이름 기반이라 이름에 '선물'이 없는 선물형(USO 등)은 못 거른다 — 그건 편입 심사 때 사람이 본다. 이전 값: 레버리지·인버스·2X·3X·곱버스·선물·ETN.",
+  "forbidden_name_patterns": [
+    "선물",
+    "Futures",
+    "FUT ",
+    "선물형"
+  ],
+  "_note_leverage": "레버리지·인버스 판별 — 이름·티커에 이 패턴이 있으면 그 배수로 본다. 인버스는 축 노출을 **음수**로 센다(SOXS를 사면 반도체 축 집중이 줄어든다). 매칭은 대소문자 무시.",
+  "leverage_patterns": {
+    "3": [
+      "3X",
+      "3배",
+      "UltraPro",
+      "TQQQ",
+      "SQQQ",
+      "SOXL",
+      "SOXS",
+      "TECL",
+      "TECS",
+      "FNGU",
+      "LABU",
+      "LABD",
+      "TNA",
+      "TZA",
+      "UPRO",
+      "SPXU",
+      "TMF",
+      "TMV"
+    ],
+    "2": [
+      "2X",
+      "2배",
+      "레버리지",
+      "곱버스",
+      "Ultra ",
+      "UltraShort",
+      "QLD",
+      "QID",
+      "SSO",
+      "SDS",
+      "NVDL",
+      "TSLL",
+      "MSTU",
+      "MSTZ"
+    ],
+    "inverse": [
+      "인버스",
+      "Bear",
+      "Short",
+      "SQQQ",
+      "SOXS",
+      "TECS",
+      "LABD",
+      "TZA",
+      "SPXU",
+      "QID",
+      "SDS",
+      "TMV",
+      "MSTZ",
+      "-1X",
+      "Inverse"
+    ]
+  },
+  "_note_remove": "제외 규칙. 보유 중인 종목은 어떤 사유로도 빼지 않는다 — 빼도 매도는 가능하지만(유니버스 = 워치리스트 ∪ 보유) 추가 매수가 막혀 판단의 폭이 좁아진다.",
+  "remove": {
+    "never_if_held": true,
+    "allowed_reasons": [
+      "coverage_gone",
+      "axis_duplicate",
+      "premise_falsified",
+      "unbuyable"
+    ],
+    "min_absent_runs_for_coverage_gone": 5
+  }
+}
