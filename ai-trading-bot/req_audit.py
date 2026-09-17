@@ -23,7 +23,7 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 SKILL = HERE.parent / ".claude" / "skills" / "trade-run"
-STEPGATE_DIR = HERE.resolve().parent.parent / ".claude" / "skills" / "_stepgate"
+STEPGATE_DIR = HERE.resolve().parent / ".claude" / "skills" / "_stepgate"
 RUBRIC = STEPGATE_DIR / "rubrics" / "trade-run.json"
 
 # (요구, 문서 앵커, 게이트 앵커 | None=게이트 대상 아님)

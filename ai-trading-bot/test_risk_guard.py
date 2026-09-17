@@ -19,7 +19,7 @@ from pathlib import Path
 import risk_guard as rg
 HERE_DIR = Path(__file__).parent
 # 게이트 엔진은 저장소 루트의 .claude/skills/_stepgate/ 에 있다.
-STEPGATE_DIR = HERE_DIR.resolve().parent.parent / ".claude" / "skills" / "_stepgate"
+STEPGATE_DIR = HERE_DIR.resolve().parent / ".claude" / "skills" / "_stepgate"
 
 KST = timezone(timedelta(hours=9))
 PASS, FAIL = "PASS", "FAIL"
