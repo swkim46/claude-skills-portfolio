@@ -1,0 +1,51 @@
+{
+  "schema_version": "1.0",
+  "_comment": "시연용 시장 지도 견본 — 축과 종목의 연결만 담는다.",
+  "axes": [
+    {
+      "id": "offshore_grid",
+      "name": "해상풍력·송전망 확충(가상)",
+      "thesis": "해상풍력 2단계 발주 → 해저 HVDC 케이블·송전망 투자 → 국내 케이블·전력기기 수요 (가상)",
+      "indicators": [],
+      "names": [
+        {
+          "ticker": "900001",
+          "name": "한빛전선(가상)"
+        },
+        {
+          "ticker": "900006",
+          "name": "미래전력(가상)"
+        }
+      ],
+      "updated": "2026-10-12"
+    },
+    {
+      "id": "copper",
+      "name": "구리 수요(가상)",
+      "thesis": "케이블·전력망 투자 → 구리 수요 → 구리 가공(가상)",
+      "indicators": [],
+      "names": [
+        {
+          "ticker": "900002",
+          "name": "동양구리(가상)"
+        }
+      ],
+      "updated": "2026-10-12"
+    }
+  ],
+  "sectors": [
+    {
+      "code": "0001",
+      "name": "전기장비(가상)",
+      "market": "KR",
+      "grade": "—",
+      "status": null,
+      "chains": [],
+      "names": [],
+      "next_event": null,
+      "resolves_when": null,
+      "updated": null,
+      "last_seen": "2026-10-12"
+    }
+  ]
+}
