@@ -95,6 +95,32 @@ def check_issue_tags(raw_lines):
     return [l.strip()[:60] for l in tops if not ISSUE_TAG.search(strip_meta(l))]
 
 
+def check_unopened_pdf(raw_lines):
+    """헤더 '열지 못한 것'에 PDF를 적었으면 잡는다 — 이제 PDF는 열리기 때문이다.
+
+    왜 기계로 잡나: PDF 링크를 내장 브라우저로 `navigate`하면 렌더가 아니라 **다운로드 대화상자**가
+    떠서 사용자 화면을 가로챘고, 그래 놓고 결과는 '못 연 것'으로 적혀 소득이 없었다
+    (260918·260923·260924 세 회차 반복 · 사용자 지적 2026-09-25). 원인은 `fetch_article.py`에
+    PDF 분기가 없어 사다리가 브라우저까지 내려간 것이었고, 지금은 스크립트가 pypdf로 바로 뽑는다.
+    → **PDF를 '못 연 것'으로 적을 이유는 스캔 이미지 PDF 하나뿐**이다. 그 밖의 PDF가 그 줄에
+    올라오면 스크립트를 안 돌려 본 것이므로 여기서 막는다.
+    """
+    hits = []
+    for i, l in enumerate(raw_lines, 1):
+        if "못 연 것" not in l and "열지 못한 것" not in l:
+            continue
+        tail = l.split("못 연 것", 1)[-1].split("열지 못한 것", 1)[-1]
+        # 스캔 이미지 PDF는 정당한 사유 — 그 단서가 있으면 넘어간다
+        if "스캔" in tail:
+            continue
+        for pat, why in ((r"PDF", "PDF"), (r"다운로드 대화상자", "다운로드 대화상자"),
+                         (r"내려받기", "내려받기")):
+            if re.search(pat, tail):
+                hits.append((why, i, tail.strip()[:90]))
+                break
+    return hits
+
+
 def check_render(lines):
     """노트는 **마크다운 뷰어에서 읽힌다** — 본문 문자가 서식 기호로 먹히는 것을 잡는다.
 
@@ -381,6 +407,17 @@ def main():
             print("    [%s] %s" % (w, l))
     else:
         print("✓ 서식으로 먹힐 문자 0건")
+
+    # PDF를 '못 연 것'으로 적었으면 스크립트를 안 돌린 것이다(브라우저는 다운로드 대화상자만 띄운다).
+    updf = check_unopened_pdf(raw)
+    if updf:
+        problems += 1
+        print("✗ '못 연 것'에 PDF %d건 — `python3 fetch_article.py <url>`로 다시 열 것" % len(updf))
+        print("    (브라우저로 PDF를 열면 사용자 화면에 다운로드 대화상자만 뜬다. 스캔 이미지 PDF면 그렇게 적을 것)")
+        for w, i, l in updf[:4]:
+            print("    [%s · %d행] %s" % (w, i, l))
+    else:
+        print("✓ '못 연 것'에 PDF 없음")
 
     cov, err = check_coverage(lines, material)
     if err:

@@ -16,7 +16,7 @@
   한쪽이 실패하면(잔고 TR 500 등) 그 시장은 마지막 행으로 물러서고 **★ 낡음**을 표에 찍는다.
 - 합산의 환율은 최신 US 스냅샷(`snapshot_<6자리>_us.json`의 `exchange_rate`)이다 — 파일명 정렬이
   아니라 `generated_at`으로 고른다(리허설 파일 오선택 방지, risk_guard와 같은 규칙).
-- 투자비중의 목표·하한은 `config/limits.json`(`target_invested_pct`·`min_invested_pct`)에서 읽는다.
+- 투자비중의 목표는 상수가 아니라 **배분 원장**(`journal/allocation.jsonl` 마지막 판단)에서 읽는다(2026-09-22).
 """
 import argparse
 import json
@@ -116,9 +116,15 @@ def _pnl(x):
 def build(market: str, stamp: str, rows: dict, errs: dict) -> str:
     """읽는 사람 기준의 짧은 블록 — 시장마다 세 줄(자산·보유·수익률), 마지막에 합산 한 줄."""
     now = datetime.now(KST)
-    limits = _read_json(LIMITS_PATH, {}) or {}
-    target = limits.get("target_invested_pct")
-    floor = limits.get("min_invested_pct")
+    # ★ 목표 주식 비율은 `limits.json` 상수가 아니라 배분 원장의 마지막 판단이다(2026-09-22).
+    try:
+        import allocation as _al
+        _last = _al.last()
+    except Exception:                                   # noqa: BLE001
+        _last = {}
+    target = _last.get("target_invested_pct") if _last else None
+    target_id = _last.get("id") if _last else None
+    floor = None
     fx, fx_at = latest_fx()
     L = [f"■ 계좌 현황 — {now.strftime('%Y-%m-%d %H:%M')} KST (run {market.lower()}:{stamp})", ""]
     krw_total = krw_inv = 0.0
@@ -167,8 +173,10 @@ def build(market: str, stamp: str, rows: dict, errs: dict) -> str:
         inv_pct = krw_inv / krw_total * 100
         tail = ""
         if target is not None:
-            tail = (f"  ← 목표 {target:.0f}%" + (f"·하한 {floor:.0f}%" if floor is not None else "")
-                    + (f" (미달 {target - inv_pct:.1f}%p)" if inv_pct < target else " (목표 이상)"))
+            tail = (f"  ← 판단 목표 {float(target):.0f}%({target_id})"
+                    + (f" (미달 {float(target) - inv_pct:.1f}%p)" if inv_pct < float(target) else " (목표 이상)"))
+        else:
+            tail = "  ← 판단 목표 없음(배분 원장 비어 있음 — 다음 run이 allocation을 세운다)"
         L.append(f"[합산(원화)]  자산 {krw_total:,.0f}원 · 주식:현금 = {inv_pct:.1f}% : {100 - inv_pct:.1f}%{tail}")
         L.append(f"  환율 {fx:,.2f}" + (f" ({fx_at[5:]})" if fx_at else "") + " · 출처 journal/equity_curve.jsonl")
     else:

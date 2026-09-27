@@ -256,6 +256,31 @@ def check_fill_line(note: str, trades_path: Path) -> list:
               if int(summ.get("open_orders", 0)) else _why(note, want, "체결 확정")))]
 
 
+def check_reconcile(trades_path: Path) -> list:
+    """**집행 수량이 승인 안인가.** `fill.finalize`가 쓴 `reconcile`을 본다 — 초과 0건이거나,
+    초과가 있으면 사고(`INC-…`)가 기록돼 있어야 통과. 2026-09-21 승인 46/집행 92가 그대로 통과한 자리."""
+    try:
+        rec = json.loads(Path(trades_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        return [("승인 대조(초과)", False, f"거래 기록을 읽을 수 없다: {e}")]
+    r = rec.get("reconcile")
+    if not r:
+        return [("승인 대조(초과)", False, "**`reconcile`이 없다** — `fill.py <trades>`를 다시 돌려 대조를 남긴다")]
+    n = int(r.get("overfill") or 0)
+    unk = r.get("unknown_refs") or []
+    if n == 0:
+        return [("승인 대조(초과)", True,
+                 f"종목·방향 {len(r.get('executed') or {})}건 전부 승인 안"
+                 + (f" (승인 미상 참조 {', '.join(unk)} — 그 건은 대조 밖)" if unk else ""))]
+    ids = r.get("incidents") or []
+    ok = bool(r.get("incident_recorded")) and bool(ids)
+    detail = "; ".join(f"{o['ticker']} {o['action']} 승인 {o['approved']}/집행 {o['executed']}"
+                       for o in r.get("overfill_list") or [])
+    return [("승인 대조(초과)", ok,
+             (f"**승인 초과 {n}건 — 사고 기록 {', '.join(ids)}**: {detail}" if ok else
+              f"**승인 초과 {n}건인데 사고 기록이 없다**: {detail} — `fill.py <trades>`를 돌려 기록을 남긴다"))]
+
+
 def _why(note: str, want: str, key: str) -> str:
     """기대한 줄과 노트에 실제로 있는 줄을 나란히 — 추측하지 않게."""
     if want in note:
@@ -303,6 +328,100 @@ def check_research_is_today(market: str, stamp: str) -> list:
     return [(f"오늘자 섹터 리서치({stamp})", bool(files),
              ", ".join(p.name for p in files) if files else
              "**이번 run 날짜의 `analysis/섹터_*.md`가 없다** — 리서치가 파일로 안 남았다")]
+
+
+EXPANSION_HEAD = "## 재료 확장"
+
+
+def _expansion_rows(files: list) -> tuple:
+    """리서치 파일들의 `## 재료 확장` 절 → (행 목록, URL 집합, 절이 있는 파일 수)."""
+    rows, urls, n_sec = [], set(), 0
+    for f in files:
+        txt = f.read_text(encoding="utf-8", errors="ignore")
+        if EXPANSION_HEAD not in txt:
+            continue
+        n_sec += 1
+        sec = txt.split(EXPANSION_HEAD, 1)[1]
+        sec = re.split(r"\n## ", sec, 1)[0]
+        for ln in sec.splitlines():
+            t = ln.strip()
+            if not t or t.startswith(("|---", "| ---", "|:")):
+                continue
+            if t.startswith(("- ", "* ", "|")) and not re.match(r"^\|\s*(사실|항목|번호|#)", t):
+                rows.append(t)
+                urls.update(re.findall(r"https?://[^\s)\]>`|]+", t))
+    return rows, urls, n_sec
+
+
+def check_research_expansion(market: str, stamp: str) -> list:
+    """**리서치가 재료를 확장했는가.** 리서치 파일에 `## 재료 확장 — 뉴스레터에 없던 것` 절이 있고, 그 행이 재료
+    (`material_*.md`)에 이미 있는 링크의 되풀이가 아니어야 한다. 리서치는 출처 확인이 아니라 **더 많은 사실·상황을
+    아는 것**이다(2026-09-22 사용자) — 확장이 0이면 그 run은 뉴스레터만 읽고 판단한 것이다."""
+    name = "리서치 재료 확장"
+    files = sorted((HERE / "analysis").glob(f"섹터_*_{stamp}_*.md"))
+    if not files:
+        return [(name, False, "**오늘자 리서치 파일이 없다** — `analysis/섹터_*_<stamp>_*.md`")]
+    rows, urls, n_sec = _expansion_rows(files)
+    if not n_sec:
+        return [(name, False, f"**`{EXPANSION_HEAD}` 절이 없다** — 뉴스레터에 없던 사실·상황을 행으로 남겨라(사실 · 출처(등급) · 바꾸는 해석)")]
+    if not rows:
+        return [(name, False, f"**`{EXPANSION_HEAD}` 절이 비어 있다** — 확장 0건은 리서치가 아니다")]
+    mat = HERE / "data" / f"material_{stamp}_{market}.md"
+    mtxt = mat.read_text(encoding="utf-8", errors="ignore") if mat.exists() else ""
+    repeated = {u for u in urls if u in mtxt}
+    fresh = [r for r in rows if not any(u in r for u in repeated)]
+    if not fresh:
+        return [(name, False, f"**{len(rows)}행 전부 재료에 이미 있는 링크의 되풀이** — 확장이 아니다")]
+    return [(name, True, f"확장 {len(fresh)}행(되풀이 {len(rows) - len(fresh)}행 제외) · 새 출처 {len(urls - repeated)}건 · 파일 {n_sec}개")]
+
+
+def _cites_research(text: str, stems: set, urls: set) -> bool:
+    t = text or ""
+    if "재료 확장" in t or "[확장" in t:
+        return True
+    if any(st in t for st in stems):
+        return True
+    return any(u in t for u in urls)
+
+
+def check_research_cited(market: str, stamp: str) -> list:
+    """**확장이 판단에 실렸는가.** 이번 run이 새로 세우거나 갱신한 전망(축 `updated`=오늘)·논지(`created`=오늘)가 리서치를
+    인용해야 한다 — 파일명·`재료 확장`·확장 절의 URL 중 하나. 인용이 0이면 리서치가 판단에 안 들어간 것이다."""
+    name = "리서치 인용(전망·논지)"
+    today = f"20{stamp[:2]}-{stamp[2:4]}-{stamp[4:6]}"
+    files = sorted((HERE / "analysis").glob(f"섹터_*_{stamp}_*.md"))
+    stems = {f.stem for f in files} | {f.name for f in files}
+    _rows, urls, _n = _expansion_rows(files)
+    uncited, checked = [], 0
+    try:
+        m = json.loads((HERE / "journal" / "market_map.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        m = {}
+    for ax in m.get("axes") or []:
+        if ax.get("updated") != today and ax.get("opened") != today:
+            continue
+        checked += 1
+        blob = json.dumps({k: ax.get(k) for k in ("thesis", "chain", "origin", "indicators", "beneficiaries", "breaks_if", "research")},
+                          ensure_ascii=False)
+        if not _cites_research(blob, stems, urls):
+            uncited.append(f"전망 {ax.get('id')}")
+    try:
+        th = json.loads((HERE / "journal" / "theses.json").read_text(encoding="utf-8")).get("theses") or []
+    except (OSError, json.JSONDecodeError):
+        th = []
+    for t in th:
+        if not str(t.get("created") or "").startswith(today):
+            continue
+        checked += 1
+        blob = json.dumps({k: t.get(k) for k in ("thesis", "evidence", "axis_why", "invalidation", "research")}, ensure_ascii=False)
+        if not _cites_research(blob, stems, urls):
+            uncited.append(f"논지 {t.get('id')}")
+    if not checked:
+        return [(name, True, "오늘 새로 세운 전망·논지 없음 — 대조할 것이 없다")]
+    if uncited:
+        return [(name, False, f"**리서치 인용 없음 {len(uncited)}/{checked}**: " + ", ".join(uncited)
+                 + " — 전망 thesis/chain·논지 thesis/evidence에 리서치 파일명 또는 `재료 확장` 행(URL)을 인용하라")]
+    return [(name, True, f"오늘 세운 전망·논지 {checked}건 전부 리서치 인용")]
 
 
 def check_corpus(market: str, stamp: str, note: str) -> list:
@@ -377,11 +496,14 @@ def main() -> int:
     rows += check_outliers(a.market, a.stamp, note)
     rows += check_cycle(note)
     rows += check_research_is_today(a.market, a.stamp)
+    rows += check_research_expansion(a.market, a.stamp)
+    rows += check_research_cited(a.market, a.stamp)
     rows += check_corpus(a.market, a.stamp, note)
     rows += check_gaps(note)
     rows += check_markers(note)
     if a.trades:
         rows += check_fill_line(note, Path(a.trades))
+        rows += check_reconcile(Path(a.trades))
 
     n_fail = sum(1 for _, ok, _ in rows if not ok)
     buf = io.StringIO()

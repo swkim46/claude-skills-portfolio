@@ -172,6 +172,18 @@ def save(d: dict) -> None:
     p.write_text(json.dumps(d, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _tier(v):
+    """1·2·3 또는 'data'(브로커 API 값 — 2026-09-22: 시세·기저율·수준값을 T1로 태그해 등급이 흐려졌다)."""
+    if v is None:
+        return None
+    sv = str(v).strip().lower()
+    if sv == "data":
+        return "data"
+    if sv in ("1", "2", "3"):
+        return int(sv)
+    raise argparse.ArgumentTypeError(f"tier는 1|2|3|data: {v!r}")
+
+
 def cmd_add(a) -> int:
     # ★ --batch: 사실을 JSONL(행마다 {"fact","as_of"?,"source"?,"url"?,"tier"?,"minor"?})로 한 번에.
     #   20건을 셸 변수 명령으로 부르다 전부 실패해 §12가 "출처 없음"으로 나왔다(2026-09-16 KR run).
@@ -189,7 +201,8 @@ def cmd_add(a) -> int:
             sub = _types.SimpleNamespace(stamp=a.stamp, market=a.market, fact=row["fact"],
                                          as_of=row.get("as_of") or row.get("as-of") or "",
                                          source=row.get("source") or "", url=row.get("url") or "",
-                                         tier=row.get("tier"), minor=bool(row.get("minor")), batch="")
+                                         tier=_tier(row.get("tier")) if row.get("tier") is not None else None,
+                                         minor=bool(row.get("minor")), batch="")
             rc = max(rc, cmd_add(sub))
         print(f"batch 기록 {len(rows)}건 ← {a.batch}")
         return rc
@@ -244,7 +257,7 @@ def cmd_render(a) -> int:
             if r.get("url"):
                 src = f"[{src}]({r['url']})"
             if r.get("tier"):
-                src += f" (T{r['tier']})"
+                src += f" ({'data' if r['tier'] == 'data' else 'T' + str(r['tier'])})"
             flag = "" if r.get("load_bearing", True) else " *(참고)*"
             print(f"| {r['fact']}{flag} | {r.get('as_of') or '미확인'} "
                   f"| {r.get('retrieved') or '미기록'} | {written} | {src} |", file=buf)
@@ -362,8 +375,15 @@ def cmd_reuse(a) -> int:
     if not rows:
         print("  없음.")
         return 0
+    brief = bool(getattr(a, "brief", False))
     for r in rows:
         flag = "" if r.get("load_bearing", True) else " *(참고)*"
+        if brief:
+            # ★ 2026-09-22 실측: 176건×3줄(48KB)이 노트에 그대로 쓰인 적 0 — 목적(중복 조사 방지)은 한 줄이면 된다.
+            t = r.get("tier")
+            tt = "data" if t == "data" else (f"T{t}" if t else "—")
+            print(f"  {r['id']} {tt} as-of {r.get('as_of') or '?'} | {r['fact'][:90]}{flag}")
+            continue
         print(f"  {r['id']}  [{' · '.join(r.get('runs') or [])}]{flag}")
         print(f"     {r['fact'][:104]}")
         print(f"     as-of {r.get('as_of') or '미확인'} · retrieved {r.get('retrieved') or '미기록'}"
@@ -392,11 +412,13 @@ def main() -> int:
                            help="출처가 말하는 기준일·발표일 (수동 — 이것만 자동이 아니다)")
             s.add_argument("--source", default="")
             s.add_argument("--url", default="")
-            s.add_argument("--tier", type=int, choices=[1, 2, 3])
+            s.add_argument("--tier", type=_tier, choices=[1, 2, 3, "data"],
+                           help="1 공식·1차 / 2 언론·집계 / 3 UGC·요약 / data = 브로커 API 시세·기저율·수준값(논지 근거가 아니라 데이터)")
             s.add_argument("--minor", action="store_true",
                            help="load-bearing이 아니면(참고용) as-of 강제에서 빠진다")
         elif name == "reuse":
             s.add_argument("--days", type=int, default=7)
+            s.add_argument("--brief", action="store_true", help="사실당 한 줄(id·등급·as-of·사실)")
         else:
             s.add_argument("--out", default="")
         if name == "check":

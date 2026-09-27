@@ -18,7 +18,7 @@ from pathlib import Path
 
 import risk_guard as rg
 HERE_DIR = Path(__file__).parent
-# 게이트 엔진은 저장소 루트의 .claude/skills/_stepgate/ 에 있다.
+# 게이트 엔진 — 저장소 루트의 .claude/skills/_stepgate/ (프로젝트 폴더의 형제).
 STEPGATE_DIR = HERE_DIR.resolve().parent / ".claude" / "skills" / "_stepgate"
 
 KST = timezone(timedelta(hours=9))
@@ -62,6 +62,14 @@ BASE_SNAPSHOT = {
 }
 
 
+# ★ 2026-09-22: 주식 비율은 상수가 아니라 시그널의 `allocation` 판단이다. 테스트 기본값 = 최초 판단·전부 넣기(95%).
+def base_alloc(**over) -> dict:
+    a = {"based_on": None, "target_invested_pct": 95, "regime": "테스트 국면 — 벤치마크 20일 +1.0% · 상승 섹터 8/14",
+         "cash_reason": "없음", "cash_release_when": "", "reserved": [], "change": None}
+    a.update(over)
+    return a
+
+
 def base_signal(**over) -> dict:
     sig = {
         "schema_version": "1.0",
@@ -69,15 +77,19 @@ def base_signal(**over) -> dict:
         "market": "KR",
         "generated_at": now_iso(),
         "no_trade": False,
+        "allocation": base_alloc(),
         "proposals": [{
             "ticker": "000660", "name": "SK하이닉스", "action": "BUY",
             "weight_target_pct": 5.0, "thesis": "테스트용 근거 문장.",
-            "confidence": 0.7,
+            "confidence": 0.7, "size_why": "테스트 — 기대 +15% · 손절 -7%",
             "evidence": [{"claim": "x", "source_url": "https://example.com",
                           "tier": "T1", "verdict": "MATCH"}],
         }],
     }
     sig.update(over)
+    for p in sig.get("proposals") or []:
+        if isinstance(p, dict) and p.get("action") == "BUY":
+            p.setdefault("size_why", "테스트 — 기대 +15% · 손절 -7%")
     return sig
 
 
@@ -85,7 +97,7 @@ def run_case(name: str, *, signal, snapshot=None, kill=False,
              limits_patch=None, expect_orders=None, expect_exit=None,
              expect_reject_contains=None, extra_snapshots=None,
              extra_theses=None, extra_map=None, expect_order_reason_contains=None,
-             expect_approved=None):
+             expect_approved=None, extra_calendar=None):
     """케이스 하나를 임시 폴더에서 실행하고 결과를 검증한다."""
     tmp = Path(tempfile.mkdtemp(prefix="rgtest_"))
     try:
@@ -111,7 +123,7 @@ def run_case(name: str, *, signal, snapshot=None, kill=False,
 
         # 모듈 전역 경로를 임시 폴더로 갈아끼운다.
         saved = (rg.LIMITS_PATH, rg.WATCHLIST_PATH, rg.KILL_PATH, rg.SIGNALS_DIR,
-                 rg.PEAKS_PATH, rg.DATA_DIR, rg.JOURNAL_DIR)
+                 rg.PEAKS_PATH, rg.DATA_DIR, rg.JOURNAL_DIR, rg.CALENDAR_PATH)
         rg.LIMITS_PATH = cfg / "limits.json"
         rg.WATCHLIST_PATH = cfg / "watchlist.json"
         rg.KILL_PATH = cfg / "KILL"
@@ -126,10 +138,19 @@ def run_case(name: str, *, signal, snapshot=None, kill=False,
         rg.JOURNAL_DIR = tmp / "journal"
         rg.DATA_DIR.mkdir(exist_ok=True)
         rg.JOURNAL_DIR.mkdir(exist_ok=True)
+        import allocation as _al
+        _saved_al = _al.JOURNAL_DIR
+        _al.JOURNAL_DIR = rg.JOURNAL_DIR                 # 배분 원장도 격리(2026-09-22)
         for _fname, src in (("theses.json", extra_theses), ("market_map.json", extra_map)):
             if src is not None:
                 (rg.JOURNAL_DIR / _fname).write_text(json.dumps(src, ensure_ascii=False),
                                                      encoding="utf-8")
+        # ★ 달력도 격리한다 — 안 갈면 실제 `journal/calendar.json`이 새어 들어와 그날 일정에 따라
+        #   이벤트 계수(0.75)가 붙었다 떨어진다(2026-09-21 발견). 없으면 halve_window가 (False, "")다.
+        rg.CALENDAR_PATH = rg.JOURNAL_DIR / "calendar.json"
+        if extra_calendar is not None:
+            rg.CALENDAR_PATH.write_text(json.dumps({"schema_version": "1.0", "events": extra_calendar},
+                                                   ensure_ascii=False), encoding="utf-8")
         for fname, body in (extra_snapshots or {}).items():
             (rg.DATA_DIR / fname).write_text(json.dumps(body, ensure_ascii=False),
                                              encoding="utf-8")
@@ -143,8 +164,9 @@ def run_case(name: str, *, signal, snapshot=None, kill=False,
         except rg.Rejection as e:
             code, orders, rejected, approved = 2, [], [{"why": str(e)}], {}
         finally:
-                (rg.LIMITS_PATH, rg.WATCHLIST_PATH, rg.KILL_PATH, rg.SIGNALS_DIR,
-             rg.PEAKS_PATH, rg.DATA_DIR, rg.JOURNAL_DIR) = saved
+            (rg.LIMITS_PATH, rg.WATCHLIST_PATH, rg.KILL_PATH, rg.SIGNALS_DIR,
+             rg.PEAKS_PATH, rg.DATA_DIR, rg.JOURNAL_DIR, rg.CALENDAR_PATH) = saved
+            _al.JOURNAL_DIR = _saved_al
 
         problems = []
         if expect_orders is not None and len(orders) != expect_orders:
@@ -182,12 +204,21 @@ run_case("② 유니버스 밖 티커 → 주문 0",
              "evidence": [{"claim": "x", "tier": "T1", "verdict": "MATCH"}]}]),
          expect_orders=0, expect_reject_contains="유니버스 밖")
 
-run_case("③ 종목당 비중 상한 초과 → 주문 0",
+# ★ 2026-09-22: 종목당 상한(12%)은 지웠다 — 집중은 **명분이 붙어야 하는 선**(20%)이다. 명분 없으면 그 제안만 거부.
+run_case("③ 집중 공개선(종목 20%) 초과 + 명분 없음 → 주문 0",
          signal=base_signal(proposals=[dict(
              ticker="000660", name="SK하이닉스", action="BUY",
              weight_target_pct=50.0, thesis="몰빵.", confidence=0.9,
              evidence=[{"claim": "x", "tier": "T1", "verdict": "MATCH"}])]),
-         limits_patch=STRICT, expect_orders=0, expect_reject_contains="종목당 상한")
+         limits_patch=ROOMY, expect_orders=0, expect_reject_contains="집중 명분 없음")
+run_case("③-b 집중 공개선 초과 + concentration_why 있음 → 승인",
+         signal=base_signal(proposals=[dict(
+             ticker="000660", name="SK하이닉스", action="BUY",
+             weight_target_pct=50.0, thesis="몰빵.", confidence=0.9,
+             concentration_why="축 선두 · 기대 +30% · 손절 -8%로 손실 상한",
+             evidence=[{"claim": "x", "tier": "T1", "verdict": "MATCH"}])]),
+         limits_patch={**ROOMY, "daily_max_order_pct_of_equity": None},
+         expect_orders=1)
 
 run_case("④ KILL 파일 존재 → 주문 0",
          signal=base_signal(), kill=True, expect_orders=0, expect_exit=0)
@@ -281,18 +312,27 @@ run_case("⑲ 손절 OFF여도 무결성은 유지 — 유니버스 밖은 여�
              "evidence": [{"claim": "x", "tier": "T1", "verdict": "MATCH"}]}]),
          expect_orders=0, expect_reject_contains="유니버스 밖")
 
-run_case("⑳ 일일 주문금액 상한이 실질 브레이크로 작동",
+def _expect_cash_bound(approved, problems):
+    """(2026-09-23) 일일 상한은 폐지됐다 — 남은 천장은 **이 시장 현금 − 판단된 예약**뿐이다.
+    현금 1,000만·주가 18만 → 55주가 아니라 현금이 허용하는 만큼(≤55) 나가고, 상한 사유는 없어야 한다."""
+    buys = [o for o in (approved.get("orders") or []) if o["action"] == "BUY"]
+    blob = json.dumps(approved, ensure_ascii=False)
+    if len(buys) != 1 or not (40 <= buys[0]["qty"] <= 56):
+        problems.append(f"현금 안에서 사야 한다(40~56주) — {[(o['ticker'], o['qty']) for o in buys]}")
+    if any(o.get("capped_by") for o in buys) or "일일 주문금액 상한" in blob or "일일 주문 건수" in blob:
+        problems.append("일일 상한이 아직 살아 있다")
+
+
+run_case("⑳ 일일 상한 폐지 — 남은 천장은 이 시장 현금뿐(2026-09-23 사용자)",
          signal=base_signal(proposals=[dict(
              ticker="000660", name="SK하이닉스", action="BUY",
              weight_target_pct=90.0, thesis="크게 사기.", confidence=0.9,
+             concentration_why="테스트 — 현금 천장만 본다",
              evidence=[{"claim": "x", "tier": "T1", "verdict": "MATCH"}])]),
-         # 검사 대상만 남기고 나머지 상한은 끈다 — 안 그러면 종목당 상한·투자 비중 상한이
-         # 먼저 걸려서 "일일 금액 상한이 작동한다"를 검증하지 못한다(2026-09-08에 실제로
-         # per_position_max_pct를 12%로 넣자 이 테스트가 그 사유로 깨졌다).
-         limits_patch={"daily_max_order_amount": {"KRW": 300000},
-                       "daily_max_order_pct_of_equity": None,
-                       "per_position_max_pct": None, "max_invested_pct": None},
-         expect_orders=0, expect_reject_contains="일일 주문금액 상한")
+         limits_patch={"daily_max_order_amount": {"KRW": 300000},   # 남아 있어도 무시돼야 한다
+                       "daily_max_order_pct_of_equity": 1.0,
+                       "min_proposals_below_target": None, "min_distinct_axes_below_target": None},
+         expect_orders=1, expect_approved=_expect_cash_bound)
 
 # ============ 일일 상한 누적 (B2) — 하루 두 번 돌아도 한도는 하루치 ============
 
@@ -782,31 +822,22 @@ def test_new_caps():
         return [{"ticker": f"00000{i}", "action": "BUY", "qty": 1, "price": price,
                  "source": "llm"} for i in range(n)]
 
-    # 비율 상한: 자산 1,000만의 20% = 200만
-    lim = {"daily_max_order_pct_of_equity": 20.0, "daily_max_orders": None,
-           "portfolio_daily_loss_halt_pct": None, "cash_floor_pct": None}
+    # (2026-09-23) 일일 상한은 폐지됐다 — 키가 남아 있어도 무시되고, 남은 천장은 이 시장 현금이다.
+    lim = {"daily_max_order_pct_of_equity": 20.0, "daily_max_order_amount": {"KRW": 1_000_000},
+           "daily_max_orders": 1, "portfolio_daily_loss_halt_pct": None}
     final, rej = rg.apply_run_limits(buys(3, 900_000), lim, balance, 0.0, "XX")
-    if len(final) != 2:
-        problems.append(f"비율 상한: 승인 {len(final)}건 (기대 2 — 90만×2=180만 ≤ 200만)")
-    if not any("일일 주문금액 상한" in r["why"] for r in rej):
-        problems.append(f"비율 상한 거부 사유가 없다: {[r['why'][:40] for r in rej]}")
+    if len(final) != 3:
+        problems.append(f"상한을 폐지했는데 {len(final)}건만 통과(기대 3 — 현금 1,000만 안 270만)")
+    if any("일일" in r["why"] for r in rej):
+        problems.append(f"일일 상한 거부가 아직 나온다: {[r['why'][:40] for r in rej]}")
 
-    # 절대 금액과 함께 있으면 더 엄한 쪽
-    lim2 = dict(lim, daily_max_order_amount={"KRW": 1_000_000})
-    final2, _ = rg.apply_run_limits(buys(3, 900_000), lim2, balance, 0.0, "XX")
-    if len(final2) != 1:
-        problems.append(f"둘 다 있을 때 엄한 쪽을 안 썼다: 승인 {len(final2)}건 (기대 1)")
-
-    # 투자 비중 상한: 이미 60% 보유, 상한 70% → 10%(100만)까지만
+    # (2026-09-22) 투자 비중 상한 70%는 지웠다 — 비율은 allocation 판단이 정한다. 이미 60% 보유여도 현금 안에서 산다.
     held = {"currency": "KRW", "cash": 4_000_000,
             "positions": [{"ticker": "005930", "eval_amt": 6_000_000, "qty": 1}]}
-    lim3 = {"max_invested_pct": 70.0, "daily_max_orders": None,
-            "portfolio_daily_loss_halt_pct": None, "cash_floor_pct": None}
+    lim3 = {"daily_max_orders": None, "portfolio_daily_loss_halt_pct": None}
     final3, rej3 = rg.apply_run_limits(buys(3, 800_000), lim3, held, 0.0, "XX")
-    if len(final3) != 1:
-        problems.append(f"투자 비중 상한: 승인 {len(final3)}건 (기대 1 — 600만+80만=68% ≤ 70%)")
-    if not any("투자 비중 상한" in r["why"] for r in rej3):
-        problems.append(f"투자 비중 거부 사유가 없다: {[r['why'][:40] for r in rej3]}")
+    if len(final3) != 3:
+        problems.append(f"투자 비중 상한이 사라졌는데 {len(final3)}건만 통과 (기대 3 — 현금 400만 안)")
 
     # 상한이 없으면(=null) 통과해야 한다 — 껐다 켜는 프로필이 깨지지 않게
     lim4 = {"daily_max_orders": None, "portfolio_daily_loss_halt_pct": None,
@@ -816,8 +847,8 @@ def test_new_caps():
         problems.append(f"상한 전부 null인데 {len(final4)}건만 통과")
 
     status = FAIL if problems else PASS
-    results.append((status, "㉚ 비율 일일상한 + 투자비중 상한", "; ".join(problems)))
-    print(f"[{status}] ㉚ 비율 일일상한 + 투자비중 상한"
+    results.append((status, "㉚ 일일 상한·투자비중 상한 폐지 — 남은 천장은 현금", "; ".join(problems)))
+    print(f"[{status}] ㉚ 일일 상한·투자비중 상한 폐지 — 남은 천장은 현금"
           + (f" — {'; '.join(problems)}" if problems else ""))
 
 
@@ -945,10 +976,7 @@ def test_no_trade_streak():
             if ra.consecutive_no_trade("kr") != 2:
                 problems.append("kr 집계가 us 행에 오염됐다")
 
-            # 한도가 실제 limits.json에 있어야 이 카운터가 쓸모를 갖는다
-            lim = json.loads((Path(ra.HERE) / "config" / "limits.json").read_text(encoding="utf-8"))
-            if lim.get("no_trade_max_consecutive_below_floor") is None:
-                problems.append("limits.json에 no_trade_max_consecutive_below_floor가 없다")
+            # (2026-09-22) 연속 기권 상한은 지웠다 — 기권은 allocation의 현금 명분과 gap 채우기가 판정한다. 카운터는 기록용.
         finally:
             ra.RUN_LOG = orig
 
@@ -1265,6 +1293,10 @@ def test_sessions_ledger():
     problems = []
     import sessions as ss
     from datetime import date as _date
+    if not any((HERE_DIR / "analysis").glob("분석노트_*.md")):  # 공개본: 실제 run 산출물 없음
+        results.append((PASS, "㊳ 일과 원장(반쪽 run·슬롯) 역산", "건너뜀 — 실제 run 산출물이 있을 때만 검사"))
+        print("[SKIP] ㊳ 일과 원장(반쪽 run·슬롯) 역산 — 실제 run 산출물이 있을 때만 검사")
+        return
 
     # 도달은 **최댓값**이어야 한다 — 첫 공백에서 멈추면 6단 분리 이전 run이 전부
     # "1단에서 끊김"으로 나온다(그때는 2단 산출물이 규격에 없었을 뿐이다).
@@ -1276,17 +1308,16 @@ def test_sessions_ledger():
         problems.append(f"최근 {span}일에서 세션 행을 하나도 못 만들었다")
     if any(r["market"] not in ("kr", "us") for r in rows):
         problems.append("시장 값이 이상하다")
-    if any(_date.fromisoformat(r["session_date"]).weekday() >= 5 for r in rows):
-        problems.append("주말을 세션으로 셌다")
+    # 스탬프가 주말이어도 거래소 기준일(session_date)은 평일이어야 한다(US 260919 = ET 09-18).
+    if any(r.get("off_session") for r in rows):
+        problems.append("주말·휴장을 세션으로 셌다: " + str([(r["stamp"], r["market"]) for r in rows if r.get("off_session")]))
 
-    # 실측 고정: 미국 9/8·9/9는 결정까지 못 갔다(반쪽 run) — 실제 run 산출물이 있을 때만 검사한다.
-    # 공개본의 빈 트리에서는 모든 세션이 "0 없음"이라 역산할 대상이 없다.
-    if any(r["reached"] != "0 없음" for r in rows):
-        half = {(r["session_date"], r["market"]) for r in rows if not r["complete"]
-                and r["reached"] != "0 없음"}
-        for want in (("2026-09-08", "us"), ("2026-09-09", "us")):
-            if want not in half:
-                problems.append(f"{want}를 반쪽 run으로 잡지 못했다 — {sorted(half)}")
+    # 실측 고정: 미국 9/8·9/9는 결정까지 못 갔다(반쪽 run)
+    half = {(r["session_date"], r["market"]) for r in rows if not r["complete"]
+            and r["reached"] != "0 없음"}
+    for want in (("2026-09-08", "us"), ("2026-09-09", "us")):
+        if want not in half:
+            problems.append(f"{want}를 반쪽 run으로 잡지 못했다 — {sorted(half)}")
 
     # 미국 슬롯은 **같은 날짜** 22:35 KST다(22:35 KST = 09:35 EDT).
     # 하루를 빼면 모든 미국 세션이 하루치 이탈로 잘못 찍힌다.
@@ -1403,7 +1434,7 @@ def test_audit_sees_md_deliverables():
         "/x/y/_trade-run_SKILL_backup_260910.md",               # 백업
         "/private/tmp/claude-501/w/scratchpad/note.md",         # 스크래치
         "/x/ai-trading-bot/_raw_sources/기사.md",                # fetch 원문
-        "/home/u/.claude/projects/x/memory/foo.md",             # 메모리
+        "/home/user/.claude/projects/x/memory/foo.md",          # 메모리
         "/x/y/state.json",                                      # 상태 파일
     ]
     for fp in include:
@@ -1732,7 +1763,7 @@ def test_generator_matches_checker():
     sys.path.insert(0, str(STEPGATE_DIR))
     import stage
     import stepgate as sg
-    rub = STEPGATE_DIR / "rubrics" / "trade-run.json"
+    rub = (STEPGATE_DIR / "rubrics" / "trade-run.json")
     rb = _json.loads(rub.read_text(encoding="utf-8"))
 
     # 생성물만으로 통과해야 하는 기준 — 2026-09-11 측정. 줄어들면 계약이 깨진 것이다.
@@ -1935,91 +1966,70 @@ run_case("㊻-b 현금으로 1주도 못 사면(회전 꺼짐) 그때만 「자�
          extra_snapshots={"snapshot_260911_us.json": _US_RICH},
          expect_orders=0, expect_reject_contains="자금 배분")
 
-# ㊼ 축 집중 상한 — 넘을 때만 깎는다(항상 깎으면 상한이 아니다)
-run_case("㊼ 축 상한 도달 시 거부(양 시장 합산)",
+# ㊼ 축 집중 — 상한(25%)은 지웠다(2026-09-22). 공개선(40%)을 넘기면 명분이 있어야 한다.
+run_case("㊼ 축 공개선(40%) 초과 + 명분 없음 → 그 제안만 거부(양 시장 합산)",
          signal=base_signal(),
          snapshot=_mk_snap("kr", 10_000_000, [{"market": "KR", "ticker": "005930",
              "name": "삼성전자", "qty": 500, "avg_price": 70000, "price": 71000,
              "eval_amt": 60_000_000, "pnl_pct": 1.43}]),
-         limits_patch={**ROOMY, "axis_max_pct": 25.0,
-                       "reserve_for_other_market_pct": None},
+         limits_patch={**ROOMY, "concentration_disclose_pct": {"position": 50.0, "axis": 25.0}},
          extra_snapshots={"snapshot_260911_us.json": _US_RICH},
          extra_map=_AXIS_MAP,
-         expect_orders=0, expect_reject_contains="축 집중 상한")
+         expect_orders=0, expect_reject_contains="집중 명분 없음")
 
-run_case("㊽ 축 여유가 있으면 깎지 않는다",
+run_case("㊽ 축 여유가 있으면 명분 없이도 산다",
          signal=base_signal(),
          snapshot=_mk_snap("kr", 30_000_000, []),
-         limits_patch={**ROOMY, "axis_max_pct": 25.0,
-                       "reserve_for_other_market_pct": None},
+         limits_patch={**ROOMY, "concentration_disclose_pct": {"position": 20.0, "axis": 40.0}},
          extra_snapshots={"snapshot_260911_us.json": _US_RICH},
          extra_map=_AXIS_MAP,
          expect_orders=1)
 
 
-def test_other_market_reserve():
-    """㊾ 반대편 예약 — 천장을 낮추고, armed 0건이면 0이다.
-
-    ★ 이 케이스가 잡는 것: 처음 구현은 '현금 잔액 - 주문 < 예약'으로 검사해서
-    일일 주문 상한에 가려 **한 번도 발화할 수 없었다**. 리더가 있어도 닿지 않으면
-    장식 키와 같다 — 그래서 '막았는가'를 직접 센다.
-    """
+def test_judged_reserve():
+    """㊾ 예약은 상수가 아니라 **판단**이다(2026-09-22) — `allocation.reserved`(없으면 논지 원장 기본값)만큼 이 시장 현금에서 뺀다."""
+    import allocation as al
     problems = []
-    saved = (rg.DATA_DIR, rg.JOURNAL_DIR, rg.portfolio_equity)
+    saved = (rg.DATA_DIR, rg.JOURNAL_DIR, al.JOURNAL_DIR)
     tmp = Path(tempfile.mkdtemp(prefix="rgres_"))
     try:
-        rg.DATA_DIR = tmp / "data"; rg.JOURNAL_DIR = tmp / "journal"
+        rg.DATA_DIR = tmp / "data"; rg.JOURNAL_DIR = tmp / "journal"; al.JOURNAL_DIR = rg.JOURNAL_DIR
         rg.DATA_DIR.mkdir(); rg.JOURNAL_DIR.mkdir()
         (rg.JOURNAL_DIR / "theses.json").write_text(json.dumps({"theses": [
-            {"id": "us-a", "market": "US", "status": "armed", "ticker": "AAPL"},
-            {"id": "us-b", "market": "US", "status": "armed", "ticker": "MSFT"},
-            {"id": "kr-c", "market": "KR", "status": "held", "ticker": "005930"}]}),
-            encoding="utf-8")
-        limits = json.loads(rg.LIMITS_PATH.read_text(encoding="utf-8"))
-        limits.update({"max_invested_pct": 70.0, "per_position_max_pct": 12.0,
-                       "reserve_for_other_market_pct": 15.0, "axis_max_pct": None,
-                       "daily_max_order_amount": {"KRW": 10 ** 9},
-                       "daily_max_order_pct_of_equity": None, "daily_max_orders": None})
-        # 투자 52% 상태 — 천장 70%면 통과, 예약 15%p를 뺀 55%면 거부여야 한다
-        rg.portfolio_equity = lambda m, b: {
-            "krw": 1e8, "cash_krw": 4.8e7, "invested_krw": 5.2e7, "ok": True,
-            "asof": "test", "fx": 1300.0, "parts": {}, "why": "테스트"}
-        bal = {"cash": 48_000_000, "currency": "KRW",
-               "positions": [{"ticker": "042660", "qty": 52, "eval_amt": 52_000_000}]}
-        order = [{"ticker": "000660", "action": "BUY", "qty": 100, "price": 40_000}]
-
-        f_on, r_on = rg.apply_run_limits([dict(order[0])], limits, bal, 0.0, "KR")
-        f_off, r_off = rg.apply_run_limits(
-            [dict(order[0])], {**limits, "reserve_for_other_market_pct": None},
-            bal, 0.0, "KR")
-        if f_on:
-            problems.append("예약을 켰는데 천장이 낮아지지 않아 주문이 통과했다")
-        elif "예약" not in (r_on[0]["why"] if r_on else ""):
-            problems.append(f"거부 사유에 예약이 안 적혔다: {r_on[0]['why'] if r_on else '거부 없음'}")
-        if not f_off:
-            problems.append(f"예약을 껐는데도 막혔다 — 다른 한도가 원인이다: "
-                            f"{r_off[0]['why'] if r_off else '?'}")
-
-        # armed 0건 → 예약 0
-        (rg.JOURNAL_DIR / "theses.json").write_text(
-            json.dumps({"theses": [{"id": "kr-c", "market": "KR", "status": "held"}]}),
-            encoding="utf-8")
-        amt, why, _ = rg.other_market_reserve(limits, "KR", 1e8)
-        if amt != 0:
-            problems.append(f"반대편 armed 0건인데 예약 {amt:,.0f}")
-        f2, _ = rg.apply_run_limits([dict(order[0])], limits, bal, 0.0, "KR")
-        if not f2:
-            problems.append("armed 0건인데도 예약 때문에 막혔다")
+            {"id": "kr-a", "market": "KR", "status": "armed", "ticker": "042660",
+             "entry_triggers": [{"id": "e1", "check": "price <= 1", "size_pct": 4.0}]},
+            {"id": "kr-c", "market": "KR", "status": "held", "ticker": "005930"}]}), encoding="utf-8")
+        bal = {"cash": 1_000_000, "currency": "KRW", "positions": [{"ticker": "005930", "qty": 10, "eval_amt": 9_000_000, "price": 900_000}]}
+        # 기본값: armed kr-a 다음 칸 4% × 자산(1,000만) = 40만 예약 → 쓸 수 있는 현금 60만
+        ctx, out = rg.allocation_context({"allocation": base_alloc()}, "KR", bal)
+        if round(ctx["reserved_here"]) != 400_000 or round(ctx["deployable"]) != 600_000:
+            problems.append(f"논지 원장 기본 예약 — reserved {ctx['reserved_here']:,.0f} deployable {ctx['deployable']:,.0f} (기대 40만/60만)")
+        # 모델이 덮어쓰면 그 값
+        ctx2, _ = rg.allocation_context({"allocation": base_alloc(reserved=[{"thesis_id": "kr-a", "market": "KR", "amount": 100_000, "why": "e1 한 칸만"}])}, "KR", bal)
+        if round(ctx2["reserved_here"]) != 100_000:
+            problems.append(f"판단 예약 덮어쓰기 실패 — {ctx2['reserved_here']:,.0f}")
+        # 예약이 현금을 넘으면 deployable 0 → 자금 배분 거부(1주도 못 산다)
+        order = [{"ticker": "000660", "action": "BUY", "qty": 10, "price": 100_000, "source": "llm"}]
+        ctx3 = {"reserved_here": 1_000_000, "need": 0, "gap_amt": 0, "deployable": 0}
+        f3, r3 = rg.apply_run_limits([dict(order[0])], {"daily_max_orders": None, "portfolio_daily_loss_halt_pct": None,
+                                                        "funding_max_per_run": 0}, bal, 0.0, "KR", ctx3)
+        if f3 or not any("자금 배분" in r["why"] for r in r3):
+            problems.append(f"예약이 현금 전부면 매수가 거부돼야 한다 — {[o['qty'] for o in f3]} {[r['why'][:40] for r in r3]}")
+        # 예약 0이면 현금 안에서 산다
+        f4, _ = rg.apply_run_limits([dict(order[0])], {"daily_max_orders": None, "portfolio_daily_loss_halt_pct": None,
+                                                       "funding_max_per_run": 0}, bal, 0.0, "KR", {"reserved_here": 0})
+        if not f4 or f4[0]["qty"] != 10:
+            problems.append(f"예약 0인데 현금(100만) 안 10주가 안 나갔다 — {[o['qty'] for o in f4]}")
     finally:
-        rg.DATA_DIR, rg.JOURNAL_DIR, rg.portfolio_equity = saved
+        rg.DATA_DIR, rg.JOURNAL_DIR, al.JOURNAL_DIR = saved
         shutil.rmtree(tmp, ignore_errors=True)
     status = FAIL if problems else PASS
-    results.append((status, "㊾ 반대편 예약이 천장을 낮춘다 · armed 0건이면 0", "; ".join(problems)))
-    print(f"[{status}] ㊾ 반대편 예약이 천장을 낮춘다 · armed 0건이면 0"
+    results.append((status, "㊾ 판단된 예약 — 논지 원장 기본값·덮어쓰기·현금 차감", "; ".join(problems)))
+    print(f"[{status}] ㊾ 판단된 예약 — 논지 원장 기본값·덮어쓰기·현금 차감"
           + (f" — {'; '.join(problems)}" if problems else ""))
 
 
-test_other_market_reserve()
+test_judged_reserve()
 
 
 # ============== 두 시장을 하나의 run 흐름으로 (D2~D6) ==============
@@ -2297,14 +2307,12 @@ def test_leverage_rules():
     # 종목당 상한/배수 — 12% 상한이면 3배 ETF 목표 5%는 4%로 깎여야 한다(거부가 아니라)
     import io as _io, contextlib as _ctx
     lim = json.loads(rg.LIMITS_PATH.read_text(encoding="utf-8"))
-    lim.update({"per_position_max_pct": 12.0, "leveraged_cap_divide_by_factor": True, "axis_max_pct": None,
-                "reserve_for_other_market_pct": None, "target_invested_pct": None, "min_invested_pct": None})
-    # 이벤트 계수를 끈다 — 이 케이스는 배수 나눔만 잰다(달력에 따라 0.75가 붙으면 30주가 된다)
-    lim["position_sizing"] = {**lim.get("position_sizing", {}), "halve_if_dated_event_within_days": 0}
+    lim.update({"leveraged_cap_divide_by_factor": True})
     wl = {"US": [{"ticker": "SOXL", "name": "Direxion Daily Semiconductor Bull 3X Shares", "excd": "AMEX"}]}
     bal = {"cash": 100_000, "currency": "USD", "positions": [], "exchange_rate": 1300.0}
     sig = {"market": "US", "proposals": [{"ticker": "SOXL", "name": "Direxion Daily Semiconductor Bull 3X Shares",
-                                          "action": "BUY", "weight_target_pct": 5.0, "confidence": 0.7, "excd": "AMEX"}]}
+                                          "action": "BUY", "weight_target_pct": 5.0, "confidence": 0.7, "excd": "AMEX",
+                                          "size_why": "테스트"}]}
     saved_pe = rg.portfolio_equity
     rg.portfolio_equity = lambda m, b: {"krw": 1.3e8, "cash_krw": 1.3e8, "invested_krw": 0.0, "ok": True,
                                         "asof": "t", "fx": 1300.0, "parts": {}, "why": "t"}
@@ -2316,9 +2324,9 @@ def test_leverage_rules():
             problems.append(f"3배 ETF 5% 제안이 승인되지 않았다: {rej}")
         else:
             q = acc[0]["qty"]
-            # 100,000 × 4% = 4,000 → 40주. 5%면 50주 — 깎였는지
-            if not (35 <= q <= 41):
-                problems.append(f"상한을 배수로 안 나눴다 — qty {q} (기대 ≈40 = 4%)")
+            # (2026-09-22) 상한 대신 **증분을 배수로 나눈다** — 5%/3 = 1.67% × 100,000 = 1,667 → 16주(5%면 50주)
+            if not (15 <= q <= 17):
+                problems.append(f"증분을 배수로 안 나눴다 — qty {q} (기대 ≈16 = 5%/3)")
         if "배수로 나눔" not in buf.getvalue():
             problems.append("상한을 나눈 사실이 사유에 안 적힌다")
     finally:
@@ -2600,11 +2608,11 @@ def test_fill_state_machine():
         t0 = _dt(2026, 9, 16, 0, 23, tzinfo=KST)          # 미국 정규장(EDT) 안
 
         # ① 체결
-        rec = _fill_record("US", "VST", 30, 141.72, "0000000001", t0.isoformat())
+        rec = _fill_record("US", "VST", 30, 141.72, "0000041127", t0.isoformat())
         f1 = tdp / "trades_260916_us.json"; f1.write_text(json.dumps(rec), encoding="utf-8")
         note = tdp / "분석노트_260915_us_v1_0.md"
         note.write_text("## §10 한계\n\nx\n\n## §11 집행 결과\n\n| a |\n\n<!-- ✓ §11-집행 -->\n\n## §12 출처\n", encoding="utf-8")
-        cli = _FakeFillClient({"0000000001": [
+        cli = _FakeFillClient({"0000041127": [
             {"ord_qty": 30, "filled_qty": 0, "remain_qty": 30, "avg_price": 0.0},
             {"ord_qty": 30, "filled_qty": 30, "remain_qty": 0, "avg_price": 141.66}]})
         now_fn, sleep_fn, st = clock(t0 + _td(seconds=5))
@@ -2629,9 +2637,9 @@ def test_fill_state_machine():
 
         # ② 정정 — KR 10주 @84,500 승인(845,000). 현재가 84,700 → 정정가 84,700, 수량 845,000//84,700 = 9
         t1 = _dt(2026, 9, 16, 10, 40, tzinfo=KST)
-        rec = _fill_record("KR", "042660", 10, 84500, "0000000002", t1.isoformat())
+        rec = _fill_record("KR", "042660", 10, 84500, "0000020259", t1.isoformat())
         f2 = tdp / "trades_260916_kr.json"; f2.write_text(json.dumps(rec), encoding="utf-8")
-        cli = _FakeFillClient({"0000000002": [
+        cli = _FakeFillClient({"0000020259": [
             {"ord_qty": 10, "filled_qty": 0, "remain_qty": 10, "avg_price": 0.0}]}, live=84700)
         now_fn, sleep_fn, st = clock(t1 + _td(seconds=100))
         rc = fill.confirm(f2, client=cli, cfg=cfg, now_fn=now_fn, sleep_fn=sleep_fn, quiet=True)
@@ -2848,17 +2856,18 @@ run_case("(59)-e 유효성 거부(유니버스 밖)는 안 세고 한도 거부�
          extra_map=_AXIS_MAP,
          # 999999는 유니버스 밖(안 셈) · 000660 승인 · 005930은 상한 거부(셈) → 2건이지만 같은 축 → short
          expect_approved=_deficit_expect(True))
-run_case("(59)-f 목표 이상이면 검사 꺼짐",
-         signal=base_signal(),
+run_case("(59)-f 판단 목표 이상이면 검사 꺼짐",
+         signal=base_signal(allocation=base_alloc(target_invested_pct=80, cash_reason="하락장 — KOSPI 60일선 아래 -3.1%",
+                                                  cash_release_when="KOSPI 60일선 회복")),
          snapshot=_mk_snap("kr", 1_000_000, [{"market": "KR", "ticker": "005930", "name": "삼성전자",
                                               "qty": 100, "avg_price": 70000, "price": 71000,
                                               "eval_amt": 7_100_000, "pnl_pct": 1.43}]),
          limits_patch=_DEF_LIMITS, extra_map=_AXIS_MAP,
          expect_approved=_deficit_expect(False))
-run_case("(59)-g limits에 min_proposals_below_target가 없으면 검사 꺼짐",
+run_case("(59)-g 건수·축 요구가 없으면 gap 커버만 본다(키워서 채우면 short 아님)",
          signal=base_signal(), snapshot=_mk_snap("kr", 10_000_000, []),
-         limits_patch={**_DEF_LIMITS, "min_proposals_below_target": None}, extra_map=_AXIS_MAP,
-         expect_approved=_deficit_expect(False))
+         limits_patch={**_DEF_LIMITS, "min_proposals_below_target": None, "min_distinct_axes_below_target": None},
+         extra_map=_AXIS_MAP, expect_approved=_deficit_expect(False))
 
 
 def test_deficit_gate_wiring():
@@ -2900,11 +2909,12 @@ test_deficit_gate_wiring()
 
 _HELD_005930 = [{"market": "KR", "ticker": "005930", "name": "삼성전자", "qty": 10,
                  "avg_price": 70000, "price": 71000, "eval_amt": 710_000, "pnl_pct": 1.43}]
+# (2026-09-22) 상수 예약(25%)은 지웠다 — 예약은 armed 논지의 **다음 칸**(size_pct 25% × KR 자산 1.71M = 427,500)이 기본값이다.
 _ARMED_OTHER = {"theses": [{"id": "a1", "market": "KR", "ticker": "035420", "status": "armed",
-                            "created": "2026-09-10"}]}
-_FUND_LIMITS = {**ROOMY, "axis_max_pct": None, "reserve_for_other_market_pct": None,
-                "scenario_reserve_pct_of_market": 25.0, "funding_min_fill_ratio": 0.5,
-                "funding_max_per_run": 1, "min_proposals_below_target": None}
+                            "created": "2026-09-10",
+                            "entry_triggers": [{"id": "e1", "check": "price <= 1", "size_pct": 25.0}]}]}
+_FUND_LIMITS = {**ROOMY, "funding_min_fill_ratio": 0.5,
+                "funding_max_per_run": 1, "min_proposals_below_target": None, "min_distinct_axes_below_target": None}
 
 
 def _expect_funding(approved, problems):
@@ -2923,7 +2933,7 @@ def _expect_funding(approved, problems):
     if "입금" in blob or "환전" in blob:
         problems.append("사유에 입금·환전 요구가 있다")
     if "예약" not in blob:
-        problems.append("같은 시장 대기 논지 예약 사유가 없다")
+        problems.append("판단된 예약(논지 원장 기본값) 기록이 없다")
 
 
 run_case("(60)-a 현금 부족 → 대기 논지 몫 예약 → 최대 보유 회전 매도로 메운다(입금 요구 0)",
@@ -2939,7 +2949,7 @@ def _expect_no_funding_shaved(approved, problems):
         problems.append("funding_max_per_run 0인데 회전 매도가 나왔다")
     buys = [o for o in orders if o["action"] == "BUY"]
     if not buys or buys[0]["qty"] != 3:
-        problems.append(f"예약 뒤 현금(573,000)으로 3주 기대 — {[(o['ticker'], o['qty']) for o in buys]}")
+        problems.append(f"예약(427,500) 뒤 현금 572,500으로 3주 기대 — {[(o['ticker'], o['qty']) for o in buys]}")
 
 
 run_case("(60)-b 회전 꺼짐(funding_max_per_run 0) → 예약 뒤 현금만큼만 깎아서 산다",
@@ -3159,6 +3169,15 @@ def test_command_failures_fixed():
             problems.append("조·억 단위 허용이 너무 넓다")
         if ex._stamp_from(Path("signals/approved_260915_us.json")) != "260915":
             problems.append("execute 스탬프를 approved 파일명에서 못 딴다")
+        # 시장 선택 — 열린 시장, 둘 다 닫혔으면 다음에 열리는 시장(시각 창 없음)
+        from datetime import datetime as _dt
+        cases = [(_dt(2026, 9, 18, 13, 0, tzinfo=KST), "kr", True), (_dt(2026, 9, 18, 0, 30, tzinfo=KST), "us", True),
+                 (_dt(2026, 9, 18, 8, 0, tzinfo=KST), "kr", False), (_dt(2026, 9, 18, 17, 0, tzinfo=KST), "us", False),
+                 (_dt(2026, 9, 18, 15, 45, tzinfo=KST), "us", False)]
+        for when, want, want_open in cases:
+            m, is_open, _why = stage.pick_market(when)
+            if (m, is_open) != (want, want_open):
+                problems.append(f"pick_market({when:%m-%d %H:%M}) = {m}/{is_open}, 기대 {want}/{want_open}")
     status = FAIL if problems else PASS
     results.append((status, "(62) 실패한 명령 재발 방지 — batch·cycle·stamp·review·분모·refresh·표기·unsynced·verify", "; ".join(problems)))
     print(f"[{status}] (62) 실패한 명령 재발 방지 — batch·cycle·stamp·review·분모·refresh·표기·unsynced·verify"
@@ -3166,6 +3185,934 @@ def test_command_failures_fixed():
 
 
 test_command_failures_fixed()
+
+
+# ============ 같은 승인은 한 번만 · 승인 초과는 게이트가 센다 (2026-09-21) ============
+
+def _trow(tk, act, src, status="SENT", verdict="FILLED", ref="approved_X.json", filled=None, delta=None,
+          ts="2026-09-21T12:55:42+09:00", order_no="1", extra=None):
+    f = {"verdict": verdict, "qty_before": 0}
+    if filled is not None:
+        f["filled_qty"] = filled
+        f["confirmed_at"] = ts
+    if delta is not None:
+        f["delta"] = delta
+    r = {"ts": ts, "status": status, "market": "KR", "ticker": tk, "action": act, "source": src,
+         "qty": 46, "price": 85400, "result": {"order_no": order_no}, "fill": f}
+    if ref is not None:
+        r["approved_ref"] = ref
+    if extra:
+        r.update(extra)
+    return r
+
+
+def test_idempotent_send():
+    """(63)-a `execute.dedupe_against_day` — 같은 승인 파일명의 같은 건은 판정과 무관하게 건너뛴다."""
+    import execute as ex
+    problems = []
+    orders = [{"ticker": "034020", "action": "SELL", "source": "funding", "qty": 46, "price": 85500},
+              {"ticker": "373220", "action": "BUY", "source": "llm", "qty": 11, "price": 353000}]
+    prior = {"trades": [_trow("034020", "SELL", "funding")]}
+    to, dup, held = ex.dedupe_against_day(orders, prior, "approved_X.json")
+    if [o["ticker"] for o in to] != ["373220"] or [o["ticker"] for o in dup] != ["034020"] or held:
+        problems.append(f"같은 승인 재호출 — 보낼 {[o['ticker'] for o in to]} 건너뜀 {[o['ticker'] for o in dup]}")
+    to, dup, held = ex.dedupe_against_day(orders, prior, "approved_X_reissue.json")
+    if len(to) != 2 or dup or held:
+        problems.append("재발행 파일명은 통과해야 한다")
+    prior_open = {"trades": [_trow("034020", "SELL", "funding", verdict="UNFILLED", ref="approved_Y_stops_1300.json")]}
+    to, dup, held = ex.dedupe_against_day(orders, prior_open, "approved_Y_stops_1320.json")
+    if [o["ticker"] for o in held] != ["034020"] or len(to) != 1:
+        problems.append(f"열린 주문 위 같은 매도는 보류돼야 한다 — held {[o['ticker'] for o in held]}")
+    prior_failed = {"trades": [_trow("034020", "SELL", "funding", status="FAILED", verdict="REJECTED")]}
+    to, dup, held = ex.dedupe_against_day(orders, prior_failed, "approved_X.json")
+    if len(to) != 2:
+        problems.append("FAILED(나가지 않은 것)는 다시 보낼 수 있어야 한다")
+    prior_legacy = {"trades": [_trow("034020", "SELL", "funding", ref=None)]}
+    to, dup, held = ex.dedupe_against_day(orders, prior_legacy, "approved_anything.json")
+    if [o["ticker"] for o in dup] != ["034020"]:
+        problems.append("approved_ref 없는 옛 행은 보수적으로 같은 것으로 봐야 한다")
+    # 재발 경로 자체 — funding 전용 dedupe가 아니라 전 주문 dedupe여야 한다
+    src = (Path(__file__).parent / "execute.py").read_text(encoding="utf-8")
+    if "dedupe_against_day(orders" not in src or "approved_snapshot(approved)" not in src:
+        problems.append("execute.main이 dedupe_against_day·approved_snapshot을 쓰지 않는다")
+    status = FAIL if problems else PASS
+    results.append((status, "(63)-a 멱등 전송 — 같은 승인은 한 번만", "; ".join(problems)))
+    print(f"[{status}] (63)-a 멱등 전송 — 같은 승인은 한 번만" + (f" — {'; '.join(problems)}" if problems else ""))
+
+
+test_idempotent_send()
+
+
+def _rec_0921():
+    """2026-09-21 사고 모양 — 승인 [SELL 034020 46 · SELL 005930 4 · BUY 373220 11], 집행 SELL 034020 92."""
+    ao = [{"ticker": "034020", "action": "SELL", "source": "funding", "qty": 46, "price": 85500},
+          {"ticker": "005930", "action": "SELL", "source": "llm", "qty": 4, "price": 274000},
+          {"ticker": "373220", "action": "BUY", "source": "llm", "qty": 11, "price": 353000}]
+    run = {"generated_at": "x", "approved_ref": "signals/approved_260921_kr.json",
+           "approved_at": "2026-09-21T12:51:53+09:00", "approved_orders": ao}
+    return {"approved_ref": run["approved_ref"], "approved_at": run["approved_at"], "approved_orders": ao,
+            "runs": [dict(run), dict(run), {**run, "approved_ref": "/abs/path/signals/approved_260921_kr.json"}],
+            "trades": [
+                _trow("034020", "SELL", "funding", filled=46, order_no="25560"),
+                _trow("034020", "SELL", "funding", filled=46, order_no="26281", ts="2026-09-21T13:11:10+09:00",
+                      extra={"incident": "★ 중복 전송 — 손으로 쓴 서술"}),
+                _trow("005930", "SELL", "llm", filled=4, order_no="26290"),
+                _trow("373220", "BUY", "llm", filled=11, order_no="26291"),
+            ]}
+
+
+def test_reconcile():
+    """(63)-b `fill.reconcile` — 종목·방향별 승인 합 vs 집행 합."""
+    import fill
+    problems = []
+    r = fill.reconcile(_rec_0921())
+    if r["overfill"] != 1 or r["overfill_list"][0]["executed"] != 92 or r["overfill_list"][0]["approved"] != 46:
+        problems.append(f"승인 46/집행 92가 초과 1건으로 잡혀야 한다 — {r['overfill_list']}")
+    if r["sent_rows"] != 4 or r["refs"] != ["approved_260921_kr.json"] or not r["approved_known"]:
+        problems.append(f"sent_rows={r['sent_rows']} refs={r['refs']} known={r['approved_known']}")
+    # 즉시 판정 PARTIAL(delta만) · REJECTED · UNFILLED
+    rec = _rec_0921()
+    rec["trades"] = [_trow("373220", "BUY", "llm", verdict="PARTIAL", delta=2),
+                     _trow("005930", "SELL", "llm", verdict="REJECTED", delta=0),
+                     _trow("034020", "SELL", "funding", verdict="UNFILLED")]
+    r = fill.reconcile(rec)
+    if r["executed"] != {"373220:BUY": 2, "005930:SELL": 0, "034020:SELL": 0} or r["overfill"]:
+        problems.append(f"즉시 판정 계수 — {r['executed']} 초과 {r['overfill']}")
+    # 승인을 모르는 옛 참조 — 초과라고 말하지 않는다
+    rec = _rec_0921()
+    rec["runs"].append({"generated_at": "y", "approved_ref": "signals/approved_PAPERTEST_kr.json"})
+    r = fill.reconcile(rec)
+    if r["unknown_refs"] != ["approved_PAPERTEST_kr.json"] or r["approved_known"] or r["overfill"] != 1:
+        problems.append(f"미상 참조 — unknown={r['unknown_refs']} known={r['approved_known']} 초과={r['overfill']}")
+    rec = {"trades": [_trow("034020", "SELL", "funding", filled=46, ref=None)]}
+    r = fill.reconcile(rec)
+    if r["approved_known"] or r["overfill"]:
+        problems.append("승인 참조가 하나도 없으면 초과를 말할 수 없다")
+    status = FAIL if problems else PASS
+    results.append((status, "(63)-b 승인 대비 대조 — 46/92 초과·즉시 판정·미상 참조", "; ".join(problems)))
+    print(f"[{status}] (63)-b 승인 대비 대조 — 46/92 초과·즉시 판정·미상 참조" + (f" — {'; '.join(problems)}" if problems else ""))
+
+
+test_reconcile()
+
+
+def test_incident_record():
+    """(63)-c `fill.finalize` — 사고 자동 기록(멱등)·행 스탬프·생성줄·crosscheck·execute rc."""
+    import fill, stage, crosscheck as cc, execute as ex
+    problems = []
+    saved = fill.JOURNAL_DIR
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        fill.JOURNAL_DIR = tdp
+        try:
+            p = tdp / "trades_260921_kr.json"
+            rec = _rec_0921()
+            now = datetime(2026, 9, 21, 15, 0, tzinfo=KST)
+            rec = fill.finalize(rec, p, now)
+            r = rec["reconcile"]
+            if r.get("incidents") != ["INC-260921-1"] or not r.get("incident_recorded"):
+                problems.append(f"사고 id — {r.get('incidents')} recorded={r.get('incident_recorded')}")
+            rows = rec["trades"]
+            if rows[0].get("incident_id") or rows[1].get("incident_id") != "INC-260921-1":
+                problems.append("승인을 넘어선 둘째 행에만 incident_id가 찍혀야 한다")
+            if rows[1].get("incident") != "★ 중복 전송 — 손으로 쓴 서술":
+                problems.append("기존 incident 서술이 보존돼야 한다")
+            lines = (tdp / "incidents.jsonl").read_text(encoding="utf-8").splitlines()
+            fill.finalize(rec, p, now)                       # 두 번째 — 멱등
+            lines2 = (tdp / "incidents.jsonl").read_text(encoding="utf-8").splitlines()
+            if len(lines) != 1 or len(lines2) != 1 or json.loads(lines2[0])["note"] != "★ 중복 전송 — 손으로 쓴 서술":
+                problems.append(f"incidents.jsonl {len(lines)}/{len(lines2)}행 (기대 1/1)")
+            rec = fill._with_summary(rec, now, p)
+            line = stage.gen_fill_line(rec["fill_confirmed"])
+            if "승인 초과 **1건**" not in line or "사고 기록 INC-260921-1" not in line:
+                problems.append(f"생성줄 — {line}")
+            clean = {"trades": [_trow("005930", "SELL", "llm", filled=4)], "approved_ref": "signals/a.json",
+                     "approved_at": "t", "approved_orders": [{"ticker": "005930", "action": "SELL", "qty": 4}], "runs": []}
+            clean = fill._with_summary(clean, now, tdp / "trades_260922_kr.json")
+            if "승인 초과 **0건**" not in stage.gen_fill_line(clean["fill_confirmed"]) or clean["reconcile"]["overfill"]:
+                problems.append("깨끗한 기록의 생성줄에 `승인 초과 **0건**`이 있어야 한다")
+            # crosscheck
+            p.write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
+            if not cc.check_reconcile(p)[0][1]:
+                problems.append("초과+사고 기록은 crosscheck 통과여야 한다")
+            bad = dict(rec); bad["reconcile"] = {**rec["reconcile"], "incident_recorded": False, "incidents": []}
+            p2 = tdp / "trades_260923_kr.json"; p2.write_text(json.dumps(bad, ensure_ascii=False), encoding="utf-8")
+            if cc.check_reconcile(p2)[0][1]:
+                problems.append("초과인데 사고 기록이 없으면 crosscheck 실패여야 한다")
+            p3 = tdp / "trades_260924_kr.json"; p3.write_text(json.dumps(clean, ensure_ascii=False), encoding="utf-8")
+            if not cc.check_reconcile(p3)[0][1]:
+                problems.append("초과 0건은 crosscheck 통과여야 한다")
+            # execute가 기록을 쓸 때도 대조가 붙는다
+            p4 = tdp / "trades_260925_kr.json"
+            merged = ex.merge_day_record(p4, _rec_0921())
+            if (merged.get("reconcile") or {}).get("overfill") != 1 or not ex._overfill(p4).get("incident_recorded"):
+                problems.append("merge_day_record가 finalize를 붙이지 않는다")
+            if ex._report_overfill(p4) is not True:
+                problems.append("_report_overfill이 True(rc 4 경로)여야 한다")
+        finally:
+            fill.JOURNAL_DIR = saved
+    status = FAIL if problems else PASS
+    results.append((status, "(63)-c 사고 자동 기록 — INC id·멱등·생성줄·crosscheck·rc 4", "; ".join(problems)))
+    print(f"[{status}] (63)-c 사고 자동 기록 — INC id·멱등·생성줄·crosscheck·rc 4" + (f" — {'; '.join(problems)}" if problems else ""))
+
+
+test_incident_record()
+
+_t63d = _held_thesis("price >= 70000")
+_t63d["theses"][0]["exit_triggers"][0]["size_pct"] = 30
+run_case("(63)-d 원장 표기 size_pct 30% → 규율 SELL 3주",
+         signal=base_signal(), snapshot=_mk_snap("kr", 10_000_000, list(_HELD_005930)),
+         limits_patch={**ROOMY, "axis_max_pct": None, "reserve_for_other_market_pct": None,
+                       "min_proposals_below_target": None},
+         extra_theses=_t63d, expect_approved=_expect_sell(3, False))
+
+
+def _expect_qty(qty: int):
+    """(2026-09-22) 이벤트 계수는 지웠다 — 달력에 무엇이 있든 수량이 같아야 한다(이벤트는 할인이 아니라 베팅)."""
+    def check(approved, problems):
+        buys = [o for o in (approved.get("orders") or []) if o["action"] == "BUY"]
+        if len(buys) != 1 or buys[0]["qty"] != qty:
+            problems.append(f"BUY 수량 {[o['qty'] for o in buys]} (기대 {qty})")
+    return check
+
+
+_ABOVE_FLOOR = _mk_snap("kr", 10_000_000, [{"market": "KR", "ticker": "005930", "name": "삼성전자", "qty": 70,
+                                            "avg_price": 70000, "price": 71000, "eval_amt": 4_970_000, "pnl_pct": 1.4}])
+run_case("(63)-e1 이벤트=베팅 — 지표 D-0이어도 크기 불변",
+         signal=base_signal(), snapshot=_ABOVE_FLOOR,
+         limits_patch={**ROOMY, "axis_max_pct": None, "reserve_for_other_market_pct": None,
+                       "min_proposals_below_target": None},
+         extra_calendar=[{"date": _TODAY, "event": "CPI", "kind": "지표"}],
+         expect_approved=_expect_qty(51))
+run_case("(63)-e2 달력 없음 — 같은 수량",
+         signal=base_signal(), snapshot=_ABOVE_FLOOR,
+         limits_patch={**ROOMY, "axis_max_pct": None, "reserve_for_other_market_pct": None,
+                       "min_proposals_below_target": None},
+         expect_approved=_expect_qty(51))
+run_case("(63)-e3 메모 kind는 계수 없음",
+         signal=base_signal(), snapshot=_ABOVE_FLOOR,
+         limits_patch={**ROOMY, "axis_max_pct": None, "reserve_for_other_market_pct": None,
+                       "min_proposals_below_target": None},
+         extra_calendar=[{"date": _TODAY, "event": "UPPITY 휴간", "kind": "메모"}],
+         expect_approved=_expect_qty(51))
+
+
+def test_sessions_weekend_stamp_and_holidays():
+    """(63)-f/g 세션 — KST 토요일 스탬프의 US run은 ET 금요일 세션 · 휴장은 세션이 아니다 · market_session 휴장."""
+    import os
+    from datetime import date as _date
+    import sessions as ss
+    import kis_client as kc
+    import market_map as mm
+    problems = []
+    saved = (ss.DATA, ss.ANALYSIS, ss.SIGNALS, ss.JOURNAL, ss.LEDGER, kc.HOLIDAYS_PATH, mm.CAL, rg.CALENDAR_PATH)
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        try:
+            ss.DATA = tdp / "data"; ss.ANALYSIS = tdp / "analysis"; ss.SIGNALS = tdp / "signals"
+            ss.JOURNAL = tdp / "journal"; ss.LEDGER = ss.JOURNAL / "sessions.jsonl"
+            for d in (ss.DATA, ss.ANALYSIS, ss.SIGNALS, ss.JOURNAL):
+                d.mkdir()
+            kc.HOLIDAYS_PATH = tdp / "holidays.json"
+            kc.HOLIDAYS_PATH.write_text(json.dumps({"kr": ["2026-09-24"], "us": []}), encoding="utf-8")
+
+            def touch(p, when):
+                p.write_text("x", encoding="utf-8")
+                ts = when.timestamp(); os.utime(p, (ts, ts))
+            touch(ss.DATA / "material_260918_kr.md", datetime(2026, 9, 18, 14, 8, tzinfo=KST))
+            touch(ss.DATA / "snapshot_260918_kr.json", datetime(2026, 9, 18, 14, 8, tzinfo=KST))
+            for n in ("material_260919_us.md", "snapshot_260919_us.json"):
+                touch(ss.DATA / n, datetime(2026, 9, 19, 2, 13, tzinfo=KST))
+            touch(ss.SIGNALS / "signal_260919_us.json", datetime(2026, 9, 19, 3, 4, tzinfo=KST))
+            touch(ss.DATA / "material_260921_kr.md", datetime(2026, 9, 21, 10, 0, tzinfo=KST))
+            touch(ss.DATA / "snapshot_260921_kr.json", datetime(2026, 9, 21, 10, 0, tzinfo=KST))
+            (ss.JOURNAL / "reviews.jsonl").write_text(json.dumps({"market": "US", "session": "2026-09-19"}) + "\n",
+                                                      encoding="utf-8")
+            today = _date(2026, 9, 21)
+            rows = ss.scan(14, today=today)
+            us = [r for r in rows if r["market"] == "us" and r["stamp"] == "260919"]
+            if len(us) != 1 or us[0]["session_date"] != "2026-09-18" or us[0]["reached"] != "5 decide":
+                problems.append(f"US 260919 → ET 09-18 세션이어야 한다: {[(r['stamp'], r['session_date'], r['reached']) for r in us]}")
+            if any(r.get("off_session") for r in rows):
+                problems.append("주말·휴장 기준일 행이 남았다")
+            if any(r["market"] == "us" and r["session_date"] == "2026-09-18" and r["reached"] == "0 없음" for r in rows):
+                problems.append("스탬프가 다른 같은 세션의 run이 있는데 '0 없음' 행이 남았다")
+            pv = ss.prev_run(14, "kr", "260921", today=today)
+            if pv.get("market") != "us" or pv.get("stamp") != "260919" or not pv.get("reviewed"):
+                problems.append(f"직전 run은 US 260919(회고 있음)여야 한다: {pv.get('market')} {pv.get('stamp')} reviewed={pv.get('reviewed')}")
+            rows2 = ss.scan(3, today=_date(2026, 9, 25))
+            if any(r["market"] == "kr" and r["session_date"] == "2026-09-24" for r in rows2):
+                problems.append("휴장일(09-24)이 미실행 행으로 남았다")
+            # market_session · run_auto.market_state · pick_market
+            s = kc.market_session("KR", datetime(2026, 9, 24, 10, 0, tzinfo=KST))
+            if s["is_open"] or not s.get("holiday") or "휴장" not in s["why"]:
+                problems.append(f"휴장일 market_session — open={s['is_open']} why={s['why']}")
+            if kc.market_session("KR", datetime(2026, 9, 23, 10, 0, tzinfo=KST))["is_open"] is not True:
+                problems.append("평일 정규장은 열려 있어야 한다")
+            if kc.next_trading_day("KR", _date(2026, 9, 23)) != _date(2026, 9, 25):
+                problems.append("next_trading_day가 휴장을 건너뛰지 않는다")
+            import run_auto
+            st, why = run_auto.market_state("KR", datetime(2026, 9, 24, 1, 0, tzinfo=timezone.utc))
+            if st != "holiday":
+                problems.append(f"run_auto.market_state 휴장 → {st}")
+            import stage
+            m, is_open, why = stage.pick_market(datetime(2026, 9, 24, 10, 0, tzinfo=KST))
+            if m != "us" or is_open:
+                problems.append(f"국내 휴장일 낮에는 US를 준비해야 한다 → {m} open={is_open}")
+            # (63)-h kind 어휘
+            mm.CAL = tdp / "calendar.json"
+            rg.CALENDAR_PATH = mm.CAL
+            f = tdp / "ev.json"
+            f.write_text(json.dumps([{"date": _TODAY, "event": "UPPITY 휴간", "kind": "휴간"}]), encoding="utf-8")
+            import io, contextlib
+            with contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()):
+                rc = mm.add(f, "event")
+            if rc != 2 or mm.CAL.exists() or "허용 kind" not in err.getvalue():
+                problems.append(f"어휘 밖 kind는 rc 2·미기록·어휘 안내여야 한다 (rc={rc})")
+            f.write_text(json.dumps([{"date": _TODAY, "event": "UPPITY 휴간", "kind": "메모"}]), encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = mm.add(f, "event")
+            if rc != 0 or not mm.CAL.exists():
+                problems.append(f"어휘 안 kind(메모)는 기록돼야 한다 (rc={rc})")
+            # (2026-09-22) 이벤트 계수(halve_window)는 지웠다 — 달력 kind는 기록·분류용이다
+            if hasattr(rg, "halve_window"):
+                problems.append("halve_window가 아직 있다 — 이벤트 할인은 폐지됐다")
+        finally:
+            (ss.DATA, ss.ANALYSIS, ss.SIGNALS, ss.JOURNAL, ss.LEDGER, kc.HOLIDAYS_PATH, mm.CAL, rg.CALENDAR_PATH) = saved
+    status = FAIL if problems else PASS
+    results.append((status, "(63)-f/g/h 세션 기준일·휴장·kind 어휘", "; ".join(problems)))
+    print(f"[{status}] (63)-f/g/h 세션 기준일·휴장·kind 어휘" + (f" — {'; '.join(problems)}" if problems else ""))
+
+
+test_sessions_weekend_stamp_and_holidays()
+
+
+def test_stamp_parent_section():
+    """(63)-i `stage.py stamp --sec §11-규율|§11-집행` — 부모 절(`## §11 …`) 끝에 찍힌다 · `§1-A`는 `§10`에 안 걸린다."""
+    import stage, argparse as _ap, io, contextlib
+    problems = []
+    with tempfile.TemporaryDirectory() as td:
+        note = Path(td) / "n.md"
+        note.write_text("## §1-A 이 시장\n\n본문\n\n## §10 한계\n\n한계\n\n## §11 집행 결과\n\n규율\n\n## §12 출처\n\n끝\n",
+                        encoding="utf-8")
+        for sec in ("§11-규율", "§11-집행", "§11-집행", "§1-A"):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc = stage.cmd_stamp(_ap.Namespace(note=str(note), sec=sec, worklog="", stage=""))
+            if rc != 0:
+                problems.append(f"--sec {sec} rc {rc}")
+        txt = note.read_text(encoding="utf-8")
+        s11, s12, s10 = txt.index("## §11"), txt.index("## §12"), txt.index("## §10")
+        for k in ("§11-규율", "§11-집행"):
+            i = txt.find(f"<!-- ✓ {k} -->")
+            if not (s11 < i < s12):
+                problems.append(f"{k} 스탬프가 §11 절 안에 없다 (pos {i})")
+        if txt.count("<!-- ✓ §11-집행 -->") != 1:
+            problems.append("스탬프가 멱등이 아니다")
+        i = txt.find("<!-- ✓ §1-A -->")
+        if not (0 <= i < s10):
+            problems.append("§1-A 스탬프가 §1-A 절이 아니라 다른 곳에 찍혔다")
+    status = FAIL if problems else PASS
+    results.append((status, "(63)-i stamp — 부모 절 탐색·부분일치 제거", "; ".join(problems)))
+    print(f"[{status}] (63)-i stamp — 부모 절 탐색·부분일치 제거" + (f" — {'; '.join(problems)}" if problems else ""))
+
+
+test_stamp_parent_section()
+
+
+def test_scenarios_persistent_id():
+    """(63)-j `scenarios.py promote` — persistent_id 우선 · 별칭 · merge · due/audit/judge의 merged 처리."""
+    import scenarios as sc, argparse as _ap, io, contextlib
+    problems = []
+    saved = sc.STORE
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        try:
+            sc.STORE = tdp / "scenarios.json"
+            sc.STORE.write_text(json.dumps({"scenarios": [
+                {"id": "SC-260915-1", "opened": "260915", "market": "kr", "status": "open", "realized": None,
+                 "acted": None, "condition": "9/18 MOU 문서에 국내 기자재 명시", "sources": ["signal_260915_kr.json#S1"],
+                 "judgments": [], "actions": [{"market": "KR", "ticker": "034020", "what": "e1"}]}]}, ensure_ascii=False),
+                encoding="utf-8")
+            def promote(name, rows):
+                p = tdp / name
+                p.write_text(json.dumps({"scenarios": rows}, ensure_ascii=False), encoding="utf-8")
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    return sc.cmd_promote(_ap.Namespace(signal=str(p)))
+            promote("signal_260921_kr.json", [{"id": "S1", "condition": "MOU 서명 문서에 국내 기자재 직접 구매 명시",
+                                              "persistent_id": "SC-260915-1"}])
+            d = sc.load()["scenarios"]
+            if len(d) != 1 or d[0].get("aliases") != ["MOU 서명 문서에 국내 기자재 직접 구매 명시"] \
+                    or "signal_260921_kr.json#S1" not in d[0]["sources"]:
+                problems.append(f"persistent_id 매칭 — 행 {len(d)} aliases={d[0].get('aliases')}")
+            promote("signal_260922_kr.json", [{"id": "S4", "condition": "MOU 서명 문서에 국내 기자재 직접 구매 명시"}])
+            if len(sc.load()["scenarios"]) != 1:
+                problems.append("별칭 문구는 새 id 없이 매칭돼야 한다")
+            promote("signal_260923_kr.json", [{"id": "S2", "condition": "전혀 다른 조건", "persistent_id": "SC-999999-9"}])
+            d = sc.load()["scenarios"]
+            if len(d) != 2 or d[1].get("claimed_persistent_id") != "SC-999999-9" or d[1]["id"] != "SC-260923-1":
+                problems.append(f"원장에 없는 persistent_id — {[(r['id'], r.get('claimed_persistent_id')) for r in d]}")
+            # merge
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = sc.cmd_merge(_ap.Namespace(src="SC-260923-1", into="SC-260915-1"))
+            d = sc.load()["scenarios"]
+            a, b = d[1], d[0]
+            if rc != 0 or a["status"] != "merged" or a["merged_into"] != "SC-260915-1" or "전혀 다른 조건" not in b["aliases"]:
+                problems.append(f"merge — rc {rc} status={a['status']} aliases={b.get('aliases')}")
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                rc_j = sc.cmd_judge(_ap.Namespace(id="SC-260923-1", realized="y", acted=None, note="", batch=""))
+            if rc_j != 2:
+                problems.append("병합된 id 판정은 rc 2여야 한다")
+            # judge into → realized → due는 병합 행을 세지 않는다
+            with contextlib.redirect_stdout(io.StringIO()):
+                sc.cmd_judge(_ap.Namespace(id="SC-260915-1", realized="y", acted=None, note="", batch=""))
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                sc.cmd_due(_ap.Namespace(market="kr"))
+            if "SC-260923-1" in buf.getvalue() or "SC-260915-1" not in buf.getvalue():
+                problems.append("due — 병합 행은 빠지고 목적지 행은 나와야 한다")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                sc.cmd_audit(_ap.Namespace(days=3650, affects="", out=""))
+            if "승격 1 " not in buf.getvalue():
+                problems.append(f"audit — 병합 행을 제외해 승격 1이어야 한다: {buf.getvalue().splitlines()[2:3]}")
+            # 병합된 id로 온 persistent_id는 목적지로 간다
+            promote("signal_260924_kr.json", [{"id": "S9", "condition": "또 다른 문구", "persistent_id": "SC-260923-1"}])
+            if len(sc.load()["scenarios"]) != 2:
+                problems.append("병합된 id의 persistent_id는 목적지 행으로 흡수돼야 한다")
+        finally:
+            sc.STORE = saved
+    status = FAIL if problems else PASS
+    results.append((status, "(63)-j scenarios — persistent_id·별칭·merge", "; ".join(problems)))
+    print(f"[{status}] (63)-j scenarios — persistent_id·별칭·merge" + (f" — {'; '.join(problems)}" if problems else ""))
+
+
+test_scenarios_persistent_id()
+
+_PS = json.loads(rg.LIMITS_PATH.read_text(encoding="utf-8")).get("position_sizing") or {}
+_GAP_LIMITS = {**ROOMY, "axis_max_pct": None, "reserve_for_other_market_pct": None,
+               "min_proposals_below_target": None, "position_sizing": {**_PS, "min_target_gap_pct": 3.0}}
+
+
+def _gap_sig(exits=None, triggers=None, thesis_id=None):
+    sig = base_signal()
+    p = sig["proposals"][0]
+    if exits is not None:
+        p["exits"] = exits
+    if triggers is not None:
+        p["triggers"] = triggers
+    if thesis_id:
+        p["thesis_id"] = thesis_id
+    return sig
+
+
+run_case("(63)-k1 1차 목표 +1.7%(183,000/180,000) → 목표 여유 없음 거부",
+         signal=_gap_sig(exits=[{"id": "x3", "check": "price >= 183000"}]),
+         limits_patch=_GAP_LIMITS, expect_orders=0, expect_reject_contains="목표 여유 없음")
+run_case("(63)-k2 1차 목표 +11% → 통과",
+         signal=_gap_sig(exits=[{"id": "x3", "check": "price >= 200000"}, {"id": "x1", "check": "price <= 170000"}]),
+         limits_patch=_GAP_LIMITS, expect_orders=1)
+run_case("(63)-k3 제안에 exits 없어도 논지 exit_triggers를 본다",
+         signal=_gap_sig(thesis_id="t-gap"), limits_patch=_GAP_LIMITS,
+         extra_theses={"theses": [{"id": "t-gap", "market": "KR", "ticker": "000660", "status": "armed",
+                                   "created": "2026-09-18", "exit_triggers": [{"id": "x3", "check": "price >= 182000"}]}]},
+         expect_orders=0, expect_reject_contains="목표 여유 없음")
+run_case("(63)-k4 진입 트리거의 price >=(돌파)는 목표가 아니다",
+         signal=_gap_sig(triggers=[{"id": "e1", "check": "price >= 100"}]),
+         limits_patch=_GAP_LIMITS, expect_orders=1)
+run_case("(63)-k5 min_target_gap_pct 0이면 끔",
+         signal=_gap_sig(exits=[{"id": "x3", "check": "price >= 183000"}]),
+         limits_patch={**_GAP_LIMITS, "position_sizing": {**_PS, "min_target_gap_pct": 0}}, expect_orders=1)
+_gap_two = _three_props()
+_gap_two["proposals"] = _gap_two["proposals"][:2]
+_gap_two["proposals"][0]["exits"] = [{"id": "x3", "check": "price >= 183000"}]
+run_case("(63)-k6 목표 여유 거부는 미달 건수에 안 센다 → deficit_short",
+         signal=_gap_two, snapshot=_mk_snap("kr", 10_000_000, []),
+         limits_patch={**_DEF_LIMITS, "position_sizing": {**_PS, "min_target_gap_pct": 3.0}}, extra_map=_AXIS_MAP,
+         expect_approved=_deficit_expect(True))
+
+
+def test_set_trigger():
+    """(63)-l `theses.py set-trigger` — 새 값으로 다시 걸고 옛 값은 corrections[]에."""
+    import theses as th, io, contextlib
+    problems = []
+    saved = th.STORE
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            th.STORE = Path(td) / "theses.json"
+            th.STORE.write_text(json.dumps({"schema_version": "1.0", "theses": [
+                {"id": "t", "ticker": "095610", "status": "armed",
+                 "exit_triggers": [{"id": "x3", "check": "price >= 147800", "size_pct": 50.0, "basis": "old", "when": "목표"}]}]}),
+                encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = th.cmd_set_trigger("t", "x3", "price >= 152000", "resistance_1 152,000 (20260922)", "진입 전에 목표가 메워짐")
+            t = th.load()["theses"][0]
+            x3 = t["exit_triggers"][0]
+            c = (t.get("corrections") or [{}])[0]
+            if rc != 0 or x3["check"] != "price >= 152000" or x3["basis"] != "resistance_1 152,000 (20260922)" \
+                    or x3["size_pct"] != 50.0 or c.get("before", {}).get("check") != "price >= 147800" \
+                    or "set-trigger" not in c.get("what", ""):
+                problems.append(f"set-trigger — {x3} corrections={t.get('corrections')}")
+            for bad in (("t", "x3", "가격 >= 1", "b", "w"), ("t", "x9", "price >= 1", "b", "w"), ("t", "x3", "price >= 1", "", "w")):
+                try:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        th.cmd_set_trigger(*bad)
+                    problems.append(f"거부돼야 한다: {bad}")
+                except SystemExit:
+                    pass
+        finally:
+            th.STORE = saved
+    status = FAIL if problems else PASS
+    results.append((status, "(63)-l theses set-trigger — corrections 기록·형식 검증", "; ".join(problems)))
+    print(f"[{status}] (63)-l theses set-trigger — corrections 기록·형식 검증" + (f" — {'; '.join(problems)}" if problems else ""))
+
+
+test_set_trigger()
+
+
+# ============ 상수가 아니라 판단이 비율을 정한다 (2026-09-22) ============
+
+def _expect_alloc(**want):
+    def check(approved, problems):
+        al = approved.get("allocation") or {}
+        d = approved.get("deficit") or {}
+        for k, v in want.items():
+            # need·covered_pct·short는 deficit(일일 상한을 뺀 실효값), 나머지는 allocation
+            src = d if k in ("need", "covered_pct", "short", "approved_buy") else (al if k in al else d)
+            got = src.get(k)
+            if callable(v):
+                if not v(got, approved):
+                    problems.append(f"{k}={got!r} 조건 불만족")
+            elif got != v:
+                problems.append(f"{k}={got!r} (기대 {v!r})")
+    return check
+
+
+_GAP_SNAP = _mk_snap("kr", 10_000_000, [{"market": "KR", "ticker": "005930", "name": "삼성전자", "qty": 10,
+                                         "avg_price": 70000, "price": 71000, "eval_amt": 710_000, "pnl_pct": 1.4}])
+_NO_CAP = {**ROOMY, "daily_max_order_pct_of_equity": None, "min_proposals_below_target": None,
+           "min_distinct_axes_below_target": None}
+
+run_case("(64)-a allocation 없으면 거부",
+         signal={k: v for k, v in base_signal().items() if k != "allocation"},
+         expect_orders=0, expect_reject_contains="allocation 블록이 없다")
+run_case("(64)-b 목표 60%인데 현금 명분 없음 → 거부",
+         signal=base_signal(allocation=base_alloc(target_invested_pct=60)),
+         expect_orders=0, expect_reject_contains="현금 명분 없음")
+run_case("(64)-b′ 현금 명분은 있는데 해제 조건 없음 → 거부",
+         signal=base_signal(allocation=base_alloc(target_invested_pct=60, cash_reason="하락장 KOSPI 60일선 -3%")),
+         expect_orders=0, expect_reject_contains="해제 조건")
+run_case("(64)-b″ regime에 숫자 없음 → 거부",
+         signal=base_signal(allocation=base_alloc(regime="느낌상 강세")),
+         expect_orders=0, expect_reject_contains="숫자가 없다")
+run_case("(64)-c gap 88%p · 제안 합 5% → 증분을 키워 need를 채운다(scaled_up · covered 100 · short 아님)",
+         signal=base_signal(), snapshot=_GAP_SNAP, limits_patch=_NO_CAP,
+         expect_approved=_expect_alloc(covered_pct=lambda v, a: v is not None and v >= 95,
+                                       short=False, gap_pct=lambda v, a: 85 < v < 92,
+                                       need=lambda v, a: 9_000_000 < v < 9_600_000,
+                                       scaled_up=lambda v, a: (a.get("scaled_up") or {}).get("k", 0) > 5))
+run_case("(64)-d 일일 상한이 없으니 need = full gap이고 현금이 허용하면 그만큼 채운다",
+         signal=base_signal(), snapshot=_GAP_SNAP,
+         limits_patch={**ROOMY, "min_proposals_below_target": None, "min_distinct_axes_below_target": None},
+         expect_approved=_expect_alloc(short=False, need=lambda v, a: 9_000_000 < v < 9_600_000,
+                                       covered_pct=lambda v, a: v is not None and v >= 95))
+
+
+def test_alloc_ledger_chain():
+    """(64)-h 배분 원장 — 이어받기(based_on)·바꿀 때만 이유·같은 run 재실행은 자기 id 제외."""
+    import allocation as al
+    problems = []
+    saved = al.JOURNAL_DIR
+    with tempfile.TemporaryDirectory() as td:
+        al.JOURNAL_DIR = Path(td)
+        try:
+            if al.validate(base_alloc(), "AL-260922-kr"):
+                problems.append("원장이 비어 있으면 based_on: null 최초 판단이 통과해야 한다")
+            row = al.record({"market": "KR", "allocation": base_alloc()}, "signals/approved_260922_kr.json")
+            if row["id"] != "AL-260922-kr":
+                problems.append(f"id {row['id']}")
+            # 같은 run 재실행 — 자기 id를 빼면 원장은 비어 있는 것과 같다
+            if al.validate(base_alloc(), "AL-260922-kr"):
+                problems.append("같은 run 재실행이 자기 행 때문에 막혔다")
+            al.record({"market": "KR", "allocation": base_alloc()}, "signals/approved_260922_kr.json")
+            if len(al.rows()) != 1:
+                problems.append(f"같은 id 재기록이 덮어쓰지 않고 {len(al.rows())}행")
+            # 다음 run — based_on 없음 → 오류 · 맞으면 통과 · 바꿨는데 why 없음 → 오류
+            if not al.validate(base_alloc(), "AL-260923-kr"):
+                problems.append("직전 판단을 안 이었는데 통과")
+            if al.validate(base_alloc(based_on="AL-260922-kr"), "AL-260923-kr"):
+                problems.append("유지(based_on 일치·change null)가 막혔다")
+            errs = al.validate(base_alloc(based_on="AL-260922-kr", target_invested_pct=70), "AL-260923-kr")
+            if not any("change.why" in e for e in errs):
+                problems.append(f"비율을 바꿨는데 change.why 요구가 없다: {errs}")
+            if al.validate(base_alloc(based_on="AL-260922-kr", target_invested_pct=70,
+                                      change={"from": 95, "to": 70, "why": "09-23 KOSPI -4% · 60일선 이탈"}), "AL-260923-kr"):
+                problems.append("이유를 적은 변경이 막혔다")
+            blk = al.block()
+            if "AL-260922-kr" not in blk or "95%" not in blk:
+                problems.append("prev 블록에 직전 id·비율이 없다")
+        finally:
+            al.JOURNAL_DIR = saved
+    status = FAIL if problems else PASS
+    results.append((status, "(64)-h 배분 원장 이어받기·변경 이유·재실행 멱등", "; ".join(problems)))
+    print(f"[{status}] (64)-h 배분 원장 이어받기·변경 이유·재실행 멱등" + (f" — {'; '.join(problems)}" if problems else ""))
+
+
+test_alloc_ledger_chain()
+
+
+def test_research_expansion_checks():
+    """(64)-j/k crosscheck — `## 재료 확장` 절(빈 절·되풀이 → 실패) · 새 전망·논지의 리서치 인용."""
+    import crosscheck as cc
+    problems = []
+    saved = cc.HERE
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "analysis").mkdir(); (root / "data").mkdir(); (root / "journal").mkdir()
+        cc.HERE = root
+        try:
+            st = "260930"
+            (root / "data" / f"material_{st}_kr.md").write_text("재료\nhttps://old.example.com/a 기사\n", encoding="utf-8")
+            rf = root / "analysis" / f"섹터_테스트_{st}_v1_0.md"
+            rf.write_text("# 리서치\n\n## 출처\n- x\n", encoding="utf-8")
+            if cc.check_research_expansion("kr", st)[0][1]:
+                problems.append("확장 절이 없는데 통과")
+            rf.write_text("# 리서치\n\n## 재료 확장 — 뉴스레터에 없던 것\n\n| 사실 | 출처 | 해석 |\n|---|---|---|\n\n## 출처\n", encoding="utf-8")
+            if cc.check_research_expansion("kr", st)[0][1]:
+                problems.append("빈 절인데 통과")
+            rf.write_text("# 리서치\n\n## 재료 확장 — 뉴스레터에 없던 것\n\n- 사실 A · https://old.example.com/a (T2) · 해석\n\n## 출처\n", encoding="utf-8")
+            if cc.check_research_expansion("kr", st)[0][1]:
+                problems.append("재료에 있는 링크 되풀이인데 통과")
+            rf.write_text("# 리서치\n\n## 재료 확장 — 뉴스레터에 없던 것\n\n- 사실 B · https://new.example.com/b (T1) · 2차 수혜 X\n- 사실 A · https://old.example.com/a (T2)\n\n## 출처\n", encoding="utf-8")
+            r = cc.check_research_expansion("kr", st)[0]
+            if not r[1] or "확장 1행" not in r[2]:
+                problems.append(f"새 사실 1행이면 통과여야 한다: {r}")
+            today = "2026-09-30"
+            (root / "journal" / "market_map.json").write_text(json.dumps({"axes": [
+                {"id": "ax1", "opened": today, "updated": today, "thesis": "뉴스레터만 보고 쓴 전망"},
+                {"id": "ax0", "opened": "2026-09-01", "updated": "2026-09-01", "thesis": "옛 전망"}]}, ensure_ascii=False), encoding="utf-8")
+            (root / "journal" / "theses.json").write_text(json.dumps({"theses": [
+                {"id": "t1", "created": today, "thesis": "근거: 재료 확장 행 — https://new.example.com/b"}]}, ensure_ascii=False), encoding="utf-8")
+            r = cc.check_research_cited("kr", st)[0]
+            if r[1] or "전망 ax1" not in r[2] or "논지 t1" in r[2]:
+                problems.append(f"전망 ax1만 미인용이어야 한다: {r}")
+            (root / "journal" / "market_map.json").write_text(json.dumps({"axes": [
+                {"id": "ax1", "opened": today, "updated": today, "thesis": f"근거 {rf.stem}"}]}, ensure_ascii=False), encoding="utf-8")
+            if not cc.check_research_cited("kr", st)[0][1]:
+                problems.append("파일명 인용이 통과하지 않는다")
+        finally:
+            cc.HERE = saved
+    # srcledger tier=data
+    import srcledger as sl
+    try:
+        if sl._tier("data") != "data" or sl._tier("1") != 1 or sl._tier(2) != 2:
+            problems.append("srcledger._tier가 data/1/2를 못 판다")
+    except Exception as e:                              # noqa: BLE001
+        problems.append(f"srcledger._tier 예외 {type(e).__name__}")
+    status = FAIL if problems else PASS
+    results.append((status, "(64)-j/k 리서치 재료 확장·인용 검사 · tier=data", "; ".join(problems)))
+    print(f"[{status}] (64)-j/k 리서치 재료 확장·인용 검사 · tier=data" + (f" — {'; '.join(problems)}" if problems else ""))
+
+
+test_research_expansion_checks()
+
+
+def test_network_exceptions_and_funding_exclusion():
+    """(65) 네트워크 예외 → KisError(재시도) · 회전 매도 후보에서 같은 run의 BUY 종목 제외 · sector_history 멱등."""
+    import socket
+    import kis_client as kc
+    import market_map as mm
+    problems = []
+    # a) socket.timeout이 KisError로 감싸이고 GET은 재시도한다
+    calls = {"n": 0}
+    class _Cli(kc.KisClient):
+        def __init__(self):
+            self.base = "https://x"; self.svr = "paper"; self.app_key = "k" * 10
+            self._ctx = None
+        def _throttle(self):
+            pass
+    def fake_urlopen(req, timeout=20, context=None):
+        calls["n"] += 1
+        raise socket.timeout("timed out")
+    saved = (kc.urllib.request.urlopen, kc.TRANSIENT_BACKOFF_SEC)
+    kc.urllib.request.urlopen = fake_urlopen
+    kc.TRANSIENT_BACKOFF_SEC = 0
+    try:
+        try:
+            _Cli()._request("GET", "/p", {}, timeout=1)
+            problems.append("타임아웃이 예외 없이 지나갔다")
+        except kc.KisError as e:
+            if "timed out" not in str(e) and "timeout" not in str(e).lower():
+                problems.append(f"KisError 메시지에 원인이 없다: {e}")
+        except Exception as e:                          # noqa: BLE001
+            problems.append(f"KisError가 아닌 예외가 튀었다: {type(e).__name__}")
+        if calls["n"] < 2:
+            problems.append(f"GET 재시도가 없다(호출 {calls['n']}회)")
+        calls["n"] = 0
+        try:
+            _Cli()._request("POST", "/o", {}, body={"a": 1}, timeout=1)
+        except kc.KisError:
+            pass
+        if calls["n"] != 1:
+            problems.append(f"주문 POST는 재시도하면 안 된다(호출 {calls['n']}회)")
+    finally:
+        kc.urllib.request.urlopen, kc.TRANSIENT_BACKOFF_SEC = saved
+    # c) 회전 매도 후보에서 같은 run의 BUY 종목 제외 — LG엔솔을 사는 run에서 LG엔솔을 팔지 않는다
+    bal = {"cash": 100_000, "currency": "KRW",
+           "positions": [{"ticker": "373220", "name": "LG엔솔", "qty": 11, "price": 350_000, "eval_amt": 3_850_000},
+                         {"ticker": "005930", "name": "삼성전자", "qty": 5, "price": 70_000, "eval_amt": 350_000}]}
+    orders = [{"ticker": "373220", "action": "BUY", "qty": 8, "price": 350_000, "source": "llm"},
+              {"ticker": "095610", "action": "BUY", "qty": 10, "price": 146_000, "source": "llm"}]
+    lim = {"daily_max_orders": None, "portfolio_daily_loss_halt_pct": None, "funding_max_per_run": 1, "funding_min_fill_ratio": 0.5}
+    import io, contextlib
+    with contextlib.redirect_stdout(io.StringIO()):
+        final, rej = rg.apply_run_limits(orders, lim, bal, 0.0, "KR", {"reserved_here": 0})
+    fund = [o for o in final if o.get("source") == "funding"]
+    if any(o["ticker"] == "373220" for o in fund):
+        problems.append("같은 run에 사는 LG엔솔이 회전 매도 대상으로 나왔다")
+    if fund and fund[0]["ticker"] != "005930":
+        problems.append(f"회전 매도 대상은 매수 종목을 뺀 최대 보유(005930)여야 한다: {[o['ticker'] for o in fund]}")
+    # d) sector_history 멱등
+    saved_sh = mm.SECTOR_HISTORY
+    with tempfile.TemporaryDirectory() as td:
+        mm.SECTOR_HISTORY = Path(td) / "sh.jsonl"
+        try:
+            rows = [{"key": "0001", "name": "x", "d1": 1.0, "d5": 2.0, "d20": 3.0}]
+            with contextlib.redirect_stdout(io.StringIO()):
+                mm._record_board(rows, "kr", 0.5, "2026-09-30")
+                mm._record_board(rows, "kr", 0.7, "2026-09-30")
+                mm._record_board(rows, "us", 0.7, "2026-09-30")
+            lines = [json.loads(l) for l in mm.SECTOR_HISTORY.read_text(encoding="utf-8").splitlines() if l.strip()]
+            if len(lines) != 2 or [l for l in lines if l["market"] == "kr"][0]["benchmark_pct"] != 0.7:
+                problems.append(f"(날짜, 시장)당 한 행·마지막 값이어야 한다: {[(l['date'], l['market'], l['benchmark_pct']) for l in lines]}")
+        except AttributeError as e:
+            problems.append(f"_record_board 호출 실패: {e}")
+        finally:
+            mm.SECTOR_HISTORY = saved_sh
+    status = FAIL if problems else PASS
+    results.append((status, "(65) 네트워크 예외→KisError·POST 무재시도 · 회전 매도 BUY 제외 · sector_history 멱등", "; ".join(problems)))
+    print(f"[{status}] (65) 네트워크 예외→KisError·POST 무재시도 · 회전 매도 BUY 제외 · sector_history 멱등"
+          + (f" — {'; '.join(problems)}" if problems else ""))
+
+
+test_network_exceptions_and_funding_exclusion()
+
+
+# ==== 소진된 다리 · 편입 거래소 코드 · 회전 매도 결합 · FX (2026-09-23) ====
+
+_t66 = _held_thesis("price >= 70000")
+_t66["theses"][0]["exit_triggers"][0]["size_pct"] = 50
+_t66_fired = json.loads(json.dumps(_t66))
+_t66_fired["theses"][0]["exit_triggers"][0].update(
+    {"fired": True, "fired_at": "2026-09-21T23:58:00+09:00", "fired_note": "discipline SELL 6주 @438.5"})
+
+run_case("(66)-a 소진된 다리(fired)는 다시 발화하지 않는다 — 톱니 차단",
+         signal=base_signal(), snapshot=_mk_snap("kr", 10_000_000, list(_HELD_005930)),
+         limits_patch={**ROOMY, "min_proposals_below_target": None, "min_distinct_axes_below_target": None},
+         extra_theses=_t66_fired, expect_approved=_expect_no_sell)
+run_case("(66)-a′ 같은 다리가 살아 있으면 판다(대조군)",
+         signal=base_signal(), snapshot=_mk_snap("kr", 10_000_000, list(_HELD_005930)),
+         limits_patch={**ROOMY, "min_proposals_below_target": None, "min_distinct_axes_below_target": None},
+         extra_theses=_t66, expect_approved=_expect_sell(5, False))
+
+
+def test_leg_marked_on_fill():
+    """(66)-b~g 체결이 다리를 소진 표시한다 — 부분 체결도 · 취소·만료는 아니다 · set-trigger가 되살린다 ·
+    trigger_id가 approved→trades까지 남는다 · 톱니 재현(두 번째 평가에서 매도 0)."""
+    import fill, theses as th, execute as ex
+    problems = []
+    saved = (fill.JOURNAL_DIR, th.STORE, rg.JOURNAL_DIR)
+    with tempfile.TemporaryDirectory() as td:
+        j = Path(td); fill.JOURNAL_DIR = j; th.STORE = j / "theses.json"; rg.JOURNAL_DIR = j
+        try:
+            def ledger():
+                return {"theses": [{"id": "t-tsm", "market": "US", "ticker": "TSM", "status": "held",
+                                    "created": "2026-09-16", "entered_on": "2026-09-16",
+                                    "exit_triggers": [{"id": "x3", "check": "price >= 431.68", "size_pct": 50.0,
+                                                       "when": "목표", "basis": "resistance_2 (과거 고정)"},
+                                                      {"id": "x1", "check": "price <= 384.10", "size_pct": 100.0}]}]}
+            def row(verdict="FILLED", qty=6, trigger_id="x3", reasons=None):
+                return {"action": "SELL", "ticker": "TSM", "market": "US", "qty": qty, "price": 438.5,
+                        "source": "discipline", "full_exit": False, "thesis_id": "t-tsm",
+                        "trigger_id": trigger_id, "result": {"order_no": "0000000001"},
+                        "discipline_reasons": reasons if reasons is not None else
+                        ["논지 t-tsm x3 목표 `price >= 431.68` (시세 438.5) — 가격 조건은 모델 재량 없이 즉시 판다"],
+                        "fill": {"verdict": verdict, "filled_qty": qty, "avg_price": 438.535}}
+            now = datetime(2026, 9, 21, 23, 58, tzinfo=KST)
+            # b) FILLED 부분 체결 → 다리 fired · 논지는 held
+            th.STORE.write_text(json.dumps(ledger(), ensure_ascii=False), encoding="utf-8")
+            fill._close_theses_after_exit(row(), now, lambda *a, **k: None)
+            d = json.loads(th.STORE.read_text(encoding="utf-8"))["theses"][0]
+            g = d["exit_triggers"][0]
+            if not g.get("fired") or not g.get("fired_at") or "6주" not in str(g.get("fired_note")):
+                problems.append(f"부분 체결이 다리를 소진 표시하지 않는다 — {g}")
+            if d["status"] != "held":
+                problems.append("부분 체결인데 논지를 닫았다")
+            if d["exit_triggers"][1].get("fired"):
+                problems.append("다른 다리까지 찍혔다")
+            # c) 재호출 멱등
+            fill._close_theses_after_exit(row(), now, lambda *a, **k: None)
+            if json.loads(th.STORE.read_text(encoding="utf-8"))["theses"][0]["exit_triggers"][0]["fired_at"] != g["fired_at"]:
+                problems.append("멱등이 아니다 — fired_at이 갱신됐다")
+            # d) 톱니 재현: 소진 표시 뒤 같은 시세로 다시 평가하면 매도가 없다
+            snap = {"market": "US", "balance": {"positions": [{"ticker": "TSM", "qty": 7, "price": 446.0, "avg_price": 417.0}]},
+                    "prices": {"TSM": {"price": 446.0}}}
+            if rg.thesis_exit_sells(snap, "US"):
+                problems.append("소진된 다리가 다시 발화한다(톱니)")
+            # e) 취소·만료는 찍지 않는다
+            th.STORE.write_text(json.dumps(ledger(), ensure_ascii=False), encoding="utf-8")
+            for v in ("CANCELLED", "EXPIRED", "REJECTED"):
+                fill._close_theses_after_exit(row(verdict=v), now, lambda *a, **k: None)
+            if json.loads(th.STORE.read_text(encoding="utf-8"))["theses"][0]["exit_triggers"][0].get("fired"):
+                problems.append("취소·만료·거부가 다리를 소진시켰다")
+            # f) trigger_id가 없어도 사유 문구에서 되찾는다(옛 기록)
+            th.STORE.write_text(json.dumps(ledger(), ensure_ascii=False), encoding="utf-8")
+            fill._close_theses_after_exit(row(trigger_id=None), now, lambda *a, **k: None)
+            if not json.loads(th.STORE.read_text(encoding="utf-8"))["theses"][0]["exit_triggers"][0].get("fired"):
+                problems.append("trigger_id 폴백(사유 문구)이 안 된다")
+            # g) set-trigger가 소진 표시를 지운다
+            import io, contextlib
+            with contextlib.redirect_stdout(io.StringIO()):
+                th.cmd_set_trigger("t-tsm", "x3", "price >= 476.62", "resistance_2 (20260922 · 과거 고정)", "소진된 다리를 다음 take로")
+            g2 = json.loads(th.STORE.read_text(encoding="utf-8"))["theses"][0]["exit_triggers"][0]
+            if g2.get("fired") or g2.get("fired_at") or g2["check"] != "price >= 476.62":
+                problems.append(f"set-trigger가 다리를 되살리지 않았다 — {g2}")
+            # h) trigger_id가 trades 행까지 남는 코드인가
+            src = (Path(__file__).parent / "execute.py").read_text(encoding="utf-8")
+            if src.count('"trigger_id": o.get("trigger_id")') < 2:
+                problems.append("execute가 trigger_id를 trades 행에 안 남긴다")
+        finally:
+            fill.JOURNAL_DIR, th.STORE, rg.JOURNAL_DIR = saved
+    status = FAIL if problems else PASS
+    results.append((status, "(66)-b~h 체결이 다리를 소진 표시 · 멱등 · 취소 제외 · set-trigger 복원", "; ".join(problems)))
+    print(f"[{status}] (66)-b~h 체결이 다리를 소진 표시 · 멱등 · 취소 제외 · set-trigger 복원"
+          + (f" — {'; '.join(problems)}" if problems else ""))
+
+
+test_leg_marked_on_fill()
+
+
+def test_universe_us_gates():
+    """(67) 편입 — 시세용 거래소 코드로 묻는다 · 빈 응답은 미확인(거부 아님) · 명시적 불가는 거부 · 시총 20B · market 추론."""
+    import universe_apply as ua
+    from kis_client import quote_excd
+    problems = []
+    if [quote_excd(x) for x in ("NYSE", "NASD", "AMEX", "NYS", "NAS", None)] != ["NYS", "NAS", "AMS", "NYS", "NAS", "NAS"]:
+        problems.append("quote_excd 매핑이 틀렸다")
+
+    class Cli:
+        def __init__(self, out): self.out, self.seen = out, []
+        def _headers(self, tr): return {}
+        def _check(self, res, what): return res
+        def _request(self, method, path, headers=None, params=None, body=None, timeout=20):
+            self.seen.append(params.get("EXCD"))
+            return {"rt_cd": "0", "output": self.out}
+    rules = json.loads((Path(__file__).parent / "config" / "universe_rules.json").read_text(encoding="utf-8"))
+    full = {"e_ordyn": "매매 가능", "last": "377.14", "tomv": "108588788780", "tamt": "2862338644", "e_icod": "정유"}
+    # a) 주문용 코드를 줘도 시세용으로 바꿔 묻는다
+    c = Cli(full)
+    info = ua.check_us(c, "VLO", "NYSE", rules)
+    if c.seen != ["NYS"]:
+        problems.append(f"시세 TR에 {c.seen}로 물었다(기대 ['NYS'])")
+    if round(info["price"], 2) != 377.14:
+        problems.append("가격 파싱 실패")
+    # b) 빈 응답은 Unknown(거부 아님)
+    try:
+        ua.check_us(Cli({}), "GEV", "NYSE", rules)
+        problems.append("빈 응답이 통과했다")
+    except ua.Unknown:
+        pass
+    except Exception as e:                              # noqa: BLE001
+        problems.append(f"빈 응답이 Unknown이 아니라 {type(e).__name__}")
+    # b′) 플래그만 공백이어도 Unknown
+    try:
+        ua.check_us(Cli({**full, "e_ordyn": ""}), "GEV", "NYS", rules)
+        problems.append("플래그 공백이 통과했다")
+    except ua.Unknown:
+        pass
+    except Exception as e:                              # noqa: BLE001
+        problems.append(f"플래그 공백이 Unknown이 아니라 {type(e).__name__}")
+    # c) 명시적 불가는 Reject
+    try:
+        ua.check_us(Cli({**full, "e_ordyn": "매매 불가"}), "X", "NYS", rules)
+        problems.append("매매 불가가 통과했다")
+    except ua.Reject:
+        pass
+    # d) 시총 20B 경계 — IBKR(41.6B)은 통과, 15B는 거부
+    try:
+        ua.check_us(Cli({**full, "tomv": "41628806640", "tamt": "370973995"}), "IBKR", "NAS", rules)
+    except Exception as e:                              # noqa: BLE001
+        problems.append(f"IBKR(41.6B)이 거부됐다: {e}")
+    try:
+        ua.check_us(Cli({**full, "tomv": "15000000000"}), "SMALL", "NAS", rules)
+        problems.append("시총 15B이 통과했다")
+    except ua.Reject:
+        pass
+    # e) market 추론 — 6자리 숫자는 KR
+    src = (Path(__file__).parent / "universe_apply.py").read_text(encoding="utf-8")
+    if "ticker.isdigit() and len(ticker) == 6" not in src:
+        problems.append("market 추론이 티커 모양을 안 본다")
+    if "in_uni" not in src or "대기열 정리" not in src:
+        problems.append("이미 편입된 pending 행 정리가 없다")
+    status = FAIL if problems else PASS
+    results.append((status, "(67) 편입 — 시세 코드·미확인·시총 20B·market 추론", "; ".join(problems)))
+    print(f"[{status}] (67) 편입 — 시세 코드·미확인·시총 20B·market 추론"
+          + (f" — {'; '.join(problems)}" if problems else ""))
+
+
+test_universe_us_gates()
+
+
+def test_funding_coupling_and_fx():
+    """(68) 회전 매도는 자금 대상 매수가 나갈 수 있을 때만 · FX는 최신 한 시점 + 낡으면 사유에 적는다."""
+    import execute as ex
+    problems = []
+    src = (Path(__file__).parent / "execute.py").read_text(encoding="utf-8")
+    for need in ("회전 매도 보류", "자금 대상", "refresh_limit(client, tgt"):
+        if need not in src:
+            problems.append(f"execute에 결합 점검이 없다: {need}")
+    # a) 자금 대상이 가격 이탈이면 precheck가 skip을 낸다(09-23 삼성생명→테스 재현)
+    class C:
+        def domestic_price(self, t): return {"price": 158000.0}
+    lim = {"send_refresh_max_pct": 2.0, "fill_aggressive_ticks": 1}
+    _px, _q, _why, skip = ex.refresh_limit(C(), {"ticker": "095610", "action": "BUY", "qty": 11,
+                                                 "price": 154700.0, "market": "KR"}, lim)
+    if not skip or "가격 이탈" not in skip:
+        problems.append(f"가격 이탈이 skip으로 안 나온다 — {skip}")
+    # b) 자금 대상이 정상이면 skip 없음
+    class C2:
+        def domestic_price(self, t): return {"price": 155000.0}
+    _px, _q, _why, skip2 = ex.refresh_limit(C2(), {"ticker": "095610", "action": "BUY", "qty": 11,
+                                                   "price": 154700.0, "market": "KR"}, lim)
+    if skip2:
+        problems.append(f"정상 범위인데 skip이 났다 — {skip2}")
+    # c) FX — 이번 run 스냅샷의 환율이 최신이면 그것을 쓴다
+    bal = {"currency": "KRW", "cash": 1_000_000, "positions": [], "exchange_rate": 1358.2,
+           "exchange_rate_at": datetime.now(KST).isoformat()}
+    saved = (rg.DATA_DIR, rg.JOURNAL_DIR)
+    with tempfile.TemporaryDirectory() as td:
+        rg.DATA_DIR = Path(td) / "data"; rg.JOURNAL_DIR = Path(td) / "journal"
+        rg.DATA_DIR.mkdir(); rg.JOURNAL_DIR.mkdir()
+        (rg.DATA_DIR / "snapshot_260922_us.json").write_text(json.dumps(
+            {"market": "US", "generated_at": datetime.now(KST).isoformat(),
+             "balance": {"currency": "USD", "cash": 1000, "positions": [], "exchange_rate": 1384.3}}), encoding="utf-8")
+        try:
+            pf = rg.portfolio_equity("KR", bal)
+            if pf.get("fx") != 1358.2:
+                problems.append(f"이번 run 환율(1358.2)이 아니라 {pf.get('fx')}를 썼다")
+            # d) 낡은 환율이면 사유에 경고
+            old_at = (datetime.now(KST) - timedelta(hours=13)).isoformat()
+            pf2 = rg.portfolio_equity("KR", {**bal, "exchange_rate_at": old_at})
+            if "환율이" not in pf2["why"] or "시간 전" not in pf2["why"]:
+                problems.append(f"낡은 환율 경고가 없다 — {pf2['why'][-80:]}")
+        finally:
+            rg.DATA_DIR, rg.JOURNAL_DIR = saved
+    status = FAIL if problems else PASS
+    results.append((status, "(68) 회전 매도 결합 점검 · FX 최신·낡음 경고", "; ".join(problems)))
+    print(f"[{status}] (68) 회전 매도 결합 점검 · FX 최신·낡음 경고"
+          + (f" — {'; '.join(problems)}" if problems else ""))
+
+
+test_funding_coupling_and_fx()
 
 
 # ==================================== 요약 ====================================

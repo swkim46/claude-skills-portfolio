@@ -411,6 +411,60 @@ def note_skeleton(market: str, st: str, evid: Path, board_md: str, uni_md: str =
     return "".join(out)
 
 
+def regime_inputs(market: str, board_txt: str = "") -> str:
+    """국면 판단 재료 한 블록 — 벤치마크(KODEX200·SPY) 5·20·60일 수익률·이동평균 대비 위치 + 보드 상승/하락 섹터 수.
+    브로커가 죽어도 캡처를 막지 않는다(그 줄만 '못 쟀다')."""
+    import re as _re
+    lines = []
+    try:
+        bench = json.loads((PROJ / "config" / "benchmark.json").read_text(encoding="utf-8"))
+        tk = (bench.get(market.upper()) or {}).get("benchmark_ticker")
+    except (OSError, json.JSONDecodeError):
+        tk = None
+    if tk:
+        try:
+            from kis_client import KisClient
+            from datetime import timedelta as _td
+            cli = KisClient()
+            if market.lower() == "kr":
+                end = datetime.now(KST).strftime("%Y%m%d")
+                start = (datetime.now(KST) - _td(days=120)).strftime("%Y%m%d")
+                rows = cli.domestic_daily(tk, start, end)
+            else:
+                rows = cli.overseas_daily(tk, "AMS" if tk in ("SPY",) else "NAS")
+            closes = [float(r.get("close") or 0) for r in rows if r.get("close")]
+            if len(closes) >= 61:
+                c0 = closes[0]
+                def chg(n):
+                    return (c0 / closes[n] - 1) * 100 if len(closes) > n and closes[n] else None
+                ma20 = sum(closes[:20]) / 20
+                ma60 = sum(closes[:60]) / 60
+                lines.append(f"벤치마크 {tk} 종가 {c0:,.2f} (기준일 {rows[0].get('date')})")
+                lines.append(f"  수익률 5일 {chg(5):+.2f}% · 20일 {chg(20):+.2f}% · 60일 {chg(60):+.2f}%")
+                lines.append(f"  20일선 {ma20:,.2f} 대비 {(c0 / ma20 - 1) * 100:+.2f}% · 60일선 {ma60:,.2f} 대비 {(c0 / ma60 - 1) * 100:+.2f}%"
+                             f" → {'20·60일선 위' if (c0 > ma20 and c0 > ma60) else '20일선 위·60일선 아래' if c0 > ma20 else '60일선 위·20일선 아래' if c0 > ma60 else '20·60일선 아래'}"
+                             f"{' · 20일선<60일선(데드크로스 구간)' if ma20 < ma60 else ''}")
+                hi60 = max(closes[:60])
+                lines.append(f"  60일 고점 {hi60:,.2f} 대비 {(c0 / hi60 - 1) * 100:+.2f}%")
+            else:
+                lines.append(f"벤치마크 {tk}: 일별 시세 {len(closes)}행 — 60일 계산 불가")
+        except Exception as e:                          # noqa: BLE001
+            lines.append(f"벤치마크 {tk}: 못 쟀다({type(e).__name__}: {str(e)[:80]})")
+    else:
+        lines.append("벤치마크 티커 없음(config/benchmark.json)")
+    ups = downs = 0
+    for ln in (board_txt or "").splitlines():
+        m = _re.search(r"([+-]\d+\.\d+)%", ln)
+        if m and not ln.lstrip().startswith(("■", "섹터", "-")):
+            v = float(m.group(1))
+            ups += v > 0
+            downs += v < 0
+    if ups or downs:
+        lines.append(f"섹터 보드 오늘 상승 {ups} / 하락 {downs}")
+    lines.append("→ allocation.regime은 위 숫자를 인용해 적는다(국면 판단의 근거). 현금을 남기려면 명분과 해제 조건을 붙인다.")
+    return "\n".join(lines)
+
+
 def cmd_capture(a) -> int:
     st = a.stamp or stamp_today()
     EVID.mkdir(parents=True, exist_ok=True)
@@ -423,7 +477,7 @@ def cmd_capture(a) -> int:
     #   *실사례(2026-09-10): 3단이 "KRX 정기변경 명단 미확보 → 조사불가"로 닫았는데
     #   그 명단이 하루 전 받아둔 `_raw_sources/`에 있었고, 지목된 두 종목은 유니버스
     #   안이었으며 종가는 +7.26%·+2.00%였다.*
-    blocks.append(run(["corpus.py", "index"], "로컬 코퍼스 색인 (corpus.py — 이미 가진 자료)"))
+    blocks.append(run(["corpus.py", "index", "--brief"], "로컬 코퍼스 색인 (corpus.py — 이미 가진 자료 · 전체는 corpus.py index, 내용은 search)"))
     # ★ 밀린 세션을 캡처에 박는다. 안 보이면 '안 한 것'과 '없었던 것'이 구분되지 않고,
     #   반쪽으로 죽은 run의 회고가 아무 데도 이어지지 않는다(미국 9/8·9/9가 그랬다).
     blocks.append(run(["sessions.py", "due"], "밀린 일과 (sessions.py — 반쪽·미실행·시각 이탈)"))
@@ -436,6 +490,10 @@ def cmd_capture(a) -> int:
     #   출처여야 `verify_numbers`가 통과한다(2026-09-16 KR run이 이것 때문에 34건 미확인으로 4회 반복).
     blocks.append("### 자본 기준 (risk_guard.portfolio_equity — 노트 머리말 자본 줄의 출처)\n\n"
                   + capital_line(a.market, st) + "\n")
+    # ★ 국면 판단 재료 — 배분 판단(allocation.regime)이 인용할 숫자를 기계로 넣는다(2026-09-22).
+    #   벤치마크 5·20·60일 수익률과 20/60일선 대비 위치 · 보드 상승/하락 섹터 수. 모델은 이 숫자를 인용해 국면을 적는다.
+    blocks.append("### 국면 재료 (regime_inputs — allocation.regime이 인용하는 숫자)\n\n```\n"
+                  + regime_inputs(a.market, board_txt) + "\n```\n")
 
     evid = EVID / f"tools_{st}_{a.market}.md"
     write_preserving(
@@ -594,12 +652,16 @@ def cmd_carry(a) -> int:
     # ★ 2026-09-14: 회고 대상을 "반대편 시장"에서 "시간순 직전 run"으로 바꾼 개정에서
     #   `other` 참조 3곳이 남아 NameError로 carry가 죽었다. 직전 run의 시장(prev_mkt)으로 통일한다.
     prev_mkt = pv.get("market") or ""
-    sess = a.session or (pv.get("session_date") or "")
+    # review.py는 세션 인자로 **파일을 찾는다**(스탬프) — 거래소 기준일이 아니라 스탬프 날짜를 넘긴다
+    # (US 260919 run = ET 09-18 세션: 파일은 260919).
+    sess = a.session or (pv.get("stamp_date") or pv.get("session_date") or "")
     same_market = bool(prev_mkt) and prev_mkt == a.market
 
     blocks = [
         run(["sessions.py", "prev", "--market", a.market, "--stamp", st],
             "직전 run — 언제·어떻게 돌았나 (회고 대상)"),
+        # ★ 배분 판단은 원장으로 이어받는다(2026-09-22) — 직전 판단 블록에서 시작하고, 바꿀 때만 이유를 적는다.
+        run(["allocation.py", "prev"], "배분 판단 — 직전 (allocation.py prev · 이번 시그널 allocation.based_on의 출처)"),
         run(["theses.py", "check", "--snapshot", str(snap.relative_to(PROJ)),
              "--market", a.market.upper()], "트리거 점검 (theses.py check) — 재료보다 먼저"),
     ]
@@ -626,16 +688,16 @@ def cmd_carry(a) -> int:
             "순환 슬롯 (cycle) — 지난 관찰의 사후 · 이월 · 다음 후보"),
         # ★ 시장 필터 없이 **열린 것 전부**. 조건은 시장에 속하지 않는다 —
         #   미국 조건이 국내 대응을 지시하는 일이 실제로 있다("KR Samsung ladder e1 fires").
-        run(["scenarios.py", "list", "--open"],
-            "열린 시나리오 (전 시장 — 조건은 시장에 속하지 않는다)"),
+        run(["scenarios.py", "list", "--open", "--brief"],
+            "열린 시나리오 (전 시장 — 조건은 시장에 속하지 않는다 · 이력은 `scenarios.py list --id`)"),
         run(["scenarios.py", "audit", "--days", "14"],
             "회피 감사 (scenarios.py audit — 실현됐는데 대응했나)"),
         # ★ 실현됐는데 대응이 안 끝난 것 — "미국 조건 → 국내 대응"의 기계 경로다.
         run(["scenarios.py", "due", "--market", a.market],
             "집행 대기 (scenarios.py due — 실현됐는데 대응이 안 끝난 것)"),
         # ★ 조사 전에 연다 — 반대편 run이 이미 세운 as-of를 다시 파지 않게.
-        run(["srcledger.py", "reuse", "--stamp", st, "--market", a.market, "--days", "7"],
-            "출처 재사용 후보 (srcledger.py reuse — 중복 조사 방지)"),
+        run(["srcledger.py", "reuse", "--stamp", st, "--market", a.market, "--days", "7", "--brief"],
+            "출처 재사용 후보 (srcledger.py reuse — 중복 조사 방지 · 한 줄씩)"),
     ]
     prev_sig_f = latest_stamped(PROJ / "signals", "signal", a.market, ".json", exclude_stamp=st)
     sc = "(직전 시그널 없음 — 첫 run이다)"
@@ -707,10 +769,15 @@ def gen_fill_line(summ: dict) -> str:
     *실사례(2026-09-15 VST): 접수 상태로 게이트를 통과하고 run을 닫았다 — 이 줄이 없었다.*
     """
     at = str(summ.get("at", ""))[11:16]
+    inc = summ.get("incidents") or []
+    # ★ `승인 초과 **N건**`은 2026-09-21 사고(승인 46/집행 92가 게이트를 통과) 뒤 추가 — 종목·방향별
+    #   집행 합이 승인 합을 넘으면 `fill.finalize`가 사고를 기록하고 그 id가 여기 붙는다. 게이트는
+    #   "초과 0건" 또는 "사고 기록 INC-"만 통과시킨다.
     return (f"<!-- gen:fill -->체결 확정 — 전송 {summ.get('sent', 0)} · 체결 {summ.get('filled', 0)} · "
             f"부분 {summ.get('partial', 0)} · 취소 {summ.get('cancelled', 0)} · "
             f"만료 {summ.get('expired', 0)} · 거부 {summ.get('rejected', 0)} · "
-            f"미확정 **{summ.get('open_orders', 0)}건**" + (f" ({at} 확인)" if at else ""))
+            f"미확정 **{summ.get('open_orders', 0)}건** · 승인 초과 **{summ.get('overfill', 0)}건**"
+            + (f" · 사고 기록 {', '.join(inc)}" if inc else "") + (f" ({at} 확인)" if at else ""))
 
 
 def cmd_map(a) -> int:
@@ -798,6 +865,51 @@ def cmd_map(a) -> int:
     return 0
 
 
+def pick_market(now=None) -> tuple:
+    """어느 시장을 준비할지 — **지금 열린 시장**, 둘 다 닫혔으면 다음에 열리는 시장. 반환 (market, open, why).
+
+    ★ 시각 제한을 두지 않는다. 루틴 지침이 "10:35·22:35 ±90분 밖이면 건너뜀"이라 한낮에 깨워도
+    장이 열려 있는데 안 돌았다(2026-09-18 사용자). 판정은 `kis_client.market_session` 하나로 한다.
+    """
+    from kis_client import market_session, KST as _KST
+    now = now or datetime.now(_KST)
+    kr, us = market_session("KR", now), market_session("US", now)
+    if kr["is_open"]:
+        return "kr", True, f"국내 정규장 열림 ({kr['why']})"
+    if us["is_open"]:
+        return "us", True, f"미국 정규장 열림 ({us['why']})"
+    # 다음에 열리는 시장 — 국내 마감(15:30) 전이면 kr, 마감 뒤면 그날 밤 us(예전 `hour < 16`은 15:30~16:00에 닫힌 kr을 골랐다)
+    nxt = "kr" if (5 <= now.hour and now < kr["close"]) else "us"
+    if nxt == "kr" and kr.get("holiday"):
+        nxt = "us"                              # 국내 휴장일 낮에는 그날 밤 미국장을 준비한다
+    elif nxt == "us" and us.get("holiday"):
+        nxt = "kr"
+    return nxt, False, (f"둘 다 닫힘 — 다음에 열리는 {nxt.upper()}를 준비한다(dispatch까지 · 전송은 "
+                        f"장이 열린 실행이 5단부터 재개). KR {kr['open']:%H:%M}–{kr['close']:%H:%M} · "
+                        f"US {us['open']:%H:%M}–{us['close']:%H:%M} KST")
+
+
+def cmd_market(a) -> int:
+    m, is_open, why = pick_market()
+    print(m)
+    print(f"  {why}", file=sys.stderr)
+    return 0
+
+
+def _find_section(lines: list, key: str):
+    """절 키(`§6`·`§1-A`·`§11-집행`·`머리말`)의 `## ` 헤더 줄 번호. 헤더 토큰(둘째 단어) 정확 일치 →
+    없으면 키의 `-` 앞(`§11-집행` → `§11`)으로 부모 절. `key in line` 부분일치는 쓰지 않는다 —
+    `§1`이 `§10`·`§11`에 걸렸고, `§11-규율`은 헤더가 `## §11 집행 결과`라 못 찾았다(2026-09-21)."""
+    def token(l):
+        parts = l[3:].strip().split()
+        return parts[0] if parts else ""
+    for k in (key, key.split("-", 1)[0]):
+        for i, l in enumerate(lines):
+            if l.startswith("## ") and token(l) == k:
+                return i
+    return None
+
+
 def cmd_stamp(a) -> int:
     """완료 스탬프를 **실제 시각으로** 찍는다 — 노트 절(`--note --sec §N`) 또는 작업기록(`--worklog --stage`).
 
@@ -831,9 +943,10 @@ def cmd_stamp(a) -> int:
         if kind == "note":
             # 그 절의 끝(다음 `## ` 직전)에 넣는다 — 절 밖에 찍히면 게이트가 못 센다.
             lines = txt.split("\n")
-            start = next((i for i, l in enumerate(lines) if l.startswith("## ") and key in l), None)
+            start = _find_section(lines, key)
             if start is None:
-                print(f"절을 못 찾았다: {key} — 헤더가 `## {key} …` 형태인가", file=sys.stderr)
+                parent = key.split("-", 1)[0]
+                print(f"절을 못 찾았다: {key} — 헤더 `## {parent} …`가 없다", file=sys.stderr)
                 return 2
             end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
             at = end
@@ -851,6 +964,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("market", help="어느 시장을 준비할지 — 열린 시장, 없으면 다음에 열리는 시장 (kr|us 한 줄)")
     stp = sub.add_parser("stamp", help="완료 스탬프를 실제 시각으로 찍는다(손으로 시각을 적지 않는다)")
     stp.add_argument("--note", default="", help="분석노트 경로")
     stp.add_argument("--sec", default="", help="절 키 (예: §6, §11-집행, 머리말)")
@@ -877,7 +991,8 @@ def main() -> int:
     mp.add_argument("--refresh", action="store_true",
                     help="forecast add 뒤 생성줄만 다시 센다(파일은 그대로)")
     a = ap.parse_args()
-    return {"capture": cmd_capture, "carry": cmd_carry, "map": cmd_map, "stamp": cmd_stamp}[a.cmd](a)
+    return {"capture": cmd_capture, "carry": cmd_carry, "map": cmd_map, "stamp": cmd_stamp,
+            "market": cmd_market}[a.cmd](a)
 
 
 if __name__ == "__main__":

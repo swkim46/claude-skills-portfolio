@@ -13,7 +13,9 @@ requests/pandas/yaml 의존 + ~/KIS/config 전제 + 백테스터의 Node18/Docke
 이 프로젝트는 6개월 모의 검증을 통과하기 전까지 실전 계좌를 쓰지 않는다.
 (근거: AI자동매매_공개사례_성능조사_v1_0.md §5)
 """
+import http.client
 import json
+import socket
 import ssl
 import time
 import urllib.error
@@ -185,6 +187,22 @@ def order_excd(excd: str) -> str:
     return EXCD_ORDER.get(e, e)
 
 
+# 주문용 → 시세용. `order_excd`의 짝이다.
+EXCD_QUOTE = {v: k for k, v in EXCD_ORDER.items()}          # NASD→NAS · NYSE→NYS · AMEX→AMS
+
+
+def quote_excd(excd: str) -> str:
+    """**시세 TR용** 거래소 코드로 정규화한다. 주문용(NASD/NYSE/AMEX)이 오면 시세용(NAS/NYS/AMS)으로 바꾼다.
+
+    ★ 왜 이 짝이 필요한가(2026-09-23). 시세 TR에 주문용 코드를 주면 **에러가 아니라 `rt_cd=0`에 빈 output**이 온다 —
+    가격도 시가총액도 매매가능 플래그도 전부 공백이다. `universe_apply`가 `EXCD=NYSE`로 물어 4 run 동안
+    "브로커 매매 판정 ''"(= 브로커가 거부했다)로 기록했는데, 실제로는 **우리가 못 물어본 것**이었다.
+    올바른 코드(`NYS`)로는 GEV·CMI·VLO·IBKR 전부 `'매매 가능'`이 온다. 코드 계열을 섞지 말 것.
+    """
+    e = (excd or "NAS").upper()
+    return EXCD_QUOTE.get(e, e)
+
+
 def _us_dst(d) -> bool:
     """미국 서머타임 여부(3월 둘째 일요일 ~ 11월 첫째 일요일). d는 현지(ET) 날짜."""
     from datetime import date as _date
@@ -196,8 +214,44 @@ def _us_dst(d) -> bool:
     return second_sun <= d < first_sun
 
 
+HOLIDAYS_PATH = CONFIG_DIR / "holidays.json"
+_HOL_CACHE = {"key": None, "data": {}}
+
+
+def load_holidays() -> dict:
+    """`config/holidays.json` — {"kr": [...], "us": [...]}. 없거나 깨졌으면 빈 dict(휴장을 모른다 = 예전 동작)."""
+    try:
+        key = (str(HOLIDAYS_PATH), HOLIDAYS_PATH.stat().st_mtime)
+    except OSError:
+        return {}
+    if _HOL_CACHE["key"] != key:
+        try:
+            _HOL_CACHE["data"] = json.loads(HOLIDAYS_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            _HOL_CACHE["data"] = {}
+        _HOL_CACHE["key"] = key
+    return _HOL_CACHE["data"] or {}
+
+
+def is_holiday(market: str, d) -> bool:
+    """그 시장의 거래소 휴장일인가(주말은 여기서 보지 않는다)."""
+    days = load_holidays().get((market or "KR").lower()) or []
+    return d.isoformat() in days
+
+
+def next_trading_day(market: str, d):
+    """d **다음** 거래일(주말·휴장 제외)."""
+    while True:
+        d = d + timedelta(days=1)
+        if d.weekday() < 5 and not is_holiday(market, d):
+            return d
+
+
 def market_session(market: str, now: datetime = None) -> dict:
-    """이 시장의 **정규장** 창(KST). 반환 {open, close, is_open, session_date, why}.
+    """이 시장의 **정규장** 창(KST). 반환 {open, close, is_open, session_date, holiday, why}.
+
+    ★ 휴장(`config/holidays.json`)도 닫힌 날이다 — 2026-09-21까지 모든 개장 판정이 `weekday() < 5`뿐이라
+    추석 휴장(09-24·25)에 `stops.py`·`stage.py market`이 국내장을 열린 것으로 봤다.
 
     KR 09:00–15:30 · US 09:30–16:00 ET(= KST 22:30–05:00 서머타임 / 23:30–06:00 표준시).
     왜 여기 있나: 장외에 보낸 주문은 브로커가 `[40580000] 모의투자 장종료`로 거부하고
@@ -210,9 +264,10 @@ def market_session(market: str, now: datetime = None) -> dict:
         d = now.date()
         o = datetime(d.year, d.month, d.day, 9, 0, tzinfo=KST)
         c = datetime(d.year, d.month, d.day, 15, 30, tzinfo=KST)
-        is_open = d.weekday() < 5 and o <= now <= c
-        return {"market": "KR", "open": o, "close": c, "is_open": is_open,
-                "session_date": d, "why": "KRX 정규장 09:00–15:30 KST"}
+        hol = is_holiday("KR", d)
+        is_open = d.weekday() < 5 and not hol and o <= now <= c
+        return {"market": "KR", "open": o, "close": c, "is_open": is_open, "holiday": hol,
+                "session_date": d, "why": "KRX 정규장 09:00–15:30 KST" + (" · 휴장(holidays.json)" if hol else "")}
     # US — ET 기준 날짜로 서머타임을 정하고 KST로 옮긴다.
     utc = now.astimezone(timezone.utc)
     et_off = -4 if _us_dst((utc - timedelta(hours=4)).date()) else -5
@@ -221,9 +276,11 @@ def market_session(market: str, now: datetime = None) -> dict:
     o_et = datetime(d.year, d.month, d.day, 9, 30, tzinfo=timezone(timedelta(hours=et_off)))
     c_et = datetime(d.year, d.month, d.day, 16, 0, tzinfo=timezone(timedelta(hours=et_off)))
     o, c = o_et.astimezone(KST), c_et.astimezone(KST)
-    is_open = d.weekday() < 5 and o <= now <= c
-    return {"market": "US", "open": o, "close": c, "is_open": is_open, "session_date": d,
-            "why": f"NYSE 정규장 09:30–16:00 ET = KST {o:%H:%M}–{c:%H:%M} ({'EDT' if et_off == -4 else 'EST'})"}
+    hol = is_holiday("US", d)
+    is_open = d.weekday() < 5 and not hol and o <= now <= c
+    return {"market": "US", "open": o, "close": c, "is_open": is_open, "session_date": d, "holiday": hol,
+            "why": f"NYSE 정규장 09:30–16:00 ET = KST {o:%H:%M}–{c:%H:%M} ({'EDT' if et_off == -4 else 'EST'})"
+                   + (" · 휴장(holidays.json)" if hol else "")}
 
 
 class KisError(RuntimeError):
@@ -355,6 +412,16 @@ class KisClient:
                     last_err = KisError(f"network error on {method} {path}: {e.reason}")
                     continue
                 raise KisError(f"network error on {method} {path}: {e.reason}") from e
+            except (socket.timeout, TimeoutError, http.client.HTTPException, ConnectionError, OSError,
+                    json.JSONDecodeError) as e:
+                # ★ 읽기 타임아웃(`socket.timeout`)·끊긴 연결·깨진 본문은 URLError가 **아니라** 그대로 튀어 올라
+                #   호출자 프로세스를 죽였다(2026-09-22 KR: 잔고 조회 13:39 · 상태 TR 15:23 → execute.py 예외 종료,
+                #   매수 미전송). 전부 KisError로 감싸고, 조회면 재시도한다 — 주문(POST)은 재시도하지 않는다(중복 주문).
+                if allow_retry and attempt < TRANSIENT_RETRIES:
+                    time.sleep(TRANSIENT_BACKOFF_SEC * (attempt + 1))
+                    last_err = KisError(f"network error on {method} {path}: {type(e).__name__}: {e}")
+                    continue
+                raise KisError(f"network error on {method} {path}: {type(e).__name__}: {e}") from e
 
         raise KisError(f"재시도 {TRANSIENT_RETRIES}회 소진: {method} {path} — 마지막: {last_err}")
 

@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import dart_feed
-from kis_client import KisClient, KisError, us_buying_power
+from kis_client import KisClient, KisError, quote_excd, us_buying_power
 
 HERE = Path(__file__).parent
 CONFIG_DIR = HERE / "config"
@@ -40,7 +40,6 @@ EQUITY_PATH = JOURNAL_DIR / "equity_curve.jsonl"
 DIGEST_SCRIPT = HERE.parent / "gmail-newsletter-analyzer" / "digest.py"
 
 KST = timezone(timedelta(hours=9))
-EXCD_QUOTE = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}
 
 
 def _read_json(path: Path, default=None):
@@ -127,7 +126,7 @@ def collect_prices(client: KisClient, market: str, watchlist: dict, positions: l
                 q = client.domestic_price(ticker)
             else:
                 q = client.overseas_price(
-                    ticker, excd=EXCD_QUOTE.get(meta.get("excd", "NASD"), "NAS"))
+                    ticker, excd=quote_excd(meta.get("excd")))
             prices[ticker] = {
                 "price": q["price"], "change_pct": q["change_pct"],
                 # 종목명은 워치리스트가 원본이다 — 국내 시세 TR은 종목명을 주지 않는다.
@@ -528,7 +527,7 @@ def write_material(md_path: Path, market: str, balance: dict, prices: dict,
         L += ["## 뉴스레터 원문", "",
               f"*(출처 파일: `{news_path}`)*", "", "---", ""]
         try:
-            L.append(Path(news_path).read_text(encoding="utf-8"))
+            L.append(_stub_already_read(Path(news_path).read_text(encoding="utf-8"), market, md_path))
         except OSError as e:
             L.append(f"*(읽기 실패: {e})*")
     else:
@@ -577,6 +576,42 @@ def write_material(md_path: Path, market: str, balance: dict, prices: dict,
         print(f"      {verdict}", file=sys.stderr)
 
 
+def _stub_already_read(news: str, market: str, md_path: Path) -> str:
+    """같은 시장의 **직전 run 재료에 이미 통째로 들어갔던 호**는 제목 + 안내 한 줄로 줄인다(F2′ · 2026-09-22).
+    수집 창(`--days`)이 주말을 덮느라 넓어 같은 호가 두 run에 들어온다 — 그 호의 판단은 직전 노트·이어받기가
+    이미 들고 온다. 반대편 시장이 읽은 호는 손대지 않는다(다른 렌즈). 원문은 직전 재료 파일에 그대로 있다."""
+    import re as _re
+    try:
+        prevs = sorted(p for p in md_path.parent.glob(f"material_*_{market.lower()}.md")
+                       if p.name < md_path.name and _re.match(r"material_\d{6}_", p.name))
+    except OSError:
+        prevs = []
+    if not prevs:
+        return news
+    prev = prevs[-1]
+    try:
+        seen = set(_re.findall(r"^## (\[.*?\] .*? — \d{4}/\d{2}/\d{2})\s*$", prev.read_text(encoding="utf-8"), _re.M))
+    except OSError:
+        return news
+    if not seen:
+        return news
+    out, skip, n = [], False, 0
+    for ln in news.split("\n"):
+        m = _re.match(r"^## (\[.*?\] .*? — \d{4}/\d{2}/\d{2})\s*$", ln)
+        if m:
+            skip = m.group(1) in seen
+            out.append(ln)
+            if skip:
+                n += 1
+                out.append(f"*(이미 읽음 — 같은 시장 직전 run 재료 `{prev.name}`에 전문이 있다. 그 호의 판단은 이어받기·직전 노트에 있다.)*")
+            continue
+        if not skip:
+            out.append(ln)
+    if n:
+        out.insert(0, f"*(직전 run이 읽은 호 {n}건은 제목만 남겼다 — 원문 `{prev.name}`)*\n")
+    return "\n".join(out)
+
+
 def _carry_news(md_path: Path) -> str:
     """기존 재료 파일에서 뉴스레터 섹션만 떼어 온다. 없으면 빈 문자열."""
     if not md_path.exists():
@@ -614,6 +649,17 @@ def main() -> int:
     print(f"[1/4] 잔고 조회 ({market})")
     if market == "KR":
         balance = client.domestic_balance()
+        # ★ 합산 분모의 환율은 **이 run 시점** 값이어야 한다(2026-09-23). 예전엔 KR run이 반대편(미국) 스냅샷의
+        #   환율을 그대로 썼고, 그 값이 반나절 낡아 1,384.30 vs 당일 기준가 1,358.2(−1.89%)로 US북이 약 2.6M원
+        #   과대계상됐다. 조회 1회로 오늘 값을 같이 담는다 — 실패하면 없는 채로 두고(반대편 스냅샷 값으로 물러선다)
+        #   사유를 적는다.
+        try:
+            bp_fx = us_buying_power(client, watchlist)
+            if bp_fx.get("exchange_rate"):
+                balance["exchange_rate"] = bp_fx["exchange_rate"]
+                balance["exchange_rate_at"] = datetime.now(KST).isoformat()
+        except (KisError, KeyError, TypeError) as e:
+            print(f"      환율 조회 실패(반대편 스냅샷 값으로 물러선다): {type(e).__name__}", file=sys.stderr)
     else:
         balance = client.overseas_balance()
         # 해외 예수금은 잔고 TR이 아니라 체결기준현재잔고 TR에서 읽는다.

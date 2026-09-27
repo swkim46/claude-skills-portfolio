@@ -1,173 +1,54 @@
-# Gmail Newsletter Analyzer
+# 뉴스레터 수집과 학습 노트 작성 도구
 
-Reads subscribed newsletters from personal Gmail and turns them into a digest worth reading, instead of an inbox worth ignoring.
+구독 뉴스레터와 연결된 자료를 수집하고, 학습 노트 작성에 필요한 원문을 정리합니다. 작성된 노트의 형식과 누락 여부를 검사하고, 수정본을 관리합니다.
 
-**Status: end-to-end working. Output format settled on `.md` (2026-08-30).**
+노트 작성 규칙은 [world-study 스킬 문서](../.claude/skills/world-study/SKILL.md)에 있습니다. 이 폴더의 스크립트는 자료 수집, 노트 검사, 파일 정리를 담당합니다. 표준 라이브러리를 사용하며, PDF 본문 추출에만 `pypdf`가 필요합니다.
 
-> **Portfolio snapshot.** The notes (`세상공부/`), the paired corpus and the raw newsletter captures are excluded —
-> the notes are personal and the newsletter bodies are copyrighted. Code, roster schema and the note linter ship in full.
+## 구성 파일
 
----
+| 파일 | 역할 |
+|---|---|
+| `gmail_imap.py` | IMAP으로 메일함 검색과 메일 읽기 수행 |
+| `scan_senders.py` | 발신자별 수신 현황 확인과 수집 목록 후보 제안 |
+| `digest.py` | 지정 기간의 발행분을 한 파일로 정리. 협찬·안내문 제거, 미등록 발신자와 스팸함 발행분 경고 |
+| `fetch_article.py` | 본문에 연결된 원문 수집. PDF 자동 감지와 본문 추출 |
+| `check_note.py` | 금지 표현, 발행분 대응, 중복, 표시 규칙, 뷰어에서 깨지는 문자 검사 |
+| `cache_claims.py` | 출처 검증 결과를 저장해 같은 주장의 중복 조회 방지 |
+| `tidy_versions.py` | 날짜별 최신 버전만 남기고 이전 버전을 `이전버전/`으로 이동 |
+| `build_corpus.py` | 직접 작성한 노트와 해당 발행분을 연결해 작성 규칙 분석용 자료 생성 |
+| `newsletters.json` | 수집할 발신자, 활성 여부, 제외 사유 관리 |
 
-## 1. What exists today
+## 처리 순서
 
-| Component | File | State |
-|---|---|---|
-| IMAP transport | `gmail_imap.py` | ✅ **Verified against the live mailbox** 2026-08-27 |
-| App password | `<REPO>/.env` | ✅ Repo-root env, one level up (copy `.env.example`) |
-| Sender scanner | `scan_senders.py` | ✅ Working — 90-day scan run 2026-08-27 |
-| Newsletter roster | `newsletters.json` | ✅ 3 enabled (UPPITY·BOODING·STARTUP WEEKLY), 2 borderline off |
-| Digest collector | `digest.py` | ✅ Working — sponsored sections removed, reader feedback kept |
-| Paired corpus | `build_corpus.py` → `_raw_sources/corpus/` | ✅ 21 days, 57 newsletters (backlog windows) |
-| Transformation rules | `_raw_sources/전이규칙_도출.md` (private — not in this repo) | ✅ Derived by comparison, not guesswork |
-| **The analyzer** | `life/.claude/skills/world-study/SKILL.md` | ✅ Holdout-tuned + step gate (`rubrics/world-study.json`) |
-| Holdout eval | `_raw_sources/홀드아웃_평가_260828.md` (private — not in this repo) | 🟡 2 rounds; next needs fresh dates |
-| Notes | `세상공부/` (private — not in this repo) | ✅ v2_0 확정 (fact-check + 적대 감사 통과) |
+1. `python3 digest.py --since "<직전 수집 스탬프>"`로 직전 노트 이후의 발행분을 한 파일로 모읍니다. 날짜가 아닌 마지막 수집 시점을 기준으로 이어서 수집해 누락과 중복을 방지합니다.
+2. 스킬이 자료를 읽고 노트를 작성합니다. 선별한 항목에 연결된 원문은 `fetch_article.py`로 확인합니다.
+3. `python3 check_note.py <노트> --material <자료>`로 작성된 노트를 검사합니다.
+4. 단계별 검사를 통과하면 `[AI]` 문장의 출처를 검증합니다. 이미 검증한 주장은 `cache_claims.py`가 확인해 중복 조회를 줄입니다.
+5. `python3 tidy_versions.py`로 날짜별 최신 버전만 남깁니다.
 
-The OAuth artifacts (`gmail_mcp.py`, `client_secret.json`, `token.json`, `requirements.txt`, `.venv/`) were **deleted on 2026-08-27** once IMAP was verified.
+## 수집 목록
 
-### What the analyzer is actually for
+국내 뉴스레터 3종과 미국 시장 뉴스레터(Axios) 6종을 수집합니다. 한국 시각 아침에 노트를 작성하므로 미국 뉴스레터는 장 마감 후 발송되는 것으로 선택했습니다. `newsletters.json`의 개인 전달 주소는 자리표시자로 바꿔 두었으므로, 사용 전에 자신의 구독 주소를 입력해야 합니다.
 
-Not a generic "digest". It continues the **`세상 공부`** note in Apple Notes — a hand-kept study journal running 260112–260303 (21 entries, ~8.5 lines a day) covering 경제·금융, 부동산, 산업·테크, 지정학. Its topics map almost exactly onto the three newsletters in the roster.
+## 노트 파일 규칙
 
-The note **stopped six months ago**. Keeping it by hand did not survive contact with a busy schedule, and that — not inbox volume — is the problem this project exists to solve.
+- 파일명은 `세상공부_YYMMDD_노트_vN_M.md`입니다. 같은 날짜의 노트를 수정하면 `v1_1`, `v2_0`처럼 버전을 올립니다.
+- 메인 폴더에는 날짜별 최신 파일만 두고, 이전 버전은 `이전버전/`으로 옮깁니다.
+- 노트는 거시·시장, 기업·산업, 테크·AI, 정책·제도, 부동산, 지정학·해외, 생활·트렌드, 할 일·일정의 여덟 절로 구성합니다.
+- 원문에서 근거를 확인한 문장에는 표시를 붙이지 않습니다. 원문에 없는 사실에는 `[AI]`, 해석에는 `[추정]`을 붙입니다.
 
-**It is not a summarizer.** A summary makes the source shorter; this note starts from one line
-of the source and digs out *why it is so*, leaving an understanding deeper than the original.
+## 설정
 
-The note is **hierarchical** — 62 of 177 items (35%) are sub-items, nesting three deep:
+1. Gmail에서 2단계 인증을 켜고 앱 비밀번호를 발급합니다.
+2. 저장소 루트의 `.env.example`을 `.env`로 복사해 `GMAIL_ADDRESS`와 `GMAIL_APP_PASSWORD`를 채웁니다.
+3. `python3 scan_senders.py --days 30`으로 수집이 되는지 확인합니다.
 
-```
-- 작년 대비 서울 전세 매물 27% 감소                       ← 사실
-    - 토지거래허가구역이 되어 실거주 필요 → 전세 놓을 이유 X   ← 원인
-        - 일정 규모 이상 거래 시 지자체 허가가 필요한 제도      ← 개념 정의
-        - '토지' 구역이지만 건물이 대지 지분을 가져 주택도 대상   ← 비직관적 디테일
-```
+자체 검사는 `python3 check_note.py --selftest`와 `python3 cache_claims.py selftest`로 실행하며, API 키 없이 동작합니다.
 
-⚠️ Apple Notes' `plaintext of note` **destroys this hierarchy.** Always read `body of note`
-(HTML) and parse the nested `<ul>` — `build_corpus.py` does this.
+## 보안
 
-The rules live in the skill; they were derived by comparing 57 newsletters against 177 note
-items, not invented. Two that cost the most to learn:
+메일 접근에는 IMAP과 앱 비밀번호를 사용하며 OAuth 클라이언트 파일은 사용하지 않습니다. 앱 비밀번호는 Google 계정에서 언제든 폐기할 수 있습니다. `.env`는 저장소에 포함하지 않습니다.
 
-- **거시지표는 1%.** Index moves and rate commentary are almost never recorded — the first
-  draft led with them and scored 0/1 on holdout.
-- **Material is the backlog, not the day.** An entry draws on every issue since the *previous*
-  entry. 6 of 21 note days were 2–4 day backlogs. Pairing same-day-only put source coverage at
-  82%; pairing by backlog window raised it to **92%**, and the remainder is the operator's own
-  synthesis rather than outside fact.
+## 비공개 자료
 
-### Why IMAP instead of the Gmail API
-
-The original transport used OAuth against the Gmail API. It was abandoned on 2026-08-27 for a concrete reason:
-
-- The saved refresh token was dead (`invalid_grant`). The consent screen for project `<gcp-project-id>` is in **Testing** status with **External** user type, and Google expires refresh tokens for that combination after **7 days**. A recurring digest can never run unattended under that constraint.
-- The obvious fix — publishing to Production — is **blocked in the console**. The publish button is disabled with "앱의 OAuth 구성이 완료되지 않았습니다", pointing at the Branding page, whose required fields are already filled. The same symptom is reported on Google's developer forums.
-- Separately, the desktop OAuth client (created 2026-03-13) carries a warning that **unused clients are deleted after 6 months** — meaning around mid-September 2026.
-
-IMAP with an app password has no token expiry and no console dependency.
-
-### What the switch cost, and what it didn't
-
-Less than expected. Gmail's IMAP server supports the **`X-GM-RAW`** search extension, which accepts full Gmail search syntax, so `build_query()` and its KST day-boundary handling carried over essentially unchanged. Only the connection and fetch layer was genuinely rewritten.
-
-It also **removed all third-party dependencies** — `imaplib` and `email` are stdlib. There is no venv to maintain and nothing to reinstall after a Python upgrade, which is what broke this project once already.
-
-The one real loss: the Gmail API returned a `snippet` for free. IMAP does not, so previews now require fetching the body.
-
-### Details worth not rediscovering
-
-- **KST day boundaries** (`build_query` + `filter_to_kst_day`) — Gmail's `after:`/`before:` are date-only, so a naive "today" query mis-handles the 9-hour offset. The window is widened by a day on each side, then trimmed precisely using each message's `Date` header.
-- **`BODY.PEEK`, never `BODY`** — a plain `BODY[]` fetch sets the `\Seen` flag and would silently mark your newsletters as read. Every fetch here uses `PEEK`, and the mailbox is selected `readonly=True`.
-- **Localised folder names** — a Korean account exposes `[Gmail]/전체보관함`, not `[Gmail]/All Mail`. `find_all_mail()` discovers it by the `\All` special-use flag instead of by name.
-- **MIME-encoded headers** — Korean subjects and sender names arrive as `=?UTF-8?B?...?=` and need decoding.
-- **Non-ASCII search** — `imaplib` mangles non-ASCII arguments; Korean queries are sent as a UTF-8 literal with an explicit charset.
-
-### A note on `workflow.py`
-
-`gmail_mcp.py` referred to *"a Python-callable entry point for workflow.py."* **No such file was ever written** — it was a planned filename referenced before it existed, not lost work. `gmail_imap.fetch()` now fills that role.
-
----
-
-## 2. Setup
-
-### Step 1 — create an app password
-
-Requires 2-Step Verification on the account. Create one at [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords).
-
-### Step 2 — write `.env`
-
-At the repo root (`<REPO>/.env`, gitignored — copy `.env.example`):
-
-```
-GMAIL_ADDRESS=you@gmail.com
-GMAIL_APP_PASSWORD=xxxxxxxxxxxxxxxx
-```
-
-Spaces in the displayed password are cosmetic and stripped automatically.
-
-### Step 3 — verify
-
-```bash
-python3 gmail_imap.py
-```
-
-Prints the detected All Mail folder and up to three recent messages, or a clear failure. Any `python3` works — no venv required.
-
----
-
-## 3. Files
-
-```
-gmail-newsletter-analyzer/
-├── README.md            ← this file
-├── gmail_imap.py        ← IMAP transport (search + read), stdlib only
-├── scan_senders.py      ← surveys mail, proposes the roster
-├── digest.py            ← collects a date window, strips sponsored blocks
-├── build_corpus.py      ← pairs note entries with their source issues
-├── newsletters.json     ← the roster: which senders feed the digest
-├── 세상공부/             ← the notes (private; gitignored here)
-│   ├── 세상공부_YYMMDD_vN_M.md
-│   └── 이전버전/
-└── _raw_sources/        ← runtime material (gitignored)
-
-    credentials live one level up in <REPO>/.env  [SECRET]
-```
-
----
-
-## 4. Output — settled on `.md` (2026-08-30)
-
-Notes are written to **files**, not appended to the Apple Note. The note stays untouched because it is
-the corpus and the basis of the spec.
-
-```
-세상공부/
-├── 세상공부_YYMMDD_vN_M.md      ← current
-├── 세상공부_YYMMDD_vN-1_M.md    ← previous major, kept
-└── 이전버전/                     ← retired minors
-```
-
-Versioning follows `deliverable-versioning`: never overwrite, always issue `vN_M`. `M++` retires the
-previous minor into `이전버전/`; `N++` (a verification changed the facts) keeps the previous major in place.
-
----
-
-## 5. Where this is going
-
-Not yet built. Open questions, in the order they need answering:
-
-1. ~~**Which newsletters?**~~ ✅ **Answered** — `scan_senders.py` surveyed 90 days (594 messages, 72 senders) and `newsletters.json` holds the result. Three genuine editorial newsletters are enabled: UPPITY 머니레터 (경제·금융, near-daily), BOODING (부동산, 1–2×/week), STARTUP WEEKLY (스타트업, weekly). Two borderline sources are off pending review. **Still needs the operator's sign-off.**
-2. **What does a digest contain?** Per-newsletter summary, cross-newsletter theme clustering, or filtering to standing interests. These imply meaningfully different pipelines.
-3. **What cadence?** Daily and weekly differ in volume, and `build_query` currently assumes a single-day window.
-4. **Where does output go?** A dated Markdown file here, a Notion page, or something else.
-
-Deliverables follow the `life/` convention: `<주제>_vN_M.md`.
-
----
-
-## 5. Security
-
-`.env` holds a Google app password. Unlike the `gmail.readonly` OAuth scope it replaces, **an app password grants full IMAP access — including deleting and modifying mail.** This module never issues a write command and selects mailboxes read-only, but that restraint lives in the code, not in the credential. Treat the password accordingly: keep it in `.env`, never paste it elsewhere, and revoke it at [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords) if it is ever exposed.
-
-`client_secret.json` and `token.json` are leftovers from the OAuth attempt. The token is dead; the client secret is still live until the client is deleted. Both are gitignored and should be removed once IMAP is verified.
+개인 학습 노트, 구독 뉴스레터 원문, 실제 분석·매매 기록과 인증 정보는 포함하지 않았습니다. `세상공부/`와 `_raw_sources/`는 비어 있으며 실행 중 자료가 생성됩니다. 작성 규칙 분석에 사용한 노트와 원문 대조 자료도 저작권과 개인 기록 보호를 위해 공개하지 않습니다.

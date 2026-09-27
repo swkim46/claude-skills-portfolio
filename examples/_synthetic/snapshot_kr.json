@@ -1,0 +1,54 @@
+{
+  "_comment": "시연용 가상 계좌 스냅샷. 잔고·보유·시세 전부 가상.",
+  "market": "KR",
+  "generated_at": "2026-10-12T09:05:00+09:00",
+  "day_pnl_pct": 0.0,
+  "balance": {
+    "currency": "KRW",
+    "cash": 3800000,
+    "positions": [
+      {
+        "market": "KR",
+        "ticker": "900005",
+        "name": "한라조선(가상)",
+        "qty": 80,
+        "avg_price": 39500,
+        "price": 41000,
+        "eval_amt": 3280000,
+        "pnl_pct": 3.8
+      },
+      {
+        "market": "KR",
+        "ticker": "900006",
+        "name": "미래전력(가상)",
+        "qty": 120,
+        "avg_price": 25100,
+        "price": 24300,
+        "eval_amt": 2916000,
+        "pnl_pct": -3.19
+      }
+    ]
+  },
+  "prices": {
+    "900001": {
+      "price": 24850,
+      "change_pct": 1.2
+    },
+    "900002": {
+      "price": 12050,
+      "change_pct": 0.4
+    },
+    "900005": {
+      "price": 41000,
+      "change_pct": 0.7
+    },
+    "900006": {
+      "price": 24300,
+      "change_pct": -0.6
+    },
+    "069500": {
+      "price": 42150,
+      "change_pct": 0.3
+    }
+  }
+}

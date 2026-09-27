@@ -1,0 +1,108 @@
+{
+  "schema_version": "1.0",
+  "market": "KR",
+  "generated_at": "2026-09-27T20:45:50.704260+09:00",
+  "signal_ref": "signals/signal_DEMO_kr.json",
+  "snapshot_ref": "data/snapshot_DEMO_kr.json",
+  "limits_sha256": "443d0c8e5afc880c0586f1122ee8b63a06980e8c9d85a2d0ef9e4822938b429c",
+  "orders": [
+    {
+      "ticker": "900001",
+      "name": "한빛전선(가상)",
+      "market": "KR",
+      "excd": null,
+      "action": "BUY",
+      "qty": 12,
+      "price": 24850.0,
+      "increment_pct": 3.0,
+      "source": "llm",
+      "proposal": {
+        "ticker": "900001",
+        "name": "한빛전선(가상)",
+        "action": "BUY",
+        "weight_target_pct": 3.0,
+        "thesis": "해상풍력 2단계 케이블 공급 계약(공시 확인) + 국내 조달 의무 비율 도입(입법예고 원문 확인). 논지 호흡 12주. 첫 칸 3%만 진입, 되돌림 50%에 두 번째 칸.",
+        "confidence": 0.62,
+        "horizon_days": 84,
+        "risk_notes": "입법예고 결과 조달 비율이 40% 이하로 후퇴하면 논지 무효",
+        "evidence": [
+          {
+            "claim": "한빛전선, 해상풍력 2단계 해저 HVDC 케이블 공급 계약 체결(가상 공시)",
+            "source_url": "https://example.invalid/dart/900001-20261009",
+            "tier": "T2",
+            "verdict": "MATCH"
+          },
+          {
+            "claim": "전력망 확충 특별법 시행령 개정안 입법예고 — 국내 조달 의무 비율 2027년 40%, 2028년 60%(가상 공고)",
+            "source_url": "https://example.invalid/moleg/notice-20261009",
+            "tier": "T1",
+            "verdict": "MATCH"
+          }
+        ],
+        "exits": [
+          {
+            "id": "x1",
+            "check": "price >= 29300",
+            "size_pct": 50.0,
+            "when": "목표",
+            "basis": "resistance_1 — 10/9 급등 전 고점 (가상)"
+          }
+        ],
+        "size_why": "기대 +18%(1차 목표 29,300) · 깨지는 조건: 조달 비율 40% 이하 후퇴 또는 2단계 발주 지연 · 손절 -9%(22,600) · gap 없음(투자비중 62% ≥ 목표 60%)이라 첫 칸 3%만 — 나머지는 되돌림 50% 사다리",
+        "concentration_why": ""
+      },
+      "exempt_from_count_limit": false
+    }
+  ],
+  "rejected": [
+    {
+      "ticker": "900002",
+      "action": "BUY",
+      "why": "목표 여유 없음 — 1차 목표 12,300이 현재가 12,050 대비 +2.1% (< 3%) · 이미 오른 가격을 쫓는 제안(§0-b) · 논지 재설정 후 재제안"
+    },
+    {
+      "ticker": "900004",
+      "action": "BUY",
+      "why": "유니버스 밖 종목 (watchlist 미등재·미보유). watchlist_candidates로 제안할 것"
+    }
+  ],
+  "shaved": [],
+  "funding": [],
+  "live_prices": [],
+  "allocation": {
+    "based_on": null,
+    "target_invested_pct": 60,
+    "regime": "하락 상태 판단 — 벤치마크(069500) 20일 -3.1% · 60일선 아래 · 하락 섹터 15/21 (가상 수치, 캡처 파일 기준)",
+    "cash_reason": "하락 상태 — 새 논지는 첫 칸(e0)만 진입하고 나머지는 되돌림 사다리에 건다",
+    "cash_release_when": "벤치마크가 60일선을 회복하면 목표 80%로 변경",
+    "reserved": [],
+    "change": null,
+    "invested_pct": 61.98,
+    "gap_pct": 0.0,
+    "gap_amt": 0,
+    "reserved_here": 0,
+    "reserved_pct": 0.0,
+    "deployable": 3800000,
+    "need": 0
+  },
+  "scaled_up": null,
+  "deficit": {
+    "invested_pct": 61.98,
+    "target": 60.0,
+    "required": 2,
+    "required_axes": 2,
+    "counted": 0,
+    "distinct_axes": 0,
+    "tickers": [],
+    "e0_missing": [],
+    "gap_pct": 0.0,
+    "gap_amt": 0,
+    "deployable": 3800000,
+    "need": 0,
+    "approved_buy": 0,
+    "covered_pct": null,
+    "short": false,
+    "why": "투자비중 62.0% ≥ 판단 목표 60% — 미달 아님"
+  },
+  "deficit_short": false
+}

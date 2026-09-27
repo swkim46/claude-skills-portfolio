@@ -1,0 +1,60 @@
+{
+  "_comment": "시연용 가상 유니버스 — examples/사고흐름_추적.md 전용. 종목 코드 9000xx와 회사명은 모두 가상이다. run_trace.sh가 임시 복사본의 config/watchlist.json 자리에 넣는다.",
+  "schema_version": "1.0",
+  "KR": [
+    {
+      "ticker": "900001",
+      "name": "한빛전선(가상)",
+      "added": "2026-10-12",
+      "why": "시연용 가상 유니버스. 실제 운영 유니버스는 비공개.",
+      "axis": "offshore_grid",
+      "aliases": [
+        "한빛전선"
+      ]
+    },
+    {
+      "ticker": "900002",
+      "name": "동양구리(가상)",
+      "added": "2026-10-12",
+      "why": "시연용 가상 유니버스. 실제 운영 유니버스는 비공개.",
+      "axis": "copper",
+      "aliases": [
+        "동양구리"
+      ]
+    },
+    {
+      "ticker": "900005",
+      "name": "한라조선(가상)",
+      "added": "2026-10-12",
+      "why": "시연용 가상 유니버스. 실제 운영 유니버스는 비공개.",
+      "axis": "shipbuilding",
+      "aliases": [
+        "한라조선"
+      ]
+    },
+    {
+      "ticker": "900006",
+      "name": "미래전력(가상)",
+      "added": "2026-10-12",
+      "why": "시연용 가상 유니버스. 실제 운영 유니버스는 비공개.",
+      "axis": "offshore_grid",
+      "aliases": [
+        "미래전력"
+      ]
+    }
+  ],
+  "US": [],
+  "benchmarks": {
+    "KR": {
+      "ticker": "069500",
+      "name": "KODEX 200"
+    },
+    "US": {
+      "ticker": "SPY",
+      "excd": "AMEX",
+      "name": "SPDR S&P 500 ETF"
+    }
+  },
+  "_comment_axis": "axis = 이 종목이 대표하는 힘.",
+  "_comment_dynamic": "시연용 고정 목록."
+}

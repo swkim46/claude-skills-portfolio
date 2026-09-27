@@ -20,6 +20,8 @@
     python3 theses.py check --snapshot data/snapshot_260908_kr.json --market KR
     python3 theses.py add --file /tmp/new_thesis.json
     python3 theses.py set-status --id <id> --status held|closed|expired --note "..."
+    python3 theses.py set-trigger --id <id> --trigger x3 --check "price >= 152000" \
+        --basis "resistance_1 152,000 (price_levels 20260922) — 과거 고정" --why "진입 전에 목표가 메워짐"
 """
 import argparse
 import json
@@ -106,7 +108,7 @@ def check(market: str, snapshot_path: Path) -> int:
 
     # `unmeasurable` = 식은 맞는데 **값이 없어서** 못 잰 것. `judge`(사람이 보기로 한 조건)와
     # 섞으면 시세를 못 받은 손절 트리거가 정상 판정 대기로 보인다.
-    fired, judge, waiting, dead, unmeasurable = [], [], [], [], []
+    fired, judge, waiting, dead, unmeasurable, spent = [], [], [], [], [], []
     for t in data["theses"]:
         if market and t.get("market", "").upper() != market.upper():
             continue
@@ -125,6 +127,8 @@ def check(market: str, snapshot_path: Path) -> int:
         key = "exit_triggers" if t.get("status") == "held" else "entry_triggers"
         for trg in t.get(key) or []:
             if trg.get("fired"):
+                # ★ 소진된 다리 — 이미 집행된 결정이다. 발화로 다시 세면 같은 결정을 두 번 집행한다(2026-09-23 TSM x3).
+                spent.append({"thesis": t, "trigger": trg, "kind": key, "ctx": ctx, "why": {}})
                 continue
             why = {}
             verdict = eval_cond(trg.get("check", ""), ctx, why)
@@ -140,6 +144,14 @@ def check(market: str, snapshot_path: Path) -> int:
                 waiting.append(row)
 
     kind_ko = {"entry_triggers": "매수", "exit_triggers": "매도"}
+    if spent:
+        print(f"· 소진된 다리 {len(spent)}건 — 이미 집행됐다(다시 발화하지 않는다). 다시 걸려면 "
+              f"`theses.py set-trigger`로 새 과거 고정 기준을 준다:")
+        for r in spent:
+            t_, g = r["thesis"], r["trigger"]
+            print(f"    {t_['ticker']} {t_['id']}.{g.get('id')} `{g.get('check')}` — {str(g.get('fired_note') or '')[:70]}"
+                  f" ({str(g.get('fired_at') or '')[:16]})")
+        print()
     print(f"트리거 점검 — {market or '전체'} · {snapshot_path.name}\n")
 
     if fired:
@@ -297,6 +309,84 @@ def cmd_status(tid: str, status: str, note: str) -> int:
     raise SystemExit(f"그런 id가 없다: {tid}")
 
 
+def cmd_set_trigger(tid: str, trig_id: str, check: str, basis: str, why: str,
+                    when: str = "", size_pct: float = None) -> int:
+    """트리거 하나를 **새 값으로 다시 건다** — 옛 값은 `corrections[]`에 남긴다(JSON 손편집 대신 명령).
+
+    왜: 목표가 진입 전에 메워지면(`risk_guard` "목표 여유 없음" 거부) 다음 run이 **새 과거 고정 기준**으로
+    목표를 다시 걸어야 한다. 원장을 조용히 고치면 "왜 바뀌었나"가 사라지므로 옛 값·사유·시각을 같이 남긴다.
+    """
+    if not COND.match(check):
+        raise SystemExit(f"check가 기계 판정 형태가 아니다: {check!r} — `<변수> <=|>=|<|>|== <숫자>`")
+    if not basis:
+        raise SystemExit("--basis가 없다 — `basis` 없는 가격 트리거는 만들지 않는다(theses_levels.md)")
+    data = load()
+    t = next((x for x in data["theses"] if x.get("id") == tid), None)
+    if t is None:
+        raise SystemExit(f"그런 id가 없다: {tid}")
+    for field in ("exit_triggers", "entry_triggers"):
+        trg = next((x for x in (t.get(field) or []) if x.get("id") == trig_id), None)
+        if trg is None:
+            continue
+        old = dict(trg)
+        was_fired = bool(trg.get("fired"))
+        t.setdefault("corrections", []).append(
+            {"ts": datetime.now(KST).strftime("%Y-%m-%d"),
+             "what": f"{trig_id} 트리거 {old.get('check')} → {check} (set-trigger)"
+                     + (f" · 소진 표시 해제(옛 집행 {str(old.get('fired_note') or '')[:60]})" if was_fired else ""),
+             "why": why, "trigger": trig_id, "field": field,
+             "before": {k: old.get(k) for k in ("check", "basis", "when", "size_pct")},
+             "after": {"check": check, "basis": basis, "when": when or old.get("when"),
+                       "size_pct": size_pct if size_pct is not None else old.get("size_pct")}})
+        trg["check"] = check
+        trg["basis"] = basis
+        if when:
+            trg["when"] = when
+        if size_pct is not None:
+            trg["size_pct"] = size_pct
+        # ★ 새 값으로 다시 건 다리는 **살아난다** — 소진 표시를 지운다(옛 집행은 corrections에 남는다).
+        for k in ("fired", "fired_at", "fired_note"):
+            trg.pop(k, None)
+        save(data)
+        print(f"{tid} {field}.{trig_id}: {old.get('check')} → {check} (corrections에 기록)")
+        return 0
+    raise SystemExit(f"{tid}에 트리거 {trig_id}가 없다 (entry/exit 모두)")
+
+
+def cmd_fire(tid: str, trig_id: str, note: str, undo: bool = False) -> int:
+    """트리거를 **소진(집행됨)으로 표시**하거나 되돌린다 — 과거 집행을 소급 기록할 때(JSON 손편집 대신).
+
+    평소에는 `fill.py`가 체결 시 자동으로 찍는다. 이 명령은 그 전에 나간 집행을 메울 때만 쓴다.
+    """
+    data = load()
+    t = next((x for x in data["theses"] if x.get("id") == tid), None)
+    if t is None:
+        raise SystemExit(f"그런 id가 없다: {tid}")
+    for field in ("exit_triggers", "entry_triggers"):
+        trg = next((x for x in (t.get(field) or []) if x.get("id") == trig_id), None)
+        if trg is None:
+            continue
+        if undo:
+            for k in ("fired", "fired_at", "fired_note"):
+                trg.pop(k, None)
+            t.setdefault("history", []).append(
+                {"ts": datetime.now(KST).isoformat(), "status": t.get("status"),
+                 "note": f"{trig_id} 소진 표시 해제 — {note}"})
+        else:
+            if not note:
+                raise SystemExit("--note가 없다 — 무엇이 언제 집행됐는지 적어라(수량·가격·주문번호)")
+            trg["fired"] = True
+            trg["fired_at"] = datetime.now(KST).isoformat()
+            trg["fired_note"] = note
+            t.setdefault("history", []).append(
+                {"ts": datetime.now(KST).isoformat(), "status": t.get("status"),
+                 "note": f"{trig_id} 소진 표시 — {note}"})
+        save(data)
+        print(f"{tid} {field}.{trig_id}: {'소진 해제' if undo else '소진 표시'}")
+        return 0
+    raise SystemExit(f"{tid}에 트리거 {trig_id}가 없다 (entry/exit 모두)")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="논지 원장 — 매수·매도 조건을 미리 걸어둔다")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -310,6 +400,19 @@ def main() -> int:
     s.add_argument("--id", required=True)
     s.add_argument("--status", required=True)
     s.add_argument("--note", default="")
+    st = sub.add_parser("set-trigger", help="트리거를 새 값으로 다시 건다 — 옛 값은 corrections[]에 남긴다")
+    st.add_argument("--id", required=True)
+    st.add_argument("--trigger", required=True, help="트리거 id (x3 · e1 …)")
+    st.add_argument("--check", required=True, help='"price >= 152000" 같은 기계 판정식')
+    st.add_argument("--basis", required=True, help="기준 (price_levels 이름·기준일 — 과거 고정)")
+    st.add_argument("--why", required=True, help="왜 다시 거는가")
+    st.add_argument("--when", default="", help="사람이 읽는 설명(생략 시 유지)")
+    st.add_argument("--size-pct", type=float, default=None)
+    fr = sub.add_parser("fire", help="트리거를 소진(집행됨)으로 표시 — 평소엔 fill.py가 자동으로 찍는다")
+    fr.add_argument("--id", required=True)
+    fr.add_argument("--trigger", required=True)
+    fr.add_argument("--note", default="", help="무엇이 언제 집행됐나(수량·가격·주문번호)")
+    fr.add_argument("--undo", action="store_true", help="소진 표시를 해제한다")
     args = ap.parse_args()
 
     if args.cmd == "list":
@@ -328,6 +431,11 @@ def main() -> int:
             print(f"파일 없음: {p}", file=sys.stderr)
             return 2
         return cmd_add(p)
+    if args.cmd == "fire":
+        return cmd_fire(args.id, args.trigger, args.note, args.undo)
+    if args.cmd == "set-trigger":
+        return cmd_set_trigger(args.id, args.trigger, args.check, args.basis, args.why,
+                               args.when, args.size_pct)
     rc = cmd_status(args.id, args.status, args.note)
     # ★ 원장을 옮겼으면 그날 거래 기록의 `thesis_unsynced`도 같이 갱신한다 — 옛 값이 게이트를 막았다.
     try:

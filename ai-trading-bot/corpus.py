@@ -107,8 +107,13 @@ def cmd_index(a) -> int:
     by_root = {}
     for p in files:
         by_root.setdefault(p.relative_to(HERE).parts[0], []).append(p)
+    brief = bool(getattr(a, "brief", False))
+    if brief:
+        print("  (--brief: 루트별 건수 + 최근 30개만 — 전체는 `corpus.py index`, 내용은 `corpus.py search <키워드>`)", file=buf)
     for root, ps in by_root.items():
         print(f"  ── {root}/  ({len(ps)}개)", file=buf)
+        if brief:
+            ps = sorted(ps, key=lambda q: q.stat().st_mtime, reverse=True)[:30]
         for p in ps:
             st = p.stat()
             when = datetime.fromtimestamp(st.st_mtime).strftime("%m-%d")
@@ -200,6 +205,7 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     i = sub.add_parser("index", help="가진 자료 목록 — 캡처 파일에 넣는다")
     i.add_argument("--titles", action="store_true", help="파일마다 첫 헤더도 같이")
+    i.add_argument("--brief", action="store_true", help="루트별 건수 + 최근 30개만(캡처용)")
     i.add_argument("--out", default="")
     s = sub.add_parser("search", help="전문 검색 (OR)")
     s.add_argument("keywords", nargs="+")

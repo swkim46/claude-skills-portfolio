@@ -1,0 +1,132 @@
+{
+  "schema_version": "1.0",
+  "run_id": "DEMO-kr",
+  "market": "KR",
+  "generated_at": "2026-10-12T09:20:00+09:00",
+  "no_trade": false,
+  "_comment": "시연용 시그널. generated_at은 run_trace.sh가 실행 시각으로 다시 찍는다(180분 지난 시그널은 코드가 통째로 거부하므로).",
+  "allocation": {
+    "based_on": null,
+    "target_invested_pct": 60,
+    "regime": "하락 상태 판단 — 벤치마크(069500) 20일 -3.1% · 60일선 아래 · 하락 섹터 15/21 (가상 수치, 캡처 파일 기준)",
+    "cash_reason": "하락 상태 — 새 논지는 첫 칸(e0)만 진입하고 나머지는 되돌림 사다리에 건다",
+    "cash_release_when": "벤치마크가 60일선을 회복하면 목표 80%로 변경",
+    "reserved": [],
+    "change": null
+  },
+  "analysis_refs": {
+    "material": "examples/_synthetic/뉴스레터_시연.md",
+    "note": "examples/사고흐름_추적.md",
+    "factcheck_report": "examples/사고흐름_추적.md"
+  },
+  "proposals": [
+    {
+      "ticker": "900001",
+      "name": "한빛전선(가상)",
+      "action": "BUY",
+      "weight_target_pct": 3.0,
+      "thesis": "해상풍력 2단계 케이블 공급 계약(공시 확인) + 국내 조달 의무 비율 도입(입법예고 원문 확인). 논지 호흡 12주. 첫 칸 3%만 진입, 되돌림 50%에 두 번째 칸.",
+      "confidence": 0.62,
+      "horizon_days": 84,
+      "risk_notes": "입법예고 결과 조달 비율이 40% 이하로 후퇴하면 논지 무효",
+      "evidence": [
+        {
+          "claim": "한빛전선, 해상풍력 2단계 해저 HVDC 케이블 공급 계약 체결(가상 공시)",
+          "source_url": "https://example.invalid/dart/900001-20261009",
+          "tier": "T2",
+          "verdict": "MATCH"
+        },
+        {
+          "claim": "전력망 확충 특별법 시행령 개정안 입법예고 — 국내 조달 의무 비율 2027년 40%, 2028년 60%(가상 공고)",
+          "source_url": "https://example.invalid/moleg/notice-20261009",
+          "tier": "T1",
+          "verdict": "MATCH"
+        }
+      ],
+      "exits": [
+        {
+          "id": "x1",
+          "check": "price >= 29300",
+          "size_pct": 50.0,
+          "when": "목표",
+          "basis": "resistance_1 — 10/9 급등 전 고점 (가상)"
+        }
+      ],
+      "size_why": "기대 +18%(1차 목표 29,300) · 깨지는 조건: 조달 비율 40% 이하 후퇴 또는 2단계 발주 지연 · 손절 -9%(22,600) · gap 없음(투자비중 62% ≥ 목표 60%)이라 첫 칸 3%만 — 나머지는 되돌림 50% 사다리",
+      "concentration_why": ""
+    },
+    {
+      "ticker": "900002",
+      "name": "동양구리(가상)",
+      "action": "BUY",
+      "weight_target_pct": 4.0,
+      "thesis": "케이블 투자 → 구리 수요 3차 수혜. 다만 20일 +12%로 이미 반영.",
+      "confidence": 0.55,
+      "horizon_days": 60,
+      "risk_notes": "구리 가격 하락 전환 시 무효",
+      "evidence": [
+        {
+          "claim": "동양구리 3분기 가공 물량 전년 대비 증가(가상 IR)",
+          "source_url": "https://example.invalid/ir/900002",
+          "tier": "T2",
+          "verdict": "MATCH"
+        }
+      ],
+      "exits": [
+        {
+          "id": "x1",
+          "check": "price >= 12300",
+          "size_pct": 100.0,
+          "when": "목표",
+          "basis": "resistance_1 (가상)"
+        }
+      ],
+      "size_why": "기대 +2%(1차 목표 12,300) · 깨지는 조건: 구리 가격 하락 전환 · 손절 -6% · 3차 수혜라 4%",
+      "concentration_why": ""
+    },
+    {
+      "ticker": "900004",
+      "name": "코스모AI(가상)",
+      "action": "BUY",
+      "weight_target_pct": 2.0,
+      "thesis": "뉴스레터 편집자 권유 문장을 근거로 올린 제안 — 코드가 걸러야 정상(유니버스 밖).",
+      "confidence": 0.5,
+      "horizon_days": 30,
+      "risk_notes": "-",
+      "evidence": [
+        {
+          "claim": "뉴스레터 본문의 권유 문장",
+          "source_url": "https://example.invalid/newsletter/20261012",
+          "tier": "T3",
+          "verdict": "MATCH"
+        }
+      ],
+      "exits": [
+        {
+          "id": "x1",
+          "check": "price >= 99999",
+          "size_pct": 100.0,
+          "when": "목표",
+          "basis": "없음"
+        }
+      ],
+      "size_why": "권유 문장 외 근거 없음",
+      "concentration_why": ""
+    }
+  ],
+  "watchlist_candidates": [
+    {
+      "ticker": "900003",
+      "name": "대양해운(가상)",
+      "why": "케이블 포설 전용선 보유 — 2차 수혜 후보. universe_rules 규칙으로 편입 여부 판정",
+      "evidence": [
+        {
+          "claim": "대양해운, 포설 전용선 2척 운영(가상 IR)",
+          "source_url": "https://example.invalid/ir/900003",
+          "tier": "T2",
+          "verdict": "MATCH"
+        }
+      ]
+    }
+  ]
+}

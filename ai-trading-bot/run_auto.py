@@ -25,7 +25,6 @@
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -38,6 +37,8 @@ except ImportError:                                   # 3.9 미만 방어
     ZoneInfo = None
 
 HERE = Path(__file__).parent
+# 게이트 엔진 — 저장소 루트의 .claude/skills/_stepgate/ (프로젝트 폴더의 형제).
+STEPGATE_PY = (HERE.resolve().parent / ".claude" / "skills" / "_stepgate" / "stepgate.py")
 CONFIG_DIR = HERE / "config"
 JOURNAL_DIR = HERE / "journal"
 SIGNALS_DIR = HERE / "signals"
@@ -51,14 +52,12 @@ RUN_LOG = JOURNAL_DIR / "run_log.jsonl"
 DASHBOARD_META = CONFIG_DIR / ".dashboard.json"
 
 KST = timezone(timedelta(hours=9))
-CLAUDE = shutil.which("claude") or "claude"
+CLAUDE = "/opt/homebrew/bin/claude"
 PY = sys.executable
 
 # 단계 명세는 스킬이 갖고 있다. 드라이버가 단계를 위임할 때 **명세 경로를 들려보낸다** —
 # 이 경로가 죽으면 위임받은 세션이 규칙 없이 일한다.
 SKILL_REF = (HERE.parent / ".claude" / "skills" / "trade-run" / "references")
-# 게이트 엔진 — 저장소 루트의 .claude/skills/_stepgate/ (프로젝트 폴더의 형제).
-STEPGATE_PY = (HERE.resolve().parent / ".claude" / "skills" / "_stepgate" / "stepgate.py")
 
 LOCK_STALE_SEC = 2 * 3600
 LLM_TIMEOUT_SEC = 1800
@@ -82,13 +81,17 @@ MARKET_CLOSED_CODES = ("40580000", "40100000")
 
 class Outcome:
     OK = "ok"; NO_TRADE = "no_trade"
-    SKIP_KILL = "skipped_kill"; SKIP_WEEKEND = "skipped_weekend"
+    SKIP_KILL = "skipped_kill"; SKIP_WEEKEND = "skipped_weekend"; SKIP_HOLIDAY = "skipped_holiday"
     SKIP_CLOSED = "skipped_closed"; SKIP_RAN = "skipped_already_ran"
     MARKET_CLOSED = "market_closed"
     FAIL_INGEST = "failed_ingest"; FAIL_LLM = "failed_llm"
     FAIL_TIMEOUT = "failed_timeout"; FAIL_GATE = "failed_gate"
     FAIL_RISK = "failed_riskguard"; FAIL_EXEC = "failed_execute"
     FAIL_RECORD = "failed_record"
+    # 승인 초과 — 종목·방향별 집행 합이 승인 합을 넘었다(execute.py rc 4 · trades.reconcile.overfill).
+    # `failed_` 접두라 연속 실패 계수·알림에 걸리고, 반복이면 SELF_STOP_AFTER가 KILL을 만든다.
+    # 즉시 KILL은 하지 않는다 — 사고 1건으로 무인 운영을 멈추면 현금만 쌓인다(2026-09-21 결정).
+    INCIDENT = "failed_incident"
     HALTED = "halted_selfstop"; SELF_TEST = "self_test"
 
 
@@ -155,6 +158,12 @@ def market_state(market: str, now_utc: datetime = None) -> tuple:
     local = now.astimezone(ZoneInfo(w["tz"])) if ZoneInfo else now.astimezone(KST)
     if local.weekday() >= 5:
         return "weekend", f"{local:%Y-%m-%d %a} 현지 주말"
+    try:
+        from kis_client import is_holiday
+        if is_holiday(market, local.date()):
+            return "holiday", f"{local:%Y-%m-%d} 현지 휴장(config/holidays.json)"
+    except ImportError:
+        pass
     o = local.replace(hour=w["open"][0], minute=w["open"][1], second=0, microsecond=0)
     c = local.replace(hour=w["close"][0], minute=w["close"][1], second=0, microsecond=0)
     if o <= local <= c:
@@ -199,6 +208,15 @@ def day_status(market: str, sdate: str) -> dict:
     done = any(r.get("outcome") in (Outcome.OK, Outcome.NO_TRADE)
                or (r.get("orders") or {}).get("sent") for r in rows)
     return {"rows": rows, "attempts": len(rows), "done": done}
+
+
+def _overfill_of(stamp: str, market: str) -> dict:
+    """그날 거래 기록의 승인 대비 대조(`fill.finalize`가 쓴 `reconcile`). 없으면 {}."""
+    p = HERE / "journal" / f"trades_{stamp}_{market.lower()}.json"
+    try:
+        return json.loads(p.read_text(encoding="utf-8")).get("reconcile") or {}
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return {}
 
 
 def consecutive_failures() -> int:
@@ -587,6 +605,8 @@ def run(market: str, send: bool) -> int:
     state, why = market_state(market)
     if state == "weekend":
         return finish(Outcome.SKIP_WEEKEND, why)
+    if state == "holiday":
+        return finish(Outcome.SKIP_HOLIDAY, why)
     if state == "closed":
         return finish(Outcome.SKIP_CLOSED, why)
 
@@ -670,16 +690,10 @@ def run(market: str, send: bool) -> int:
     row["gate"] = {"required": True, "verdict": "PASS", "cp": tok["cp"],
                    "ledger": tok.get("ledger")}
 
-    # ★ 하한 미달 상태에서 기권이 연속되면 설명으로 끝낼 수 없다 —
-    #   `limits.no_trade_max_consecutive_below_floor`를 실제로 읽는 자리가 여기다.
+    # (2026-09-22) 연속 기권 상한(`no_trade_max_consecutive_below_floor`)은 지웠다 — 기권은 이제 `allocation`의 현금 명분과
+    #   gap 채우기(`deficit_short`)가 판정한다. 횟수는 기록만 남긴다.
     if row["no_trade"]:
-        cap = (_read_json(LIMITS_PATH, {}) or {}).get("no_trade_max_consecutive_below_floor")
-        streak = consecutive_no_trade(market) + 1
-        row["no_trade_streak"] = streak
-        if cap is not None and streak > int(cap):
-            return finish(Outcome.FAIL_GATE,
-                          f"연속 no_trade {streak}회 > 한도 {cap}회 — "
-                          f"기권을 사유로 닫을 수 없다. 방향 견해가 서면 최소 크기로라도 제안하라")
+        row["no_trade_streak"] = consecutive_no_trade(market) + 1
 
     # 4~5. 결정론 집행 (LLM 세션 밖)
     approved_path = SIGNALS_DIR / f"approved_{stamp}_{market.lower()}.json"
@@ -726,7 +740,13 @@ def run(market: str, send: bool) -> int:
         if failed and any(c in blob for c in MARKET_CLOSED_CODES):
             reason = "브로커가 장종료·휴장으로 거부"
             return finish(Outcome.MARKET_CLOSED, reason)
-        if rc not in (0, 1) or (failed and not sent):
+        # ★ 승인 초과 — rc 4이거나 그날 기록의 `reconcile.overfill`이 0이 아니면 사고다. 주문은 나갔으므로
+        #   6단(체결 확인·§11)은 그래도 돌린다 — 사고를 노트에 적어야 게이트가 열린다.
+        overfill = _overfill_of(stamp, market)
+        if rc == 4 or overfill.get("overfill"):
+            row["incident"] = {"overfill": overfill.get("overfill"), "ids": overfill.get("incidents")}
+            log(f"★★ 승인 초과 {overfill.get('overfill')}건 — 사고 {overfill.get('incidents')}")
+        elif rc not in (0, 1) or (failed and not sent):
             return finish(Outcome.FAIL_EXEC, blob[-300:])
 
         # 6단 — 보낸 뒤에 체결을 확인하고 노트 §11을 닫는다. 여기가 무주인이어서
@@ -738,6 +758,10 @@ def run(market: str, send: bool) -> int:
             return finish(Outcome.FAIL_RECORD,
                           "주문은 나갔으나 6단 `execute` GATE PASS 토큰이 없다 — "
                           f"체결 기록이 미완이다: {cp.get('why') or ''}")
+        if row.get("incident"):
+            return finish(Outcome.INCIDENT,
+                          f"승인 초과 {row['incident'].get('overfill')}건 — 사고 {row['incident'].get('ids')} "
+                          f"(journal/incidents.jsonl) · 복구 주문 금지")
     elif orders:
         log(f"execute dry-run ({len(orders)}건 — --no-send)")
         run_cmd([PY, str(HERE / "execute.py"), str(approved_path)], timeout=120)

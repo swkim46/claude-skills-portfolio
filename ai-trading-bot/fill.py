@@ -21,12 +21,13 @@
 """
 import argparse
 import json
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from kis_client import (KisClient, KisError, market_session, order_excd, snap_kr_price,
+from kis_client import (KisClient, KisError, market_session, order_excd, quote_excd, snap_kr_price,
                         EXCD_ORDER)
 
 HERE = Path(__file__).parent
@@ -35,7 +36,6 @@ LIMITS_PATH = HERE / "config" / "limits.json"
 KST = timezone(timedelta(hours=9))
 
 TERMINAL = ("FILLED", "PARTIAL", "CANCELLED", "EXPIRED", "REJECTED")
-EXCD_QUOTE = {v: k for k, v in EXCD_ORDER.items()}          # NASD→NAS …
 
 DEFAULTS = {"fill_wait_minutes": 20, "fill_poll_sec": 20, "fill_chase_after_sec": 90,
             "fill_chase_max": 3, "fill_chase_max_pct": 0.5,
@@ -68,7 +68,13 @@ def is_open_trade(t: dict) -> bool:
     # status는 전송 상태다 — FAILED만 '나가지 않은 것'이다(손수 FILLED로 고쳐 쓴 행도 나간 것).
     if t.get("status") in ("FAILED", None):
         return False
-    return (t.get("fill") or {}).get("verdict") not in TERMINAL
+    fl = t.get("fill") or {}
+    # ★ execute.py의 **즉시 판정** PARTIAL(잔고 한 번 대조)은 종결이 아니다 — 잔량이 살아 있다. fill.py가 `_finish`로
+    #   닫은 건만 `confirmed_at`이 있으므로, 그것이 없는 PARTIAL은 열린 건으로 다시 폴링한다.
+    #   (2026-09-21 LG엔솔: 즉시 1주 → 실제 11주 전량 체결인데 PARTIAL 1로 닫혔다)
+    if fl.get("verdict") == "PARTIAL" and not fl.get("confirmed_at"):
+        return True
+    return fl.get("verdict") not in TERMINAL
 
 
 def _chain(t: dict) -> list:
@@ -100,7 +106,7 @@ def _live_price(client, t: dict, excd: str):
     try:
         if t.get("market", "KR") == "KR":
             return float(client.domestic_price(t["ticker"])["price"])
-        return float(client.overseas_price(t["ticker"], excd=EXCD_QUOTE.get(excd, "NAS"))["price"])
+        return float(client.overseas_price(t["ticker"], excd=quote_excd(excd))["price"])
     except (KisError, KeyError, TypeError, ValueError):
         return None
 
@@ -268,12 +274,16 @@ def confirm(path: Path, client=None, cfg: dict = None, now_fn=None, sleep_fn=Non
             for t in todo:
                 if not is_open_trade(t):
                     continue
-                _step(client, t, cfg, now, chase, log)
+                try:
+                    _step(client, t, cfg, now, chase, log)
+                except Exception as e:                   # noqa: BLE001 — 한 건의 예외가 다른 건의 확정을 막지 않는다
+                    t.setdefault("fill", {})["last_error"] = f"{type(e).__name__}: {str(e)[:160]}"
+                    log(f"  ★ {t.get('ticker')} 폴링 예외 — {type(e).__name__}: {str(e)[:100]} (다음 폴링에 계속)", file=sys.stderr)
                 if is_open_trade(t):
                     pending += 1
                 else:
                     _close_theses_after_exit(t, now, log)
-            path.write_text(json.dumps(_with_summary(record, now_fn()), ensure_ascii=False, indent=2),
+            path.write_text(json.dumps(_with_summary(record, now_fn(), path), ensure_ascii=False, indent=2),
                             encoding="utf-8")
             if not pending:
                 break
@@ -288,12 +298,15 @@ def confirm(path: Path, client=None, cfg: dict = None, now_fn=None, sleep_fn=Non
     for t in trades:
         if not is_open_trade(t):
             _close_theses_after_exit(t, now, log)
-    record = _with_summary(record, now)
+    record = _with_summary(record, now, path)
     path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
     summ = record["fill_confirmed"]
     if note:
         write_note_line(Path(note), summ)
     log(_line(summ))
+    if summ.get("overfill"):
+        log(f"★★ 승인 초과 {summ['overfill']}건 — 사고 기록 {', '.join(summ.get('incidents') or []) or '(기록 실패)'} "
+            f"(journal/incidents.jsonl). 복구 주문을 내지 말 것.", file=sys.stderr)
     for t in trades:
         f = t.get("fill") or {}
         if t.get("status") not in ("FAILED", None):
@@ -304,13 +317,32 @@ def confirm(path: Path, client=None, cfg: dict = None, now_fn=None, sleep_fn=Non
     return 0 if summ["open_orders"] == 0 else 3
 
 
-def _close_theses_after_exit(t: dict, now: datetime, log) -> None:
-    """규율·회전 매도가 **전량** 체결되면 그 종목의 held 논지를 closed로 옮긴다(부분이면 held 유지).
+def _leg_of(t: dict):
+    """이 매도 행이 집행한 (논지 id, 트리거 id). `trigger_id`가 없으면 사유 문구에서 되찾는다(옛 기록)."""
+    tid, gid = t.get("thesis_id"), t.get("trigger_id")
+    if not (tid and gid):
+        for r in (t.get("discipline_reasons") or []):
+            m = re.search(r"논지\s+(\S+)\s+(\S+)\s+(?:손절|목표)", str(r))
+            if m:
+                tid, gid = tid or m.group(1), gid or m.group(2)
+                break
+    return tid, gid
 
+
+def _close_theses_after_exit(t: dict, now: datetime, log) -> None:
+    """체결된 규율·회전 매도를 논지 원장에 반영한다 — **소진된 다리는 `fired`로 찍고**, 전량이면 논지를 닫는다.
+
+    ★ 왜 다리를 찍나(2026-09-23). `risk_guard.thesis_exit_sells`와 `theses.check`는 `if trg.get("fired"): continue`를
+    이미 읽는데 **`fired`를 쓰는 코드가 없었다** — 감시자는 있고 기록이 없었다. 그래서 이미 집행된 목표 다리가
+    가격이 그 위에 머무는 한 매 run 다시 발화했다(TSM x3 `price >= 431.68` 50%: 09-21에 6/13주 집행 → 09-22 run이
+    잔량 7주의 절반인 4주를 또 승인). **매 run 잔량의 절반씩 사라지는 톱니**이고, `stops.py`는 20분마다 모델 없이
+    같은 판정을 보낸다. 체결이 다리를 소진시키는 자리가 여기다(이미 멱등 스윕이라 다시 불려도 안전하다).
+
+    취소·만료·거부는 찍지 않는다 — 목표를 **못 가져간** 것이라 다리는 살아 있어야 한다.
     손절이 나갔는데 논지가 held로 남으면 다음 run이 없는 보유의 매도 조건을 계속 본다.
     """
     f = t.get("fill") or {}
-    if t.get("action") != "SELL" or not t.get("full_exit") or f.get("verdict") != "FILLED":
+    if t.get("action") != "SELL" or f.get("verdict") not in ("FILLED", "PARTIAL"):
         return
     store = JOURNAL_DIR / "theses.json"
     if not store.exists():
@@ -319,10 +351,29 @@ def _close_theses_after_exit(t: dict, now: datetime, log) -> None:
         data = json.loads(store.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return
-    changed = 0
+    changed, marked = 0, []
+    tid, gid = _leg_of(t)
+    qty = f.get("filled_qty") or abs(int(f.get("delta") or 0)) or t.get("qty")
+    px = f.get("avg_price") or t.get("price")
+    order_no = (t.get("result") or {}).get("order_no") or ""
     for th in data.get("theses") or []:
-        if (th.get("ticker") == t.get("ticker") and th.get("status") == "held"
-                and str(th.get("market", "")).upper() == str(t.get("market", "")).upper()):
+        same = (th.get("ticker") == t.get("ticker")
+                and str(th.get("market", "")).upper() == str(t.get("market", "")).upper())
+        # ① 다리 소진 — 규율·회전 매도가 집행한 트리거를 찍는다(논지 id가 있으면 그것으로, 없으면 종목·시장으로)
+        if gid and (th.get("id") == tid or (not tid and same)):
+            for trg in th.get("exit_triggers") or []:
+                if trg.get("id") != gid or trg.get("fired"):
+                    continue
+                trg["fired"] = True
+                trg["fired_at"] = now.isoformat()
+                trg["fired_note"] = (f"{t.get('source')} SELL {qty}주 @{px}"
+                                     + (f" · 주문 {order_no}" if order_no else "")
+                                     + f" ({f.get('verdict')})")
+                marked.append(f"{th.get('id')}.{gid}")
+                changed += 1
+        # ② 전량 매도면 논지를 닫는다(부분이면 held 유지)
+        if (same and th.get("status") == "held"
+                and t.get("full_exit") and f.get("verdict") == "FILLED"):
             th["status"] = "closed"
             th.setdefault("history", []).append(
                 {"at": now.isoformat(), "status": "closed",
@@ -331,12 +382,14 @@ def _close_theses_after_exit(t: dict, now: datetime, log) -> None:
             changed += 1
     if changed:
         store.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        log(f"  논지 closed ×{changed} — {t.get('ticker')} 전량 매도 체결")
+        if marked:
+            log(f"  다리 소진 표시 {', '.join(marked)} — 같은 다리는 다시 발화하지 않는다")
+        if t.get("full_exit") and f.get("verdict") == "FILLED":
+            log(f"  논지 closed — {t.get('ticker')} 전량 매도 체결")
 
 
-def _with_summary(record: dict, now: datetime) -> dict:
+def _with_summary(record: dict, now: datetime, path: Path = None) -> dict:
     summ = summarize(record, now)
-    record["fill_confirmed"] = summ
     # 논지 동기화 여부도 **지금** 다시 센다 — 파일에 남은 옛 값이 게이트를 막았다(2026-09-16).
     try:
         import execute as ex
@@ -351,6 +404,192 @@ def _with_summary(record: dict, now: datetime) -> dict:
                "unverified": summ["unknown"],
                "unfilled": 0})            # 미체결은 더 이상 종결 상태가 아니다
     record["fill_summary"] = fs
+    # ★ 승인 대비 대조 — 경로를 알면 매 쓰기마다 다시 센다(사고 기록은 멱등).
+    rec = None
+    if path is not None:
+        try:
+            finalize(record, Path(path), now)
+            rec = record.get("reconcile")
+        except Exception as e:                         # noqa: BLE001 — 대조 실패가 확정을 막지 않는다
+            print(f"★ 승인 대조 실패({type(e).__name__}: {e}) — 기록은 그대로 쓴다", file=sys.stderr)
+    else:
+        rec = record.get("reconcile")
+    if rec:
+        summ["overfill"] = int(rec.get("overfill") or 0)
+        summ["incidents"] = list(rec.get("incidents") or [])
+    record["fill_confirmed"] = summ
+    return record
+
+
+# ────────────────────────────────────────────────────────── 승인 대비 대조 · 사고
+# ★ 왜 — 2026-09-21 두산 46주가 승인 없이 한 번 더 팔렸는데(승인 46 / 집행 92) `execute` 게이트가
+#   그대로 열렸다. 접수·체결 건수는 셌지만 **승인 수량과 집행 수량을 대조하는 자리가 없었다.**
+#   여기서 종목·방향별 집행 합을 승인 합과 대조하고, 넘으면 사고(`journal/incidents.jsonl`)로
+#   자동 기록한다. 게이트는 "초과 0건" 또는 "사고 기록됨"만 통과시킨다 — 조용히 지나가는 길이 없다.
+
+def _resolve_approved(ref: str):
+    """옛 기록(승인 스냅샷 없음)의 approved 파일 경로 — 절대경로 → 프로젝트 상대 → signals/<파일명>."""
+    if not ref:
+        return None
+    for cand in (Path(ref), HERE / ref, HERE / "signals" / Path(ref).name):
+        if cand.exists():
+            return cand
+    return None
+
+
+def _approved_sets(record: dict) -> tuple:
+    """(파일명, approved_at)별 승인 주문 스냅샷 — `runs[]`와 최상위에서 한 번씩. (sets, unknown_refs)"""
+    entries = list(record.get("runs") or [])
+    top = {k: record.get(k) for k in ("approved_ref", "approved_at", "approved_orders")}
+    if top.get("approved_ref"):
+        entries.append(top)
+    sets, unknown = {}, []
+    for r in entries:
+        ref = r.get("approved_ref")
+        if not ref:
+            continue
+        key = (Path(ref).name, str(r.get("approved_at") or ""))
+        if key in sets:
+            continue
+        orders = r.get("approved_orders")
+        if orders is None:                             # 이 형식 이전의 기록 — 파일을 찾아본다
+            p = _resolve_approved(ref)
+            try:
+                orders = [{"ticker": o.get("ticker"), "action": o.get("action"), "source": o.get("source"),
+                           "qty": int(o.get("qty") or 0), "price": o.get("price")}
+                          for o in (json.loads(p.read_text(encoding="utf-8")).get("orders") or [])] if p else None
+            except (OSError, json.JSONDecodeError, ValueError, AttributeError):
+                orders = None
+        if orders is None:
+            if Path(ref).name not in unknown:
+                unknown.append(Path(ref).name)
+            continue
+        sets[key] = orders
+    return sets, unknown
+
+
+def reconcile(record: dict) -> dict:
+    """종목·방향별 승인 합 vs 집행 합. 순수 함수 — 파일을 쓰지 않는다."""
+    sets, unknown = _approved_sets(record)
+    approved = {}
+    for orders in sets.values():
+        for o in orders:
+            k = f"{o.get('ticker')}:{o.get('action')}"
+            approved[k] = approved.get(k, 0) + int(o.get("qty") or 0)
+    executed, rows_by_key = {}, {}
+    sent_rows = 0
+    for t in record.get("trades") or []:
+        if t.get("status") in ("FAILED", None):
+            continue
+        sent_rows += 1
+        f = t.get("fill") or {}
+        q = f.get("filled_qty")
+        if q is None:
+            q = abs(int(f.get("delta") or 0)) if f.get("verdict") in ("FILLED", "PARTIAL") else 0
+        k = f"{t.get('ticker')}:{t.get('action')}"
+        executed[k] = executed.get(k, 0) + int(q)
+        rows_by_key.setdefault(k, []).append(t)
+    known = bool(sets) and not unknown
+    over = []
+    for k, ex_q in executed.items():
+        ap_q = approved.get(k)
+        if ap_q is None and not known:                 # 승인을 모르는 건은 초과라고 말할 수 없다
+            continue
+        ap_q = ap_q or 0
+        if ex_q > ap_q:
+            tk, act = k.split(":", 1)
+            rows = rows_by_key[k]
+            over.append({"ticker": tk, "action": act, "approved": ap_q, "executed": ex_q,
+                         "rows": [t.get("ts") for t in rows],
+                         "order_nos": [(t.get("result") or {}).get("order_no") for t in rows]})
+    prev = record.get("reconcile") or {}
+    return {"at": datetime.now(KST).isoformat(),
+            "refs": [k[0] for k in sets], "unknown_refs": unknown, "approved_known": known,
+            "approved": approved, "executed": executed,
+            "overfill_list": over, "overfill": len(over), "sent_rows": sent_rows,
+            "approved_orders_n": sum(len(v) for v in sets.values()),
+            "incident_recorded": bool(prev.get("incident_recorded")) and bool(over),
+            "incidents": list(prev.get("incidents") or []) if over else []}
+
+
+def _incident_rows() -> list:
+    p = JOURNAL_DIR / "incidents.jsonl"
+    if not p.exists():
+        return []
+    rows = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return rows
+
+
+def record_incidents(record: dict, path: Path, now: datetime) -> list:
+    """초과가 있으면 `journal/incidents.jsonl`에 `INC-<stamp>-<n>`으로 남긴다 — (stamp, market, 종목, 방향)당 한 번.
+    초과를 만든 행(누적이 승인을 넘어선 뒤의 행)에 `incident_id`를 찍는다. 기존 `incident` 서술은 보존."""
+    rec = record.get("reconcile") or {}
+    if not rec.get("overfill"):
+        rec["incident_recorded"] = False
+        rec["incidents"] = []
+        return []
+    m = re.match(r"trades_(\d{6})_(kr|us)", Path(path).name)
+    stamp = m.group(1) if m else format(now, "%y%m%d")
+    market = (m.group(2) if m else str((record.get("trades") or [{}])[0].get("market") or "")).lower()
+    existing = _incident_rows()
+    store = JOURNAL_DIR / "incidents.jsonl"
+    ids = []
+    for ov in rec["overfill_list"]:
+        key = (stamp, market, ov["ticker"], ov["action"])
+        hit = next((e for e in existing
+                    if (e.get("stamp"), e.get("market"), e.get("ticker"), e.get("action")) == key), None)
+        rows = [t for t in record.get("trades") or []
+                if t.get("status") not in ("FAILED", None)
+                and (t.get("ticker"), t.get("action")) == (ov["ticker"], ov["action"])]
+        if hit:
+            iid = hit["id"]
+        else:
+            iid = f"INC-{stamp}-{1 + sum(1 for e in existing if e.get('stamp') == stamp)}"
+            row = {"id": iid, "at": now.isoformat(), "stamp": stamp, "market": market,
+                   "ticker": ov["ticker"], "action": ov["action"],
+                   "approved": ov["approved"], "executed": ov["executed"],
+                   "order_nos": ov["order_nos"], "rows": ov["rows"],
+                   "approved_refs": rec.get("refs"), "trades": f"journal/{Path(path).name}",
+                   "why": "승인 초과 — 같은 종목·방향의 집행 수량이 승인 합계를 넘었다(중복 전송 의심)",
+                   "note": next((t.get("incident") for t in rows if isinstance(t.get("incident"), str)), "")}
+            store.parent.mkdir(parents=True, exist_ok=True)
+            with store.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            existing.append(row)
+        ids.append(iid)
+        # 누적이 승인을 넘어선 행부터 사고다 — 첫 46주는 승인된 것이고 둘째 46주가 사고다.
+        cum = 0
+        for t in rows:
+            f = t.get("fill") or {}
+            q = f.get("filled_qty")
+            if q is None:
+                q = abs(int(f.get("delta") or 0)) if f.get("verdict") in ("FILLED", "PARTIAL") else 0
+            cum += int(q)
+            if cum > ov["approved"] and q:
+                t.setdefault("incident_id", iid)
+                if not isinstance(t.get("incident"), str):
+                    t["incident"] = f"★ 승인 초과 — {iid} (승인 {ov['approved']} / 집행 {ov['executed']})"
+    rec["incidents"] = ids
+    rec["incident_recorded"] = bool(ids)
+    return ids
+
+
+def finalize(record: dict, path: Path, now: datetime) -> dict:
+    """대조 + 사고 기록 + `fill_confirmed`에 초과 건수 복사. `execute.merge_day_record`와 `_with_summary`가 부른다."""
+    record["reconcile"] = reconcile(record)
+    record_incidents(record, path, now)
+    fc = record.get("fill_confirmed")
+    if isinstance(fc, dict):
+        fc["overfill"] = int(record["reconcile"].get("overfill") or 0)
+        fc["incidents"] = list(record["reconcile"].get("incidents") or [])
     return record
 
 
@@ -527,7 +766,11 @@ def _fallback_balance(client, t: dict, approved_qty: int, side: str, now: dateti
     f["qty_after"] = after
     f["delta"] = delta
     if delta == want:
-        avg = next((float(p.get("avg_price") or 0) for p in bal.get("positions", []) if p.get("ticker") == t["ticker"]), 0.0)
+        avg = next((float(p.get("avg_price") or 0) for p in bal.get("positions", [])
+                    if p.get("ticker") == t["ticker"]), 0.0)
+        # ★ 매도는 남은 포지션 평단이 체결가가 아니다 — 지정가를 쓴다(2026-09-21 두산 46주: 평단 84,201 vs 실제 85,400).
+        if side == "SELL":
+            avg = float(t.get("price") or 0) or avg
         _finish(t, "FILLED", approved_qty, avg or float(t.get("price") or 0), now,
                 f"balance delta {now:%Y-%m-%d %H:%M} (상태 TR 미조회)")
     elif delta != 0 and abs(delta) < approved_qty:
@@ -546,9 +789,12 @@ def _line(summ: dict) -> str:
         return stage.gen_fill_line(summ)
     except Exception:                                  # noqa: BLE001 — stage 없이도 돌아간다
         at = summ.get("at", "")[11:16]
+        inc = summ.get("incidents") or []
         return (f"<!-- gen:fill -->체결 확정 — 전송 {summ['sent']} · 체결 {summ['filled']} · "
                 f"부분 {summ['partial']} · 취소 {summ['cancelled']} · 만료 {summ['expired']} · "
-                f"거부 {summ['rejected']} · 미확정 **{summ['open_orders']}건** ({at} 확인)")
+                f"거부 {summ['rejected']} · 미확정 **{summ['open_orders']}건** · "
+                f"승인 초과 **{summ.get('overfill', 0)}건**"
+                + (f" · 사고 기록 {', '.join(inc)}" if inc else "") + f" ({at} 확인)")
 
 
 def write_note_line(note: Path, summ: dict) -> bool:

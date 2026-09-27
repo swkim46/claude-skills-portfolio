@@ -30,5 +30,6 @@ gmail-newsletter-analyzer/_raw_sources/*
 gmail-newsletter-analyzer/세상공부/*
 !**/.gitkeep
 !ai-trading-bot/signals/_sample_signal.json
+# 아래 두 파일은 합성 견본이다(회귀 테스트가 축 조인 키를 읽는다). 실제 지도·논지 원장은 비공개.
 !ai-trading-bot/journal/market_map.json
 !ai-trading-bot/journal/theses.json

@@ -10,7 +10,13 @@
   9/9는 1단에서 죽었다 — 재료만 남았다).
 - **건너뛴 단계** — 도달은 6단인데 중간 산출물이 빈 경우. *죽은 run과 다른 사건이다.*
 - **시각 이탈** — 정규 슬롯(국내 09:35 · 미국 22:35 KST)에서 ±90분을 벗어난 실행.
-- **밀린 세션** — 평일인데 그 시장 세션이 아예 없는 날.
+- **밀린 세션** — 평일(휴장 아님)인데 그 시장 세션이 아예 없는 날.
+
+**스탬프 ≠ 거래소 기준일.** 산출물 파일명의 스탬프는 run이 시작된 KST 날짜다. 미국 run은 ET 금요일
+세션을 KST 토요일 새벽에 돌 수 있어 스탬프가 주말이 된다(2026-09-19 = ET 09-18 세션). 그래서 행마다
+`stamp`(파일 식별자 — review.py는 이것으로 파일을 찾는다)와 `session_date`(거래소 기준일 — 슬롯·회고
+판정)를 따로 둔다. 예전에는 주말 날짜를 통째로 건너뛰어 그 run이 원장에서 사라졌고, "직전 run"이
+KR 09-18로 잘못 잡혔다(2026-09-21). 휴장은 `config/holidays.json`(`kis_client.is_holiday`)로 안다.
 
 **정직한 한계 — 시각은 mtime에서 온다.** 파일을 나중에 고치면 그 시각이 뒤로 밀리므로
 `시작`은 그 세션 산출물들의 **최소 mtime**으로 근사한다. 재발행·수동 편집이 있었던
@@ -30,6 +36,8 @@ import json
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+
+from kis_client import is_holiday, market_session, next_trading_day
 
 HERE = Path(__file__).resolve().parent
 JOURNAL = HERE / "journal"
@@ -115,21 +123,43 @@ def slot_verdict(market: str, d: date, started: datetime) -> tuple:
     return "이탈", f"슬롯 {target:%m-%d %H:%M} 대비 **{off:+.0f}분**"
 
 
-def scan(days: int) -> list:
-    """최근 `days`일의 (시장 × 평일) 세션을 전수로 판정한다 — **없는 날도 행으로 남긴다.**"""
-    today = datetime.now(KST).date()
+def session_date_of(market: str, stamp_date: date, started: datetime) -> date:
+    """스탬프(run이 시작된 KST 날짜) → 그 run이 준비·집행한 **거래소 기준일**.
+
+    KR은 같은 날. US는 `market_session`의 ET 세션일 — 마감 전에 시작했으면 그 세션, 마감 뒤(다음 세션
+    준비)면 다음 거래일. 02:13 KST 토 → ET 금 · 22:35 KST 목 → 목 · 12:00 KST 금(개장 전 준비) → 금.
+    """
+    if market == "kr" or started is None:
+        return stamp_date
+    s = market_session("US", started)
+    d = s["session_date"]
+    if started > s["close"]:
+        d = next_trading_day("US", d)
+    return d
+
+
+def scan(days: int, today: date = None) -> list:
+    """최근 `days`일의 세션을 전수로 판정한다 — **산출물이 있는 스탬프는 주말이라도 세고**, 산출물이
+    없는 날은 평일·비휴장에만 점검표 행("0 없음")으로 남긴다."""
+    today = today or datetime.now(KST).date()
     rows = []
     for i in range(days - 1, -1, -1):
         d = today - timedelta(days=i)
-        if d.weekday() >= 5:
-            continue                    # 주말은 세션이 없다(휴장은 별도 문제)
         st = stamp_of(d)
         for market in ("kr", "us"):
             stage, last, missing = reached(st, market)
             started = first_touch(st, market)
-            verdict, why = slot_verdict(market, d, started)
+            if stage == "0 없음":
+                if d.weekday() >= 5 or is_holiday(market, d):
+                    continue            # 주말·휴장에는 세션이 없다 — 미실행이 아니다
+                sd = d
+            else:
+                sd = session_date_of(market, d, started)
+            verdict, why = slot_verdict(market, sd, started)
             rows.append({
-                "session_date": d.isoformat(),
+                "session_date": sd.isoformat(),
+                "stamp": st,
+                "stamp_date": d.isoformat(),
                 "market": market,
                 "reached": stage,
                 "missing_below": missing,
@@ -138,7 +168,11 @@ def scan(days: int) -> list:
                 "last_kst": last.isoformat() if last else None,
                 "slot": verdict,
                 "slot_detail": why,
+                "off_session": sd.weekday() >= 5 or is_holiday(market, sd),
             })
+    # 산출물 있는 run이 이미 덮는 (시장, 기준일)의 "0 없음" 행은 미실행이 아니다 — 스탬프가 달랐을 뿐이다.
+    covered = {(r["market"], r["session_date"]) for r in rows if r["reached"] != "0 없음"}
+    rows = [r for r in rows if not (r["reached"] == "0 없음" and (r["market"], r["session_date"]) in covered)]
     return rows
 
 
@@ -177,7 +211,7 @@ def _reviewed() -> set:
     return out
 
 
-def runs(days: int) -> list:
+def runs(days: int, today: date = None) -> list:
     """**산출물이 있는 run만** 시간순으로. 회고 대상을 고르는 기준이 이것이다.
 
     ★ 왜 `scan`과 따로 두는가 — `scan`은 "없는 날도 행으로" 남기는 점검표다. 회고는
@@ -186,24 +220,27 @@ def runs(days: int) -> list:
     seen = _reviewed()
     log = _run_log_rows()
     out = []
-    for r in scan(days):
+    for r in scan(days, today):
         if r["reached"] == "0 없음" or not r["started_kst"]:
             continue
         lg = [x for x in log
-              if x.get("market") == r["market"] and x.get("session_date") == r["session_date"]]
+              if x.get("market") == r["market"]
+              and x.get("session_date") in (r["session_date"], r.get("stamp_date"))]
         lg = lg[-1] if lg else {}
         r = dict(r)
         r["outcome"] = lg.get("outcome")
         r["reason"] = lg.get("reason")
         r["orders"] = lg.get("orders")
         r["no_trade"] = lg.get("no_trade")
-        r["reviewed"] = (r["market"], r["session_date"]) in seen
+        # 회고 기록은 스탬프 날짜로도 남는다(review.py --session은 파일을 스탬프로 찾는다) — 둘 다 본다.
+        r["reviewed"] = ((r["market"], r["session_date"]) in seen
+                         or (r["market"], r.get("stamp_date")) in seen)
         out.append(r)
     out.sort(key=lambda x: x["started_kst"])
     return out
 
 
-def prev_run(days: int, market: str = "", stamp: str = "") -> dict:
+def prev_run(days: int, market: str = "", stamp: str = "", today: date = None) -> dict:
     """**직전 run** — 시장으로 유도하지 않고 시간순으로 바로 앞의 run.
 
     ★ 이 함수가 있는 이유. 예전에는 `stage.py`가 회고 대상을
@@ -216,13 +253,13 @@ def prev_run(days: int, market: str = "", stamp: str = "") -> dict:
     run은 빠진다(아침도 저녁도). 그래서 **무조건 시간순 직전 run**을 보고,
     그것이 같은 시장이든 반쪽으로 죽었든 그 run에 피드백한다.
     """
-    rs = runs(days)
+    rs = runs(days, today)
     if market and stamp:
-        d = f"20{stamp[:2]}-{stamp[2:4]}-{stamp[4:6]}"
-        cur = next((r for r in rs if r["market"] == market and r["session_date"] == d), None)
+        # 자기 자신은 **스탬프**로 뺀다 — 기준일로 빼면 스탬프가 다른 같은 세션의 run을 놓친다.
+        cur = next((r for r in rs if r["market"] == market and r.get("stamp") == stamp), None)
         cutoff = cur["started_kst"] if cur else None
         rs = [r for r in rs
-              if not (r["market"] == market and r["session_date"] == d)
+              if not (r["market"] == market and r.get("stamp") == stamp)
               and (cutoff is None or r["started_kst"] < cutoff)]
     return rs[-1] if rs else {}
 
@@ -242,7 +279,8 @@ def cmd_prev(a) -> int:
     started = datetime.fromisoformat(r["started_kst"])
     last = datetime.fromisoformat(r["last_kst"]) if r["last_kst"] else started
     gap_h = (now - last).total_seconds() / 3600
-    print(f"■ 직전 run — {r['market'].upper()} {r['session_date']}")
+    print(f"■ 직전 run — {r['market'].upper()} {r['session_date']}"
+          + (f" (스탬프 {r['stamp']} — 파일은 이 날짜로 찾는다)" if r.get("stamp_date") != r["session_date"] else ""))
     print()
     print("  ── 언제")
     print(f"     시작 {started:%m-%d %H:%M} · 마지막 산출 {last:%m-%d %H:%M} "
@@ -265,7 +303,7 @@ def cmd_prev(a) -> int:
     # 게이트·스크립트가 읽는 기계 판독 줄
     print()
     print(f"  [직전run] {r['market']}:{r['session_date']} · 도달 {r['reached']} "
-          f"· 완주 {r['complete']} · 회고 {'있음' if r['reviewed'] else '없음'}")
+          f"· 완주 {r['complete']} · 회고 {'있음' if r['reviewed'] else '없음'} · 스탬프 {r.get('stamp', '')}")
     print("  ※ 시그널이 없어도 회고한다 — 언제·어디까지 갔고 왜 멈췄으며 "
           "남긴 산출물 중 오늘 쓸 것이 무엇인지가 회고다.")
     return 0
@@ -335,6 +373,65 @@ def cmd_due(a) -> int:
     return 0
 
 
+STAGE_ORDER = ("capture", "carry", "map", "note", "dispatch", "no_trade", "execute")
+
+
+def timing(days: int = 14, today: date = None) -> list:
+    """run별 소요(작업기록 `<!-- written 작업기록-<단계> … -->` 스탬프 기준)와 **읽은 분량**(재료·이어받기·도구 KB).
+    F7(2026-09-22): 실행 시간을 줄이면서 판단 입력이 줄지 않았는지 매주 본다."""
+    import re as _re
+    today = today or datetime.now(KST).date()
+    pat = _re.compile(r"<!-- written 작업기록-([a-z_]+) (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) -->")
+    out = []
+    for i in range(days - 1, -1, -1):
+        d = today - timedelta(days=i)
+        st = stamp_of(d)
+        for market in ("kr", "us"):
+            wl = JOURNAL / f"worklog_{st}_{market}.md"
+            if not wl.exists():
+                continue
+            ev = {}
+            for stg, ts in pat.findall(wl.read_text(encoding="utf-8", errors="ignore")):
+                ev[stg] = datetime.strptime(ts, "%Y-%m-%d %H:%M")
+            if not ev:
+                continue
+            mat = DATA / f"material_{st}_{market}.md"
+            start = datetime.fromtimestamp(mat.stat().st_mtime) if mat.exists() else min(ev.values())
+            seq = [(k, ev[k]) for k in STAGE_ORDER if k in ev]
+            stages, prev = {}, start
+            for k, t in seq:
+                stages[k] = round((t - prev).total_seconds() / 60)
+                prev = t
+            end = max(ev.values())
+            sizes = {}
+            for label, p in (("material", mat), ("carry", JOURNAL / f"carry_{st}_{market}.md"),
+                             ("tools", DATA / "run_evidence" / f"tools_{st}_{market}.md")):
+                sizes[label] = round(p.stat().st_size / 1024) if p.exists() else None
+            notes = sorted(ANALYSIS.glob(f"분석노트_{st}_{market}_v*.md"))
+            sizes["note"] = round(notes[-1].stat().st_size / 1024) if notes else None
+            out.append({"stamp": st, "market": market, "start": start.strftime("%m-%d %H:%M"),
+                        "total_min": round((end - start).total_seconds() / 60), "stages": stages, "read_kb": sizes})
+    return out
+
+
+def cmd_timing(a) -> int:
+    rows = timing(a.days)
+    if not rows:
+        print("작업기록 스탬프가 있는 run이 없다.")
+        return 0
+    print(f"■ run 소요·읽은 분량 — 최근 {a.days}일 {len(rows)}회\n")
+    for r in rows:
+        stg = " · ".join(f"{k} {v}m" for k, v in r["stages"].items())
+        rk = r["read_kb"]
+        print(f"  {r['stamp']} {r['market']} {r['start']} 총 {r['total_min']}분 | {stg} | 재료 {rk['material']}KB · "
+              f"이어받기 {rk['carry']}KB · 도구 {rk['tools']}KB · 노트 {rk['note']}KB")
+    tot = sorted(r["total_min"] for r in rows)
+    med = tot[len(tot) // 2]
+    inp = sorted((r["read_kb"]["material"] or 0) + (r["read_kb"]["carry"] or 0) + (r["read_kb"]["tools"] or 0) for r in rows)
+    print(f"\n  [소요] 중앙값 {med}분 · 읽은 분량(재료+이어받기+도구) 중앙값 {inp[len(inp) // 2]}KB")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -348,8 +445,10 @@ def main() -> int:
     d = sub.add_parser("due", help="밀린 것·이탈만 (1단 캡처용)")
     d.add_argument("--days", type=int, default=7)
     d.add_argument("--out", default="")
+    t = sub.add_parser("timing", help="run별 소요·읽은 분량 (F7 계측)")
+    t.add_argument("--days", type=int, default=14)
     a = ap.parse_args()
-    return {"scan": cmd_scan, "due": cmd_due, "prev": cmd_prev}[a.cmd](a)
+    return {"scan": cmd_scan, "due": cmd_due, "prev": cmd_prev, "timing": cmd_timing}[a.cmd](a)
 
 
 if __name__ == "__main__":

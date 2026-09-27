@@ -20,5 +20,19 @@
       "updated": "2026-09-01"
     }
   ],
-  "sectors": []
+  "sectors": [
+    {
+      "code": "0001",
+      "name": "x",
+      "market": "KR",
+      "grade": "—",
+      "status": null,
+      "chains": [],
+      "names": [],
+      "next_event": null,
+      "resolves_when": null,
+      "updated": null,
+      "last_seen": "2026-09-30"
+    }
+  ]
 }

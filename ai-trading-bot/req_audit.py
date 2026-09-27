@@ -28,6 +28,9 @@ RUBRIC = STEPGATE_DIR / "rubrics" / "trade-run.json"
 
 # (요구, 문서 앵커, 게이트 앵커 | None=게이트 대상 아님)
 # 새 요구가 나오면 **여기에 행을 추가**한다. 행이 없으면 그 요구는 존재하지 않는 것으로 취급된다.
+# ★ 게이트 앵커가 `NOT:<정규식>`이면 **금지 앵커**다 — 그 표현이 루브릭에 **없어야** 통과한다(2026-09-23).
+#   왜: 규칙을 폐지해도 봉인 루브릭이 따라오지 않으면 게이트가 죽은 규칙을 계속 집행한다. 실사례 — 09-23 dispatch
+#   게이트가 09-22에 폐지된 "이벤트 창이면 절반"을 Y로 물어, run이 답할 수 없는 항목에 "해당 없음"을 적어야 했다.
 REQS = [
  ("① 거시→섹터→종목 순서로 접근",          r"위에서 아래로|거시 사건 → 파급", r"top_down_order"),
  ("② 파급 경로를 연쇄로 잇기",              r"연쇄는 가장 약한 고리", r"link_fields_written|breaks_if"),
@@ -95,9 +98,9 @@ REQS = [
   r"portfolio_denominator"),
  ("(58) 목표는 포트폴리오, 집행은 그 시장 현금", r"집행은 그 시장 (현금|자산)",
   r"portfolio_denominator"),
- ("(59) 반대편 대기 논지를 위한 헤드룸 예약",    r"reserve_for_other_market_pct",
+ ("(59) 반대편 대기 논지 몫은 판단된 예약(allocation.reserved)으로", r"allocation\.reserved|판단된 예약",
   r"other_market_considered"),
- ("(60) 축 집중 상한은 양 시장 합산",            r"axis_max_pct", r"portfolio_denominator"),
+ ("(60) 축 집중은 양 시장 합산으로 재고 공개선을 넘기면 명분", r"양 시장을 합쳐 재고|concentration_disclose_pct", r"portfolio_denominator"),
  ("(61) 노트가 두 시장을 같은 척도로 적는다",    r"1% = |자본 기준", r"portfolio_denominator"),
  ("(62) 반대편 예정 진입을 고려하고 적는다",     r"반대편 예정 진입|반대편 대기 논지",
   r"other_market_considered"),
@@ -144,7 +147,8 @@ REQS = [
  ("(90) 장외 전송 차단", r"장외면\s*전송을 거부한다|장외면 `--send` 거부|--force-hours", None),
  ("(91) 시장 현금 부족은 깎아서 산다", r"현금에 맞춰 수량을 깎아서|깎아서 산다", None),
  ("(92) 미달이면 최소 건수·축·e0 강제(deficit_short)", r"미달 강제|deficit_short", r"deficit_met"),
- ("(93) 미달 배수 3.0", r"deficit_multiplier_max`는 3\.0|2\.0→3\.0", None),
+ # (93) 미달 배수 3.0 — 2026-09-22 폐지(상수 배수 → gap 채우기). 요구 자체는 (110)이 잇는다.
+ ("(93) 미달이면 크기를 키워 채운다(옛 미달 배수 → gap 채우기)", r"미달 배수.*지웠다|gap 채우기", None),
  # 2026-09-16 (2) — 입금된 돈 안에서 · 손절 즉시 · 명령 규약
  ("(94) 사람에게 환전·입금을 묻지 않는다 — 깎기·예약·회전 매도", r"환전·입금을 묻지 않는다|회전 매도", None),
  ("(95) 손절·목표는 종가를 기다리지 않는다 — 장중 즉시 규율 매도", r"종가를 기다리지 않는다|장중 터치 즉시", None),
@@ -152,12 +156,37 @@ REQS = [
  ("(97) 스탬프 시각은 도구가 찍는다", r"stage\.py stamp", None),
  ("(98) 링크 본문은 fetch.py", r"fetch\.py", None),
  ("(99) 표기는 장식 없이 — crosscheck가 변형을 잡는다", r"장식 변형|장식 없이 그대로", None),
+ ("(100) 시장 선택은 열린 시장 — 시각 제한 없음(stage.py market)", r"stage\.py market|시각 제한은 없다", None),
  # 2026-09-17 — 사용자 지시: 끝날 때마다 계좌 현황(주식/현금 비율·수익률)을 보고 끝에
- ("(100) 보고 끝에 계좌 현황 블록(주식:현금·수익률)", r"account_status\.py", r"\{status\}"),
+ ("(100b) 보고 끝에 계좌 현황 블록(주식:현금·수익률)", r"account_status\.py", r"\{status\}"),
  # 2026-09-17 (2) — 사용자 지시: 지정가는 최신 시세로 · 취소 확정 뒤 재발주
  ("(101) 전송 직전 지정가를 최신 시세로(해외 포함)·가격 이탈이면 미전송", r"국내·해외 모두\*\* 갱신|send_refresh_max_pct",
   r"limit_refreshed"),
  ("(102) 정정 거부 서버에서는 취소→재발주", r"곧바로 취소→재발주|fill_reorder_max", r"fill_confirmed"),
+ # 2026-09-21 — 두산 46주 승인 밖 중복 매도: 같은 승인은 한 번만(멱등) · 승인 초과는 게이트가 센다
+ ("(103) 같은 approved 재호출은 멱등 — 승인 초과는 사고(INC-)로 기록·게이트 검문", r"멱등|승인 초과", r"reconciled|overfill|incident_recorded"),
+ ("(104) 재료에 없다 ≠ 발표 안 됐다 — 예정된 공식 발표는 발표 주체를 직접 확인", r"재료에 없다 ≠ 발표 안 됐다|발표 주체", None),
+ ("(105) 이월 시나리오는 persistent_id로 — promote가 그것으로 동일성 판단·merge", r"persistent_id", None),
+ ("(106) 1차 목표 여유 없는 매수는 거부 — 다음 run이 새 기준으로 목표를 다시 건다(set-trigger)", r"목표 여유|min_target_gap_pct|set-trigger", None),
+ ("(107) 휴장은 holidays.json — 세션 기준일은 스탬프와 다르다 · 일정 kind 어휘", r"holidays\.json|kind 어휘|EVENT_KINDS", None),
+ # 2026-09-22 — 사용자: 상수 목표·상수 제약 지양, 판단이 비율을 정한다 · 현금엔 명분 · 미달은 즉시 도달 · 리서치=재료 확장 · 이벤트=베팅
+ ("(108) 주식 비율은 상수가 아니라 이어받는 판단(allocation · based_on · change.why)", r"allocation\.py prev|based_on", r"allocation_carried|allocation_judged"),
+ ("(109) 현금을 남기려면 명분과 해제 조건(cash_reason · cash_release_when)", r"cash_reason|현금 명분", r"allocation_judged"),
+ ("(110) 판단한 비율에 못 미치면 증분을 키워 즉시 채운다(gap · scaled_up · covered_pct)", r"gap 채우기|scaled_up|covered_pct", r"gap_covered|covered_pct"),
+ ("(111) 집중은 상한이 아니라 명분(concentration_why · 공개선)", r"concentration_why|공개선", None),
+ ("(112) 이벤트는 할인이 아니라 베팅 — 이벤트 계수 폐지", r"베팅할 자리|이벤트 할인 폐지|이벤트 계수는 \*\*없다\*\*", None),
+ ("(113) 리서치는 재료 확장 — 뉴스레터에 없던 것을 더하고 판단이 인용한다", r"재료 확장", r"research_expands"),
+ ("(114) 확신도는 크기를 정하지 않는다 — 크기는 size_why", r"size_why", None),
+ ("(115) 확정 중 예외로 끊겨도 주문·기록은 남는다 — fill.py 뒤 같은 approved 재호출", r"확정 대기 중 예외|확정 중 예외", None),
+ ("(116) 실행 시간·읽은 분량을 계측한다(sessions.py timing)", r"sessions\.py timing", None),
+ # 2026-09-23 — 사용자: 일일 상한 없애고 · 이중 매도 고치고 · 데이터 결함 고쳐
+ ("(117) 소진된 매도 다리는 다시 발화하지 않는다(체결이 fired를 찍는다)", r"소진된 다리|fired", r"leg_not_respent|fired"),
+ ("(118) 시세 TR은 NYS/NAS/AMS · 주문 TR은 NYSE/NASD/AMEX — 섞으면 빈 응답", r"quote_excd|시세용 코드", None),
+ ("(119) 빈 응답은 거부가 아니라 미확인 — 못 물은 것을 '거부'로 적지 않는다", r"미확인\*\*\(거부 아님\)|못 물은 것을", None),
+ ("(120) 회전 매도는 자금 대상 매수가 나갈 수 있을 때만", r"그 돈을 쓸 매수가 나갈 수 있을 때만|자금 대상", None),
+ ("(121) 실전 래치가 열리면 일일 상한이 필수다", r"real_latch_needs_cap|실전 래치", None),
+ ("(122) 폐지된 규칙이 게이트에 남아 있지 않다(금지 앵커)", r"규칙을 폐지했으면 셋을",
+  r"NOT:절반|이벤트 계수|구간표|종목당 상한|투자 천장|일일 상한|by_confidence|max_invested"),
 ]
 
 
@@ -192,8 +221,8 @@ def chain_checks(rb: dict, docs: str) -> list:
     # ① 게이트 앵커가 **실재하는 id/cp**인가 — 산문 우연 일치를 걸러낸다.
     weak = []
     for name, _d, gpat in REQS:
-        if gpat is None:
-            continue
+        if gpat is None or str(gpat).startswith("NOT:"):
+            continue                       # 금지 앵커는 **없어야** 통과라 id를 가리키지 않는다
         alts = [a for a in re.split(r"\|", gpat) if a]
         if not any(re.fullmatch(r"[\w§\- ]+", a) for a in alts):
             continue                       # 정규식 앵커는 산문 대조가 정상이다
@@ -255,8 +284,12 @@ def chain_checks(rb: dict, docs: str) -> list:
 
 def main() -> int:
     quiet = "--quiet" in sys.argv
+    # ★ **백업 파일은 문서가 아니다**(2026-09-23). `_*_backup_*.md`가 `references/`에 같이 살아서, 규칙을 지워도
+    #   낡은 백업이 앵커를 만족시켜 감사가 "있음"이라고 답했다 — 백업을 청소하는 순간 드러난 거짓 통과다.
     docs = ""
     for p in [SKILL / "SKILL.md"] + sorted(SKILL.glob("references/*.md")):
+        if p.name.startswith("_") or "_backup_" in p.name:
+            continue
         docs += p.read_text(encoding="utf-8")
     if not docs:
         print(f"스킬 문서를 못 찾았다: {SKILL}", file=sys.stderr)
@@ -273,8 +306,14 @@ def main() -> int:
 
     rows, gaps = [], []
     for name, dpat, gpat in REQS:
-        din = bool(re.search(dpat, docs))
-        gin = None if gpat is None else bool(re.search(gpat, gate))
+        din = True if dpat is None else bool(re.search(dpat, docs))
+        if gpat is None:
+            gin = None
+        elif str(gpat).startswith("NOT:"):
+            hit = re.search(gpat[4:], gate)
+            gin = not hit                      # 금지 앵커 — 루브릭에 있으면 실패
+        else:
+            gin = bool(re.search(gpat, gate))
         rows.append((name, din, gin))
         if not din or gin is False:
             gaps.append((name, din, gin))
