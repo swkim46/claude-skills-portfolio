@@ -517,6 +517,18 @@ def weekly(days: int = 7) -> int:
 
     lines += _avoidance_block(days)
     lines += _forecast_block(days)
+    # F7 — 실행 시간·읽은 분량 (2026-09-22): 줄였는데 품질이 안 떨어졌는지 같이 본다
+    try:
+        import sessions as _ss
+        tr = _ss.timing(days)
+        if tr:
+            tot = sorted(r["total_min"] for r in tr)
+            inp = sorted((r["read_kb"]["material"] or 0) + (r["read_kb"]["carry"] or 0) + (r["read_kb"]["tools"] or 0) for r in tr)
+            lines += ["## 실행 시간·읽은 분량 (F7)", "",
+                      f"- run {len(tr)}회 · 소요 중앙값 **{tot[len(tot) // 2]}분** · 읽은 분량(재료+이어받기+도구) 중앙값 **{inp[len(inp) // 2]}KB** "
+                      f"— `python3 sessions.py timing`", ""]
+    except Exception as e:                                  # noqa: BLE001
+        lines += [f"- (실행 시간 계측 실패: {type(e).__name__})", ""]
     lines += [
         "## 판정",
         "",

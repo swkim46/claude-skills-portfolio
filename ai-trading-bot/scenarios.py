@@ -160,8 +160,16 @@ def cmd_promote(a) -> int:
         return 2
 
     d = load()
-    have = {norm(s.get("condition")): s for s in d["scenarios"]}
-    n_new = n_dup = 0
+    by_id = {s.get("id"): s for s in d["scenarios"]}
+    # 조건 문구 → 원장 행. 병합된 행은 목적지로 넘긴다. 별칭(`aliases`)도 같은 행을 가리킨다.
+    have = {}
+    for row_ in d["scenarios"]:
+        tgt = _resolve_merged(by_id, row_)
+        for cond in [row_.get("condition")] + list(row_.get("aliases") or []):
+            k = norm(cond)
+            if k and k not in have:
+                have[k] = tgt
+    n_new = n_dup = n_pid = n_alias = 0
     used = {int(m.group(1)) for s in d["scenarios"]
             for m in [re.match(rf"SC-{stamp}-(\d+)$", s.get("id", ""))] if m}
     nxt = max(used) + 1 if used else 1
@@ -171,10 +179,30 @@ def cmd_promote(a) -> int:
         key = norm(r.get("condition"))
         if not key:
             continue
+        tag = f"{p.name}#{r.get('id')}"
+        # ★ `persistent_id`가 원장 id를 가리키면 **그 행이 같은 조건이다** — 문구를 다듬어도 새 id를 주지 않는다.
+        #   2026-09-21: 문구만 손본 이월 8건이 새 id를 받아 손으로 병합했다(promote가 문구로만 동일성을 봤다).
+        pid = str(r.get("persistent_id") or "").strip()
+        claimed_missing = ""
+        if pid:
+            tgt = _resolve_merged(by_id, by_id.get(pid)) if pid in by_id else None
+            if tgt is not None:
+                src = tgt.setdefault("sources", [])
+                if tag not in src:
+                    src.append(tag)
+                if key not in have or have[key] is not tgt:
+                    if key != norm(tgt.get("condition")) and r.get("condition") not in (tgt.get("aliases") or []):
+                        tgt.setdefault("aliases", []).append(r.get("condition"))
+                        n_alias += 1
+                    have[key] = tgt
+                n_pid += 1
+                continue
+            claimed_missing = pid
+            print(f"  ★ persistent_id {pid}가 원장에 없다 — 새 id로 승격하고 출처에 남긴다 ({tag})",
+                  file=sys.stderr)
         if key in have:
             # 같은 조건이 다시 실렸다 — 새 id를 주지 않고 **출처만 덧붙인다.**
             src = have[key].setdefault("sources", [])
-            tag = f"{p.name}#{r.get('id')}"
             if tag not in src:
                 src.append(tag)
             n_dup += 1
@@ -188,15 +216,60 @@ def cmd_promote(a) -> int:
                "sources": [f"{p.name}#{r.get('id')}"],
                "judgments": []}
         row.update({k: r.get(k) for k in FIELDS if r.get(k)})
+        if claimed_missing:
+            row["claimed_persistent_id"] = claimed_missing
+            row["sources"].append(f"persistent_id:{claimed_missing}(원장에 없음)")
         # 대응은 시그널이 실어 보냈으면 그대로, 아니면 response 문장에서 뽑는다.
         row["actions"] = (r.get("actions") if isinstance(r.get("actions"), list)
                           else extract_actions(r.get("response"), market))
         d["scenarios"].append(row)
         have[key] = row
+        by_id[sid] = row
         n_new += 1
     save(d)
     print(f"{p.name}: 신규 {n_new}건 승격 · 기존 조건 재등장 {n_dup}건(출처만 추가) "
-          f"· 원장 총 {len(d['scenarios'])}건")
+          f"· persistent_id 매칭 {n_pid}건(별칭 추가 {n_alias}) · 원장 총 {len(d['scenarios'])}건")
+    return 0
+
+
+def _resolve_merged(by_id: dict, row, hops: int = 5):
+    """병합된 행(`status: merged` · `merged_into`)은 목적지 행으로 — 최대 hops."""
+    while row is not None and row.get("status") == "merged" and row.get("merged_into") and hops > 0:
+        row = by_id.get(row["merged_into"])
+        hops -= 1
+    return row
+
+
+def cmd_merge(a) -> int:
+    """`--from` 행을 `--into` 행에 병합한다 — 같은 조건이 두 id를 받았을 때(손편집 대신 명령).
+    from은 `status: merged` + `merged_into`, into는 별칭·출처·대응을 흡수한다."""
+    d = load()
+    by_id = {s.get("id"): s for s in d["scenarios"]}
+    src, dst = by_id.get(a.src), by_id.get(a.into)
+    if src is None or dst is None:
+        print(f"그런 id가 없다: {a.src if src is None else a.into}", file=sys.stderr)
+        return 2
+    if a.src == a.into:
+        print("같은 id끼리는 병합할 수 없다", file=sys.stderr)
+        return 2
+    if dst.get("status") == "merged":
+        print(f"{a.into}는 이미 {dst.get('merged_into')}에 병합됐다 — 그 id로 병합하라", file=sys.stderr)
+        return 2
+    now = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
+    for cond in [src.get("condition")] + list(src.get("aliases") or []):
+        if cond and norm(cond) != norm(dst.get("condition")) and cond not in (dst.get("aliases") or []):
+            dst.setdefault("aliases", []).append(cond)
+    for tag in src.get("sources") or []:
+        if tag not in dst.setdefault("sources", []):
+            dst["sources"].append(tag)
+    if not dst.get("actions") and src.get("actions"):
+        dst["actions"] = src["actions"]
+    dst.setdefault("judgments", []).append({"when": now, "note": f"{a.src} 병합(merge)"})
+    src["status"] = "merged"
+    src["merged_into"] = a.into
+    src["merged_at"] = now
+    save(d)
+    print(f"{a.src} → {a.into} 병합 (별칭 {len(dst.get('aliases') or [])} · 출처 {len(dst.get('sources') or [])})")
     return 0
 
 
@@ -239,7 +312,7 @@ def cmd_list(a) -> int:
     # 국내 대응이 국내 run의 목록에서 통째로 빠졌다.
     if a.affects:
         rows = [r for r in rows
-                if any(x.get("market") == a.affects for x in (r.get("actions") or []))]
+                if any(str(x.get("market") or "").lower() == a.affects for x in (r.get("actions") or []))]
     if a.open:
         rows = [r for r in rows if r.get("status") == "open"]
     print(f"■ 시나리오 원장 — {len(rows)}건"
@@ -248,11 +321,25 @@ def cmd_list(a) -> int:
     if not rows:
         print("  없음.")
         return 0
+    brief = bool(getattr(a, "brief", False))
+    if brief:
+        print("  (--brief: 행마다 조건·대응·마지막 판정 한 줄 — 판정 이력 전체는 `list --id <id>`)")
     for r in rows:
         flag = {"open": "☐", "closed": "☑"}.get(r.get("status"), "?")
         rz = {True: "실현", False: "미실현", None: "미판정"}[r.get("realized")]
         ac = {True: "대응함", False: "**대응 안 함**", None: "—"}[r.get("acted")]
         mks = sorted({x.get("market", "?") for x in (r.get("actions") or [])})
+        js = r.get("judgments", [])
+        if brief:
+            # ★ 2026-09-22 실측: 열린 시나리오 목록은 판단에 쓰이지만(95건 중 31건 언급) 판정 이력 441줄은 인용 0건이었다.
+            #   행은 전부 남기고 이력만 마지막 한 줄로 접는다 — 읽는 분량이 74KB→~15KB.
+            acts = " · ".join(f"[{x.get('market', '?').upper()}]{x.get('ticker') or '—'} {x.get('what', '')[:40]}"
+                              + ("✔" if x.get("done") else "") for x in (r.get("actions") or [])) or "대응 없음"
+            lastj = f" · 마지막 판정 {js[-1].get('when', '?')[:10]} {js[-1].get('note', '')[:50]}" if js else ""
+            print(f"  {flag} {r['id']} {rz}·{ac}"
+                  + (f" 축 {r['axis']}" if r.get("axis") else "")
+                  + f" | {str(r.get('condition'))[:90]} | {acts}{lastj}")
+            continue
         print(f"  {flag} {r['id']}  연 곳 {r.get('opened_by', r.get('market', '?'))}"
               f" → 대응 [{' · '.join(m.upper() for m in mks) or '없음'}]  {rz} · {ac}"
               + (f"  축 {r['axis']}" if r.get("axis") else ""))
@@ -261,7 +348,7 @@ def cmd_list(a) -> int:
             mark = "✔" if x.get("done") else "☐"
             print(f"     {mark} [{x.get('market', '?').upper()}] "
                   f"{(x.get('ticker') or '—'):8} {x.get('what', '')[:80]}")
-        for j in r.get("judgments", []):
+        for j in js:
             print(f"     · {j.get('when','?')} {j.get('note','')[:90]}")
     print("\n  **열린 시나리오를 판정하지 않고 넘기면 그건 판단이 아니라 연기다.**")
     return 0
@@ -292,6 +379,9 @@ def cmd_judge(a) -> int:
         print(f"그런 id가 없다: {a.id}", file=sys.stderr)
         return 2
     r = hit[0]
+    if r.get("status") == "merged":
+        print(f"{a.id}는 {r.get('merged_into')}에 병합됐다 — 그 id로 판정하라", file=sys.stderr)
+        return 2
     yes = {"y": True, "n": False}
     r["realized"] = yes[a.realized]
     if a.acted:
@@ -313,10 +403,11 @@ def cmd_audit(a) -> int:
     import io as _io
     d = load()
     since = (datetime.now(KST) - timedelta(days=a.days)).strftime("%y%m%d")
-    rows = [r for r in d["scenarios"] if str(r.get("opened", "")) >= since]
+    rows = [r for r in d["scenarios"] if str(r.get("opened", "")) >= since
+            and r.get("status") != "merged"]         # 병합된 행은 목적지가 대신 센다 — 이중 계수 방지
     if a.affects:
         rows = [r for r in rows
-                if any(x.get("market") == a.affects for x in (r.get("actions") or []))]
+                if any(str(x.get("market") or "").lower() == a.affects for x in (r.get("actions") or []))]
     realized = [r for r in rows if r.get("realized") is True]
     acted = [r for r in realized if r.get("acted") is True]
     # **열려 있으면서 미판정**인 것만 센다 — 닫힌 건은 이미 판정된 것이다.
@@ -361,12 +452,14 @@ def cmd_due(a) -> int:
     d = load()
     out = []
     for r in d["scenarios"]:
-        if r.get("realized") is not True:
+        if r.get("realized") is not True or r.get("status") == "merged":
             continue
         for x in (r.get("actions") or []):
             if x.get("done"):
                 continue
-            if a.market and x.get("market") not in (a.market, "?"):
+            # 시장 코드는 대소문자가 섞여 저장된다(구 "kr" · 신 "KR") — 소문자로 맞춰 비교한다.
+            # 2026-09-21: "US"로 저장된 CEG x2 대응이 `due --market us`에서 빠져 보였다.
+            if a.market and str(x.get("market") or "").lower() not in (a.market, "?"):
                 continue
             out.append((r, x))
     print(f"■ 집행 대기 — 실현됐는데 대응이 안 끝난 것 {len(out)}건"
@@ -390,6 +483,9 @@ def cmd_act(a) -> int:
     hit = [r for r in d["scenarios"] if r.get("id") == a.id]
     if not hit:
         print(f"그런 id가 없다: {a.id}", file=sys.stderr)
+        return 2
+    if hit[0].get("status") == "merged":
+        print(f"{a.id}는 {hit[0].get('merged_into')}에 병합됐다 — 그 id로 표시하라", file=sys.stderr)
         return 2
     acts = hit[0].get("actions") or []
     idx = a.n - 1
@@ -419,6 +515,7 @@ def main() -> int:
                    help="그 시장에 **대응이 걸린** 것만 (연 시장이 아니다)")
     l.add_argument("--open", action="store_true")
     l.add_argument("--id", default="", help="한 건만")
+    l.add_argument("--brief", action="store_true", help="행마다 한 줄(조건·대응·마지막 판정) — 이력은 --id로")
     j = sub.add_parser("judge", help="실현·대응 판정 (--batch <jsonl>로 여러 건)")
     j.add_argument("--id", default="")
     j.add_argument("--realized", choices=["y", "n"], default="")
@@ -431,6 +528,9 @@ def main() -> int:
     ac.add_argument("--id", required=True)
     ac.add_argument("--n", type=int, required=True, help="대응 번호(1부터)")
     ac.add_argument("--note", default="")
+    mg = sub.add_parser("merge", help="같은 조건이 두 id를 받았을 때 --from을 --into에 병합")
+    mg.add_argument("--from", dest="src", required=True)
+    mg.add_argument("--into", required=True)
     au = sub.add_parser("audit", help="회피 감사 지표")
     au.add_argument("--days", type=int, default=14)
     au.add_argument("--affects", choices=["kr", "us"],
@@ -441,7 +541,7 @@ def main() -> int:
         ap.error("judge에는 --id와 --realized, 또는 --batch <jsonl>이 필요하다")
     return {"promote": cmd_promote, "backfill": cmd_backfill, "list": cmd_list,
             "judge": cmd_judge, "audit": cmd_audit,
-            "due": cmd_due, "act": cmd_act}[a.cmd](a)
+            "due": cmd_due, "act": cmd_act, "merge": cmd_merge}[a.cmd](a)
 
 
 if __name__ == "__main__":

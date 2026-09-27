@@ -30,7 +30,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from kis_client import KisClient, KisError
+from kis_client import KisClient, KisError, quote_excd
 
 HERE = Path(__file__).parent
 CONFIG = HERE / "config"
@@ -98,6 +98,10 @@ def _write_watchlist_guarded(wl: dict, before: dict, n_removed: int) -> bool:
     return True
 
 
+class Unknown(Exception):
+    """**물어보지 못했다** — 거부와 다르다. 관문 판정이 아니라 조회 실패이므로 사유를 그렇게 기록한다."""
+
+
 class Reject(Exception):
     pass
 
@@ -136,16 +140,26 @@ def check_kr(client: KisClient, ticker: str, rules: dict, equity: float) -> dict
 
 
 def check_us(client: KisClient, ticker: str, excd: str, rules: dict) -> dict:
+    # ★ 시세 TR은 **시세용 코드**(NAS/NYS/AMS)를 받는다. 주문용(NASD/NYSE/AMEX)을 주면 에러가 아니라 `rt_cd=0`에
+    #   **빈 output**이 와서, 4 run 동안 "브로커 매매 판정 ''"으로 기록됐다 — 브로커의 거부가 아니라 우리가 못 물은 것.
+    q_excd = quote_excd(excd)
     res = client._request(
         "GET", "/uapi/overseas-price/v1/quotations/price-detail",
         headers=client._headers("HHDFS76200200"),
-        params={"AUTH": "", "EXCD": excd, "SYMB": ticker})
+        params={"AUTH": "", "EXCD": q_excd, "SYMB": ticker})
     client._check(res, f"해외 현재가({ticker})")
     o = res.get("output", {}) or {}
     r = rules["US"]
 
-    if r.get("require_orderable") and "가능" not in str(o.get("e_ordyn", "")):
-        raise Reject(f"브로커 매매 판정 {o.get('e_ordyn')!r}")
+    # ★ 빈 응답은 **거부가 아니라 미확인**이다(원칙 ㊶ — 실패를 '없음'으로 기록하지 않는다).
+    if not o or not str(o.get("last") or "").strip():
+        raise Unknown(f"조회 실패 — 응답이 비었다(EXCD={q_excd} · TR HHDFS76200200). 거래소 코드·티커를 확인할 것")
+    ordyn = str(o.get("e_ordyn") or "").strip()
+    if r.get("require_orderable"):
+        if not ordyn:
+            raise Unknown(f"매매 판정 공백 — 브로커가 플래그를 주지 않았다(EXCD={q_excd}). 거부가 아니다")
+        if "가능" not in ordyn:
+            raise Reject(f"브로커 매매 판정 {ordyn!r}")
     mcap = float(o.get("tomv") or 0)
     # ETF는 tomv가 AUM으로 온다 — 개별주 기준(500억 달러)을 그대로 대면 SOXL도 못 들어온다.
     nm = str(o.get("etyp_nm") or o.get("name") or ticker).upper()
@@ -237,10 +251,24 @@ def run(signal_path: Path, apply: bool) -> int:
     added, removed, rejected = [], [], []
 
     # ---------------------------------------------------------------- 편입
+    # ★ 이미 유니버스에 있는 pending 행은 **영원히 안 지워졌다**(09-08 MU·AVGO·TSLA·SNOW) — 매 실행에 정리한다.
+    in_uni = {f"{m}:{e.get('ticker')}" for m in ("KR", "US") for e in (wl.get(m) or []) if e.get("ticker")}
+    stale = [k for k in pending if k in in_uni]
+    for k in stale:
+        pending.pop(k, None)
+    if stale:
+        print(f"  · 대기열 정리 {len(stale)}건 — 이미 유니버스에 있다: {', '.join(sorted(stale))}")
+
     cands = sig.get("watchlist_candidates") or []
     for c in cands:
         ticker = c.get("ticker", "")
-        market = (c.get("market") or ("US" if c.get("excd") else "KR")).upper()
+        # ★ 시장 추론: 명시값 > 거래소 코드 > **티커 모양**(6자리 숫자 = KR). 예전엔 둘 다 없으면 KR로 떨어져
+        #   2026-09-22에 US 후보 10건이 KR로 기록되고 냉각 카운터가 초기화됐다.
+        market = (c.get("market") or ("US" if c.get("excd") else "")).upper()
+        if market not in ("KR", "US"):
+            market = "KR" if (ticker.isdigit() and len(ticker) == 6) else "US"
+            print(f"  · {ticker}: market/excd가 없어 티커 모양으로 {market}로 판정했다 — 시그널에 market을 적어라",
+                  file=sys.stderr)
         name = c.get("name", "")
         cur = wl.get(market) or []
         key = f"{market}:{ticker}"
@@ -275,19 +303,37 @@ def run(signal_path: Path, apply: bool) -> int:
         seen = set(pending.get(key, {}).get("dates", []))
         seen.add(session_date)
         runs = sorted(set(pending.get(key, {}).get("runs", [])) | {run_id})
+        prev_check = (pending.get(key) or {}).get("last_check")
         pending[key] = {"dates": sorted(seen), "runs": runs, "name": name,
                         "axis": c.get("axis", ""), "excd": c.get("excd", "")}
+        if prev_check:
+            pending[key]["last_check"] = prev_check
         if len(seen) < rules["cooling_days"]:
             rej(f"냉각 중 — 서로 다른 {len(seen)}/{rules['cooling_days']}일 제안됨")
             continue
+
+        def _note_check(kind, why):
+            """왜 못 들어왔는지를 **pending 행에 남긴다** — 예전엔 사유가 stdout과 로그에만 있어
+            '몇 run째 무엇에 막혔나'를 파일에서 볼 수 없었다(GEV 4 run)."""
+            pending[key]["last_check"] = {"at": datetime.now(KST).isoformat(),
+                                          "kind": kind, "why": why, "run": run_id}
 
         try:
             if market == "KR":
                 info = check_kr(client, ticker, rules, equity)
             else:
                 info = check_us(client, ticker, c.get("excd", "NASD"), rules)
-        except (Reject, KisError) as e:
+        except Unknown as e:
+            _note_check("미확인", str(e))
+            rej(f"**미확인**(거부 아님) — {e}")
+            continue
+        except Reject as e:
+            _note_check("거부", str(e))
             rej(str(e))
+            continue
+        except KisError as e:
+            _note_check("미확인", f"브로커 조회 실패: {e}")
+            rej(f"**미확인**(거부 아님) — 브로커 조회 실패: {e}")
             continue
 
         cap = rules.get("max_single_share_pct_of_equity")

@@ -188,8 +188,18 @@ def recent_filings(tickers: list, days: int = 3) -> dict:
     begin = end - timedelta(days=days)
     filings, errors = [], {}
 
+    fallback = None
     for ticker in tickers:
         meta = codes.get(ticker)
+        if not meta:
+            # 유니버스 캐시는 watchlist KR만 담는다. 전망·후보로 유니버스에 들어온
+            # 종목은 거기 없으므로 전체 캐시로 한 번 더 찾는다 — 없어야 미매핑이다.
+            if fallback is None:
+                try:
+                    fallback = load_all_codes(key)
+                except (RuntimeError, urllib.error.URLError, OSError):
+                    fallback = {}
+            meta = fallback.get(ticker)
         if not meta:
             errors[ticker] = "corp_code 미매핑"
             continue

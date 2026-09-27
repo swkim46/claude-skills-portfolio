@@ -1,4 +1,4 @@
 # 표준 라이브러리만 사용한다 (Python >= 3.9 — zoneinfo).
 # 아래는 선택 의존성이며, 없어도 핵심 경로(수집·판정·집행·게이트·테스트)는 동작한다.
-# pypdf      # ai-trading-bot/corpus.py 가 PDF 재료를 색인할 때만
+# pypdf      # gmail-newsletter-analyzer/fetch_article.py 가 PDF 링크의 본문을 추출할 때, ai-trading-bot/corpus.py 가 PDF 재료를 색인할 때만
 # openpyxl   # .claude/skills/_stepgate/stepgate.py 가 .xlsx 산출물의 인용을 대조할 때만

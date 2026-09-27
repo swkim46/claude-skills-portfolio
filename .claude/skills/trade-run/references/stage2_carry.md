@@ -43,6 +43,11 @@ python3 scenarios.py judge --id SC-260910-1 --realized y --acted y --note "e2 �
 - **`--market`이 아니라 `--affects`로 고른다** — '연 시장'이 아니라 '그 시장에 대응이 걸린 것'이다.
 - 대응 시장이 `?`로 남은 행은 **추측하지 말고 채운다** — 게이트가 그 물음표를 센다.
 - 오늘 새로 세운 조건은 5단이 `scenarios.py promote`로 승격한다(`stage5_decide.md`).
+- **이월하는 조건은 시그널 행에 `persistent_id`로 원장 id를 적는다** — `promote`가 그 id로 같은 조건임을 안다.
+  병합된 행(`status: merged`)은 목적지 id로 판정한다(`judge`가 안내한다).
+- **직전 run은 스탬프가 아니라 시간순이다** — US run은 ET 금요일 세션을 KST 토요일 스탬프로 돌 수 있다
+  (`260919` = ET 09-18). `sessions.py prev`가 `스탬프`와 기준일을 함께 낸다; `review.py --session`에는 **스탬프
+  날짜**를 넘긴다(파일은 스탬프로 찾는다). 휴장(`config/holidays.json`)은 미실행이 아니다.
 
 
 **회고는 채점표이기 전에 오늘 준비의 첫 입력이다.** 밤사이 저쪽 섹터가 움직였으면 그건
@@ -55,6 +60,15 @@ python3 stage.py carry --market <kr|us>
 ```
 `theses.py check` → `review.py --record` → `market_map.py bridge --closed` → `cycle`을
 순서대로 돌려 한 파일로 모은다.
+
+### ★ 배분 판단을 이어받는다 — 비율과 명분은 백지가 아니라 히스토리 위에
+
+`stage.py carry`가 `allocation.py prev`로 **직전 배분 판단**(id·목표 주식 비율·국면·현금 명분·해제 조건·예약·직전 변경)을
+carry 파일에 붙인다. 이번 run의 5단은 **그 블록에서 시작한다**: 시그널 `allocation.based_on`에 직전 id를 적고, 유지면
+`change: null`, 바꾸면 `change.why`에 **무엇이 새로 알려져 바꾸는지**(재료 확장·회고·이벤트 결과)를 적는다. 직전을
+안 잇거나 이유 없이 바꾸면 `risk_guard`가 거부한다. 현금 명분의 **해제 조건**은 시나리오 원장에 올라가 매 run
+"실현됐는가"를 판정받는다 — 실현되면 현금을 넣는 쪽으로 바꾼다. 원장이 비어 있으면 최초 판단(`based_on: null`)이다.
+*왜(2026-09-22 사용자)*: 매번 독립적으로 정하면 "기다리기로 한 결정"이 어디에도 이어지지 않는다 — 논지·시나리오와 같은 원리다.
 
 ### ★ 저널에만 남기면 오늘 판단에 아무 영향을 못 준다
 

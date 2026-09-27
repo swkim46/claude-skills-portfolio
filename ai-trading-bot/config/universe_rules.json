@@ -30,10 +30,10 @@
       "mrkt_warn_cls_code": "00"
     }
   },
-  "_note_us": "해외는 지수 편입 정보를 TR이 주지 않아 시가총액·거래대금·브로커의 매매가능 판정으로 대신한다. 금액 단위: USD.",
+  "_note_us": "해외는 지수 편입 정보를 TR이 주지 않아 시가총액·거래대금·브로커의 매매가능 판정으로 대신한다. 금액 단위: USD (2026-09-23 실측 확인 — AAPL tomv 4.96T · TSM 2.34T · IBKR 41.6B). ★ 시총 하한 50B→20B(2026-09-23 사용자): 시총 관문의 명분은 '크고 유동성 있는 진짜 회사'의 대리지표이고 그 일은 거래대금 $100M/일이 주로 한다 — 50B은 IBKR(41.6B·거래대금 371M) 같은 정상 종목을 걸러내는 값이었다. 잡주는 거래대금이 먼저 막는다. ★ 시세 TR은 EXCD를 시세용 코드(NAS/NYS/AMS)로 받는다 — 주문용(NASD/NYSE/AMEX)을 주면 rt_cd=0에 빈 응답이 오고, 그것을 '브로커 거부'로 읽어 4 run 동안 편입이 막혔다(quote_excd로 정규화).",
   "US": {
     "require_orderable": true,
-    "min_market_cap_usd": 50000000000,
+    "min_market_cap_usd": 20000000000,
     "min_daily_turnover_usd": 100000000,
     "_note_etf": "ETF는 `tomv`(시가총액)가 AUM으로 오므로 개별주 500억 달러 기준을 그대로 적용하면 SOXL(수십억)도 못 들어온다. 이름에 ETF·Shares·Fund·Trust가 있으면 `min_market_cap_usd_etf`를 쓴다.",
     "min_market_cap_usd_etf": 3000000000

@@ -4,6 +4,15 @@
   "market": "KR",
   "generated_at": "2026-09-03T17:00:58.289709+09:00",
   "no_trade": false,
+  "allocation": {
+    "based_on": "AL-260921-us (직전 판단 id — allocation.py prev · 원장이 비어 있으면 null)",
+    "target_invested_pct": 95,
+    "regime": "국면 — 캡처 '국면 재료' 숫자 인용(예: SPY 20일 +1.3% · 20·60일선 위 · 상승 섹터 9/14) · 직전과 같은 점/달라진 점",
+    "cash_reason": "없음 (현금을 남기면 국면 판단의 명분 — 예: 하락장 KOSPI 60일선 아래 -3%)",
+    "cash_release_when": "명분이 끝나는 조건 — 예: KOSPI 60일선 회복 (명분이 없으면 빈 문자열)",
+    "reserved": [],
+    "change": null
+  },
   "analysis_refs": {
     "material": "data/material_TEST_kr.md",
     "note": "analysis/분석노트_TEST_kr.md",
@@ -26,7 +35,9 @@
           "tier": "T1",
           "verdict": "MATCH"
         }
-      ]
+      ],
+      "size_why": "이 증분을 왜 사는가 — 기대 수익 · 무엇이 깨면 틀리나 · 손절까지 거리 · gap에서 이 종목의 몫 (리서치 재료 확장 인용)",
+      "concentration_why": ""
     },
     {
       "ticker": "035420",
@@ -44,7 +55,9 @@
           "tier": "T3",
           "verdict": "MATCH"
         }
-      ]
+      ],
+      "size_why": "이 증분을 왜 사는가 — 기대 수익 · 무엇이 깨면 틀리나 · 손절까지 거리 · gap에서 이 종목의 몫 (리서치 재료 확장 인용)",
+      "concentration_why": ""
     }
   ],
   "watchlist_candidates": [

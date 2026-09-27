@@ -37,6 +37,12 @@ HERE = Path(__file__).parent
 JOURNAL = HERE / "journal"
 MAP = JOURNAL / "market_map.json"
 CAL = JOURNAL / "calendar.json"
+
+# 일정 행의 `kind` 어휘 — `add-event`가 검증한다. 이벤트 계수(`limits.position_sizing`)는 지표·정책만 본다.
+EVENT_KINDS = ("지표", "정책", "실적", "제품", "지수", "휴장", "메모", "기타")
+EVENT_KINDS_HELP = ("지표=CPI·PPI·고용 등 공식 통계 발표 / 정책=FOMC·ECB·정부 정책 회의·발표 / 실적=실적 발표 / "
+                    "제품=제품·행사 / 지수=편입·리밸런싱 / 휴장=거래소 휴장 / "
+                    "메모=뉴스레터 휴간 등 시장 사건이 아닌 안내(계수 없음) / 기타")
 THESES = JOURNAL / "theses.json"
 SECTOR_HISTORY = JOURNAL / "sector_history.jsonl"
 BRIDGE = HERE / "config" / "sector_bridge.json"
@@ -330,6 +336,15 @@ def add(path: Path, kind: str) -> int:
         _write(MAP, m)
     else:
         c = _read(CAL, {"schema_version": "1.0", "events": []})
+        # ★ kind는 어휘 안에서만 — `risk_guard.halve_window`가 `지표`·`정책`에 이벤트 계수를 붙이므로,
+        #   메모성 행("뉴스레터 휴간")이 `지표`로 들어오면 목표 비중이 0.75배가 된다(2026-09-21 UPPITY 행).
+        #   전건 검증 뒤에 쓴다 — 하나라도 어휘 밖이면 아무것도 기록하지 않는다.
+        bad = [e for e in items if e.get("kind") not in EVENT_KINDS]
+        if bad:
+            for e in bad:
+                print(f"kind가 어휘 밖이다: {e.get('kind')!r} ({e.get('date')} {e.get('event')})", file=sys.stderr)
+            print("허용 kind: " + " · ".join(EVENT_KINDS) + "\n  " + EVENT_KINDS_HELP, file=sys.stderr)
+            return 2
         for e in items:
             for k in ("date", "event"):
                 if not e.get(k):
@@ -1104,8 +1119,22 @@ def _record_board(rows: list, market: str, bench: float, day: str) -> None:
            "sectors": [{"key": r["key"], "name": r["name"], "d1": r["d1"],
                         "d5": r["d5"], "d20": r["d20"],
                         "close": r.get("close")} for r in rows]}
-    with SECTOR_HISTORY.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    # ★ (날짜, 시장)당 한 행 — 재실행이면 **덮어쓴다**(멱등). 2026-09-22: 캡처 3회 재실행으로 같은 날 행이 둘 쌓여
+    #   추세 계산이 같은 날을 두 번 셌다(09-10 kr·09-15 us도 같은 부산물).
+    kept = []
+    if SECTOR_HISTORY.exists():
+        for ln in SECTOR_HISTORY.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if not ln.strip():
+                continue
+            try:
+                r = json.loads(ln)
+            except json.JSONDecodeError:
+                continue
+            if (r.get("date"), r.get("market")) == (day, market):
+                continue
+            kept.append(ln)
+    kept.append(json.dumps(rec, ensure_ascii=False))
+    SECTOR_HISTORY.write_text("\n".join(kept) + "\n", encoding="utf-8")
 
 
 def bridge(closed: str, record: bool = False, score: bool = False) -> int:

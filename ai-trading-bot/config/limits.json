@@ -1,22 +1,13 @@
 {
  "_comment": "하드 리밋. 운영자가 정하는 한도 파일이다. risk_guard.py가 sha256을 approved에 스탬프하므로, 수정하면 진행 중인 approved는 무효가 된다 — 그래서 run 중간이 아니라 run 사이에 고친다.",
- "_profile": "decisive (2026-09-08) — 소액 운용 전제. 기계적 손절·트레일링·서킷브레이커는 끈 채로 두되(손절은 분석의 전략 판단), '결정을 미루는 것'을 막는 규칙을 넣었다. 불확실성은 기권이 아니라 포지션 크기로 흡수한다. null = 그 검사 꺼짐. | 2026-09-10 개정: 주식/현금 목표 60/40 명시 · 미달 배수 · 이벤트 계수 0.5→0.75 · 하한 미달 연속 2회 초과 시 제안 강제. | 2026-09-11 개정: **모든 비중의 분모를 포트폴리오 합산 자산으로** 바꿨다(양 시장을 한 계좌로 취급). 이전에는 시장별 자산이 분모여서 같은 confidence가 시장마다 다른 금액이었다(실측 13.4배 비대칭: per_position 12%가 KR 120만·US 1,606만). 축 집중 상한·반대편 예약 신설. | 2026-09-14: 레버리지·인버스 ETF 허용(선물형만 배제) — 호흡 10일 상한·비중 상한/배수·축 노출×배수.",
+ "_profile": "판단이 비율을 정한다 (2026-09-22) — 주식 비율·예약·크기는 상수가 아니라 시그널의 allocation(원장으로 이어받는 판단)과 제안의 size_why가 정하고, 판단한 비율에 못 미치면 risk_guard가 증분을 키워 채운다. 여기 남은 숫자는 전부 명분이 있는 것이다: 무결성(KILL·실전 래치·유니버스·long-only·MISMATCH·해시/30분) · 집행 역학(fill/전송) · 폭 강제(최소 건수·축 — 2026-09-16 사용자 결정) · 목표 여유(2026-09-21 사용자 결정) · 레버리지 상품 규칙. null = 그 검사 꺼짐.",
  "schema_version": "1.0",
  "halt_all": false,
- "_note_real": "★ 실전 계좌 래치. .env에 실전 키가 들어 있어도 이 값이 true가 아니면 kis_client가 실전 서버를 열지 않는다. 모의 검증을 통과하고 실계좌로 넘어가기로 결정했을 때만 사람이 직접 true로 바꿀 것.",
+ "_note_real": "★ 실전 계좌 래치. .env에 실전 키가 들어 있어도 이 값이 true가 아니면 kis_client가 실전 서버를 열지 않는다. 모의 검증을 통과하고 실계좌로 넘어가기로 결정했을 때만 사람이 직접 true로 바꿀 것. ★ 2026-09-23: 일일 주문 상한을 지웠다(사용자) — 모의 전제의 결정이다. 그래서 `real_trading_enabled`를 true로 바꾸면 `risk_guard`·`execute`가 **상한이 없는 한 run을 거부한다**(`real_latch_needs_cap`). 실전에서는 `daily_max_order_pct_of_equity`를 먼저 정할 것.",
  "real_trading_enabled": false,
- "_note_position": "종목당 상한은 크기 표의 최대치(8%)에 여유를 둔 값이다. 여러 run에 걸쳐 같은 종목을 늘릴 수 있으므로 상한 자체는 따로 필요하다.",
- "per_position_max_pct": 12.0,
- "max_positions": 20,
- "_note_axis": "★ 축 집중 상한 — 양 시장 보유를 합쳐 거시 축별 비중을 재고 넘는 만큼 깎는다(거부가 아니라 축소). 종목당 상한만 두면 같은 거시 사건에 걸린 종목 셋을 각각 상한까지 사서 한 사건에 36%가 걸릴 수 있다 — 분산으로 보이지만 실제로는 한 베팅이다. 축은 journal/market_map.json:axes[].names[]에서 읽고 sign이 '-'(역노출)인 보유는 집중으로 세지 않는다(헤지를 집중이라 부르지 않는다). null이면 이 검사 꺼짐.",
- "axis_max_pct": 25.0,
  "_note_leveraged": "★ 레버리지·인버스 ETF 규칙(2026-09-14 사용자 결정으로 허용). 막지 않고 **수익을 지키는 쪽으로 제한**한다: ① 일일 리셋 때문에 몇 주 들고 있으면 기초지수와 어긋나 횡보장에서 녹는다 → 논지 호흡 상한 `leveraged_max_horizon_days`(theses.py add가 거부) ② 3배면 같은 비중이 3배 베팅이다 → 종목당 상한을 배수로 나눈다(12%/3 = 4%) ③ 축 집중은 배수를 곱해 세고 인버스는 음수로 센다(SOXL 4% = 반도체 축 12%). null이면 그 규칙 꺼짐.",
  "leveraged_max_horizon_days": 10,
  "leveraged_cap_divide_by_factor": true,
- "cash_floor_pct": null,
- "_note_amount": "★ 일일 주문금액 상한 — 자산 대비 비율로 둔다(운영자가 정하는 유일한 값이 '계좌에 넣는 금액'이므로, 그 금액이 얼마든 같은 비율로 따라간다). 이건 '보수적으로 굴자'가 아니라 **사고의 폭발 반경 상한**이다: 유니버스 편입이 자동화된 뒤로 뉴스레터발 인젝션을 막는 것이 사람의 승인이 아니라 코드의 검증(universe_rules.json)인데, 그 검증을 뚫리는 잔여 위험이 남는다. 그때 하루에 나갈 수 있는 금액을 묶는 것이 이 값이다. 되살릴 때 주의: 유니버스 최고가 1주보다 높아야 한다(2026-09-07 USD 250 vs AAPL $320 / 2026-09-08 KRW 300,000 vs SK하이닉스 1,850,000 — 둘 다 실제로 걸렸다).",
- "daily_max_order_amount": null,
- "daily_max_orders": null,
  "_note_discipline": "★ 기계적 손절 OFF (사용자 결정). risk_guard는 이제 스스로 매도하지 않는다. 대신 soft_alert_pct 이하로 빠진 보유를 재료에 '주의'로 띄워, 팔지 말지를 근거와 함께 제안하게 한다. 되살리려면 stop_loss_pct에 숫자(예: -7.0)를 넣으면 된다.",
  "stop_loss_pct": null,
  "trailing_stop_from_peak_pct": null,
@@ -33,9 +24,9 @@
  "signal_max_age_minutes": 180,
  "approved_max_age_minutes": 30,
  "_note_fill": "★ 접수는 체결이 아니다 — run은 주문이 체결·부분체결·취소·만료·거부 중 하나로 확정될 때까지 닫히지 않는다(2026-09-16 사용자 지시 · 9/15 VST가 접수·미체결 상태로 게이트를 통과했던 것이 계기). fill.py: 접수 뒤 fill_chase_after_sec가 지나도 안 닿으면 승인가 ±fill_chase_max_pct 안에서 현재가 쪽으로 정정(매수는 올리고 매도는 내린다 · 수량은 승인 금액을 넘지 않게 내린다 · 최대 fill_chase_max회), 접수 후 fill_wait_minutes가 지나면 잔량 취소. 재전송은 절대 없다 — 살아 있는 주문을 다시 보내면 두 번 산다. null이면 기본값(20분·20초·90초·3회·0.5%).",
- "fill_wait_minutes": 20,
+ "fill_wait_minutes": 10,
  "fill_poll_sec": 20,
- "fill_chase_after_sec": 90,
+ "fill_chase_after_sec": 60,
  "fill_chase_max": 3,
  "fill_chase_max_pct": 0.5,
  "_note_reorder": "★ 2026-09-17 사용자 지시 — 재전송 '무조건 금지'를 '취소 확정 뒤 재발주 허용'으로. fill.py: 정정이 거부되거나(모의서버 [40660000] 잔량정정취소만 가능) 대기 초과로 잔량을 취소하면, 브로커 TR이 취소를 확정한 뒤(잔량 0·취소 표시 = 살아 있는 주문 없음) 승인 금액 안에서 최신가로 fill_reorder_max회 재발주한다. 이중 매수 방지: ① 취소 확정 뒤에만 ② 수량 = 승인 − 체결분 ③ 시세가 승인가 ±fill_reorder_max_pct 밖이면 재발주 안 함(캡처 뒤 달아난 것을 쫓지 않는다) ④ 재발주 건은 fill_reorder_wait_minutes 뒤 취소. execute.py: 전송 직전 지정가를 **해외 포함** 최신 시세로 갱신(불리한 쪽만, 수량은 승인 금액 안), 승인가 대비 send_refresh_max_pct 넘게 달아났으면 전송하지 않는다(다음 run 재판단).",
@@ -43,57 +34,26 @@
  "fill_reorder_max_pct": 1.0,
  "fill_reorder_wait_minutes": 10,
  "send_refresh_max_pct": 2.0,
- "_note_sizing": "확신도로 목표 비중을 정하고, 불확실성은 기권이 아니라 크기로 흡수한다. ★ 2026-09-09 개정 — 절반 규칙이 상시 발동해 영구 반쪽 매수가 되고 있었다(향후 15영업일 중 8일 발동, 일정표를 채울수록 100%에 수렴). 그래서 절반 사유를 **논지를 뒤집을 수 있는 거시 분기점**으로 좁힌다. 개별 실적·지수변경·제품행사는 절반 사유가 아니다.",
  "position_sizing": {
-  "by_confidence": [
-   {
-    "min_confidence": 0.65,
-    "target_pct": 8.0
-   },
-   {
-    "min_confidence": 0.55,
-    "target_pct": 4.0
-   },
-   {
-    "min_confidence": 0.5,
-    "target_pct": 2.0
-   }
-  ],
-  "halve_if_dated_event_within_days": 5,
-  "_note": "confidence 0.50 미만은 '견해 없음'이라 제안하지 않는다. 날짜가 정해진 이벤트(CPI·FOMC·실적)가 5영업일 안이면 절반으로 넣고 이벤트 후 시나리오대로 조정한다.",
-  "halve_only_for_event_kinds": [
-   "지표",
-   "정책"
-  ],
-  "_note_halve": "calendar.json의 kind가 이 목록에 있을 때만 절반. 지표=CPI·PPI·고용, 정책=FOMC·ECB·정부 정책. 실적·제품·지수·공모는 해당 없음 — 그것들은 개별 종목 사건이라 포지션 크기를 절반으로 줄일 근거가 못 된다.",
-  "deficit_multiplier_max": 3.0,
-  "_note_deficit": "목표 투자비중에서 멀면 종목당 목표에 배수를 곱한다: 1.0 + (미달폭/목표) × (max-1), 최대 3.0배. 종목 수를 늘리는 것만으로 비중을 채우려면 냉각·편입 판정을 기다려야 해서 몇 주가 걸린다. 이미 논지가 선 종목의 크기를 키우는 것이 더 빠르고, 그게 '논지가 서 있으면 자금을 넣어라'의 실행이다. per_position_max_pct(12%)로 상한이 걸리므로 무한히 커지지 않는다. ★ 2026-09-16: 2.0→3.0. 실측 — 미달 55%p에서 ×2는 run당 4%(0.5 확신도 2%×1.98)였고 9/8~9/15 투자비중이 5%에 머물렀다. ×3이면 하단 확신도가 6%, 중간이 12% 상한에 닿는다.",
-  "event_factor": 0.75,
-  "_note_event_factor": "★ 절반(0.5)이 너무 강했다. 2026-09-10: PPI(지표) D-0 하나로 목표가 4%→2%가 됐고, 이미 보유 3.1%가 그걸 넘어 제안이 거부됐다 — 이벤트 하나가 매수를 통째로 막았다. 거시 분기점에서 크기를 줄이는 취지는 유지하되 계수를 0.75로 완화한다.",
-  "skip_event_factor_below_floor": true,
-  "_note_skip": "투자비중이 min_invested_pct 아래면 이벤트 계수를 적용하지 않는다. 그 상태에서 이벤트를 이유로 또 줄이면 하한을 벗어날 길이 사라진다 — 미달이 이벤트보다 큰 문제다."
+  "_note": "크기는 표가 아니라 제안의 size_why가 정한다(2026-09-22). 여기 남은 것은 유효성 검사뿐이다.",
+  "min_target_gap_pct": 3.0,
+  "_note_min_target_gap": "BUY 제안의 1차 목표(price >= N — 제안 exits와 논지 exit_triggers 중 최솟값)가 현재가 대비 이 %보다 가까우면 유효성 거부(미달 건수에 안 셈). 2026-09-21 테스: 09-18에 +7% 자리로 건 x3 147,800이 사기도 전에 +0.7%가 됐는데 그대로 제안됐다 — 이미 오른 가격을 쫓는 제안(§0-b)이고 사자마자 절반이 팔리는 회전은 비중도 못 올린다. 논지는 armed 유지, 다음 run이 새 과거 고정 기준으로 목표를 다시 건다(theses.py set-trigger). 0이면 끔."
  },
- "_note_invested": "★ 현금을 남기는 이유는 안전이 아니라 **시나리오 대응 여력**이다. 전액 투자 상태에서는 'CPI 하회 시 추가'라는 대응이 물리적으로 불가능해져, 시나리오를 적어둔 의미가 사라진다.",
- "max_invested_pct": 70.0,
- "daily_max_order_pct_of_equity": 20.0,
- "_note_min_invested": "★ 기권을 막는 정량 레버. 하한 미달은 '설명 의무'로 시작하되, **연속 no_trade_max_consecutive_below_floor 회를 넘기면 설명으로 끝낼 수 없다** — 그 run은 제안 0건으로 닫히지 않고 게이트가 막는다. 2026-09-10에 이 이빨이 없어서 '사유 한 줄 적고 통과'가 실제로 됐다. 강제 매수가 아니라 **강제 제안**이다: risk_guard가 여전히 거부할 수 있고, 거부는 그대로 기록된다. ★ 2026-09-10: `min_invested_when_armed_theses`(값 2)를 제거했다 — 리더가 없어 집행되지 않았고, 하한에 '논지 N개 이상일 때만'이라는 조건을 붙이는 해석은 어느 쪽으로 배선해도 논지가 1개일 때 미달 배수를 끄게 되어 **현금을 더 남기는 방향**이 된다. 그건 이 하한을 만든 이유(기권 방지)와 반대다. 하한은 조건 없이 적용하고, 미달은 설명 의무 → 연속 한도 초과 시 게이트 차단으로 다룬다.",
- "min_invested_pct": 20.0,
  "_note_rounding": "목표 금액이 1주 값에 못 미치면 0주가 되어 제안이 통째로 사라진다. 목표가 1주 값의 이 비율 이상이면 1주로 올린다 — 2026-09-09 실측: 사이징 6가지 경우 중 3가지가 0주였다.",
  "round_up_to_one_share_at": 0.6,
- "_note_target_invested": "★ 주식/현금 비율을 **의도로 정한다**. 2026-09-10 실측: 투자비중 10.8% / 현금 89%였다. 원인은 판단이 아니라 산술이었다 — 종목당 비중만 정하고 '전체를 얼마나 투자한 상태로 둘 것인가'를 안 정해서 기본값이 0%였고, 4%가 대개 1주라 4종목×4%=16%가 천장이었다. 그래서 목표를 명시하고(60%), 목표에서 멀면 종목당 비중을 키운다(deficit_multiplier). 현금 40%는 안전이 아니라 시나리오 대응 여력이다 — 상한 70%보다 낮게 두는 이유가 그것이다.",
- "target_invested_pct": 60.0,
- "_note_reserve": "★ 반대편 시장 헤드룸 예약 — '미국에서 눈여겨보던 종목이 있는데 국내장에서 별 거 아닌 종목을 사서 돈이 없어 못 사는' 것을 막는다. 반대편 armed 논지 수 × per_position_max_pct로 필요액을 추정하고 이 값으로 상한을 둔다(상한이 없으면 반대편 논지가 쌓일수록 이번 run이 굶는다). 반대편 armed 0건이면 예약 0. 계좌가 갈려 있는 동안에도 판단·기록은 통합 기준으로 해두면 실계좌로 합칠 때 그대로 맞는다. null이면 꺼짐.",
- "reserve_for_other_market_pct": 15.0,
- "_note_same_market": "★ 입금된 돈 안에서 알아서(2026-09-16 사용자 지시 — 사람에게 환전·입금을 묻지 않는다). ① 덜 사기: 이 시장에 다른 armed 논지가 있으면 이 시장 자산의 scenario_reserve_pct_of_market만큼 현금을 남기고 깎는다(9/16 두산 98주가 국내 현금을 49,582원까지 써서 시나리오 대응이 전부 막혔다). ② 팔기: 깎아도 의도 금액의 funding_min_fill_ratio 미만이면 이 시장 최대 보유를 부족액만큼 회전 매도(source=funding)해 메운다 — run당 funding_max_per_run건. ③ 그래도 안 되면 그때만 거부(사유에 입금 요구 없음). null이면 그 규칙 꺼짐.",
- "scenario_reserve_pct_of_market": 25.0,
  "funding_min_fill_ratio": 0.5,
  "funding_max_per_run": 1,
- "no_trade_max_consecutive_below_floor": 2,
- "_note_deficit_floor": "★ 미달 강제(2026-09-16 사용자 결정 '최소 건수 강제'). 투자비중 < target_invested_pct이면 그 run은 BUY 제안을 시장별 최소 건수 이상, 서로 다른 축 min_distinct_axes_below_target개 이상 내야 하고, 오늘 새로 armed한 논지마다 e0(선진입) 제안이 있어야 한다. risk_guard가 approved에 deficit_short를 찍고 dispatch·no_trade 게이트가 파일에서 읽는다 — 부족하면 4·5단으로 돌아가 제안을 채운다(강제 매수가 아니라 강제 제안: 한도·현금 거부는 그대로 남는다). 왜: 9/8~9/15 실측 — 자본의 93%가 미국인데 미국 집행 6회 중 1회, run당 제안 1건, 투자비중 5%. 위의 연속 기권 한도는 무인 경로(run_auto)에만 있어 수동·루틴 run에서 한 번도 작동하지 않았다. null이면 검사 꺼짐.",
  "min_proposals_below_target": {
   "US": 3,
   "KR": 2
  },
  "min_distinct_axes_below_target": 2,
- "_note_invested_band": "투자비중 대역은 min_invested_pct(하한·risk_guard가 드러냄) ~ max_invested_pct(상한·risk_guard가 거부)이고 목표는 target_invested_pct다. 별도 band 키를 두면 읽히지 않는 세 번째 숫자가 생겨 실제 집행값과 어긋난다(제거된 invested_band_pct가 하한을 50이라고 말했지만 집행되는 하한은 20이었다)."
+ "concentration_disclose_pct": {
+  "position": 20.0,
+  "axis": 40.0
+ },
+ "_note_concentration": "★ 상한이 아니라 **명분이 붙어야 하는 선**이다(2026-09-22). 이번 주문 뒤 종목 비중이 position%, 또는 축 비중(양 시장 합산)이 axis%를 넘기는 제안은 concentration_why가 있어야 승인된다 — 없으면 그 제안만 거부. 옛 종목당 12%·축 25% 상한은 '왜 그 숫자인가'가 없어 지웠다. 현금 명분과 같은 원리다.",
+ "_note_min_proposals": "★ 미달 강제(2026-09-16 사용자 결정): 판단한 비율 아래면 BUY 제안을 시장별 최소 건수·서로 다른 축 이상 내고 오늘 세운 논지에 e0를 붙인다 — 폭을 강제할 뿐 속도를 늦추지 않는다(속도는 gap 채우기가 맡는다).",
+ "fill_aggressive_ticks": 1,
+ "_note_aggressive": "★ 체결 속도(2026-09-22): 전송 직전 지정가를 시세·승인가 중 불리한 쪽에서 이 틱 수만큼 더 시장 쪽으로 둔다(매수 위·매도 아래). 지정가=마지막 체결가로 두면 한 틱 차이로 대기→취소가 잦아 execute 단계가 9~24분이었다. 비용은 틱×n, 수량은 승인 금액 안. fill_wait_minutes 20→10 · fill_chase_after_sec 90→60도 같은 이유."
 }

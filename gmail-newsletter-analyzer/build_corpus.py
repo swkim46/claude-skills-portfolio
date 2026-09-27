@@ -3,7 +3,7 @@
 Build the paired (newsletter -> note) corpus used to derive the transformation rules.
 
 For each date in the `세상 공부` note, this pairs that day's newsletters with what
-the operator actually wrote. The rules for the analyzer are derived by comparing the two
+운영자 actually wrote. The rules for the analyzer are derived by comparing the two
 sides, not by guessing.
 
 Fetching reuses gmail_imap.fetch_body and digest.clean — no new fetch code.
