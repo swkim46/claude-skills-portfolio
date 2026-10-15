@@ -1,0 +1,4 @@
+{
+  "_comment": "공개본 견본 — 공유 출처 원장. 실제 운영에서는 srcledger.py가 실행마다 채우며, note_lint.py가 출처 행 품질을 볼 때 읽는다.",
+  "sources": []
+}

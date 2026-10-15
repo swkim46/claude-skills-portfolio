@@ -1,0 +1,24 @@
+{
+ "_source": "analysis/세제_실계좌_261012_v1_0.md (2026-10-12 조사 · 전부 T1 출처)",
+ "_note": "매매 비용·세금 설정(2026-10-12 실계좌 전환). 손익 보고·수익 바닥의 세후 환산·30일 비용 지표·세금 원장이 읽는다. 손절 폭은 바꾸지 않는다. 환전 기준 스프레드(편도 1%)는 가정이다 — 첫 미국 체결의 자동환전 내역으로 실측해 fx_spread_oneway_pct·fx_discount_pct를 고친다.",
+ "KR": {
+  "commission_pct": 0.0140527,
+  "etf_commission_pct": 0.0146527,
+  "sell_tax_pct": 0.20,
+  "etf_sell_tax_pct": 0.0,
+  "roundtrip_pct": 0.228,
+  "etf_roundtrip_pct": 0.029,
+  "_note": "KIS 뱅키스 온라인 KRX 0.0140527%(ETF 0.0146527%) × 매수·매도 + 매도 거래세·농특세 0.20%(코스피 0.05+0.15 · 코스닥 0.20 · 2026-01-01 환원). ETF는 거래세 없음. 소액주주 장내 차익 비과세."
+ },
+ "US": {
+  "commission_pct": 0.25,
+  "sec_fee_sell_pct": 0.00206,
+  "fx_spread_oneway_pct": 1.0,
+  "fx_discount_pct": 60,
+  "roundtrip_pct": 1.295,
+  "capital_gains_pct": 22,
+  "basic_deduction_krw": 2500000,
+  "_note": "KIS 미국 온라인 0.25% × 매수·매도 + 매도 SEC Fee 0.00206% + 환전 편도 1% × (1 − 우대 60%). 해외주식 양도소득세: 연 순차익 − 250만 원(국내 과세대상과 합산) × 22%(지방세 포함), 결제일 기준환율로 원화 환산, 손실 이월 없음, 5월 신고."
+ },
+ "etf_name_patterns": ["KODEX", "TIGER", "ACE ", "RISE ", "SOL ", "HANARO", "KBSTAR", "ARIRANG", "PLUS ", "KOSEF", "TIMEFOLIO", "KIWOOM", "1Q "]
+}

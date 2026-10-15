@@ -22,11 +22,14 @@ Usage:
     python3 digest.py --only "Axios Markets,Axios Macro" --since "2026-09-08 00:00"   # 보충용
 
 수집 뒤 stderr의 두 경고를 먼저 본다 — ★ 미등록 발신자 / ★ 스팸함에서 건진 발행분.
+IMAP이 끊기면 스스로 최대 5회 재시도한다(10·20·40·60초 간격) — 바깥에서 반복문으로 감싸지 말 것.
 """
 import argparse
+import imaplib
 import json
 import re
 import sys
+import time
 from datetime import datetime, timedelta
 
 import gmail_imap as g
@@ -240,6 +243,25 @@ def collect(date_str: str, days: int, purpose: str = "study", since: str = None,
             "unregistered": unregistered}
 
 
+# Gmail IMAP은 가끔 몇 분씩 `socket error: EOF`·빈 응답을 낸다. 2026-10-06 run은 이것을 사람이 반복문으로
+# 일곱 번 돌려 넘겼다 — 수집기가 스스로 기다렸다 다시 붙는다. 수집은 읽기 전용(readonly select)이라 통째로
+# 다시 돌려도 안전하다. 대기 합 130초 + 시도당 연결 대기 30초 — ai-trading-bot/ingest.py의 제한(300초) 안.
+RETRY_WAITS = (10, 20, 40, 60)
+
+
+def collect_with_retry(*a, **kw):
+    for i, wait in enumerate(RETRY_WAITS + (None,), 1):
+        try:
+            return collect(*a, **kw)
+        except (imaplib.IMAP4.abort, OSError) as e:
+            # 끊김·EOF·시간 초과만 다시 한다. 인증 실패(IMAP4.error)·설정 오류는 기다려도 안 풀리니 그대로 올린다.
+            if wait is None:
+                raise SystemExit(f"IMAP {i}회 연속 실패({e}) — 몇 분 뒤 같은 명령을 한 번 더. "
+                                 "반복문으로 감싸지 말 것(수집기가 이미 재시도한다)")
+            print(f"IMAP 연결 끊김({e}) — {wait}초 뒤 재시도 ({i}/{len(RETRY_WAITS) + 1})", file=sys.stderr)
+            time.sleep(wait)
+
+
 STAMP_RE = re.compile(r"^<!-- 수집 .*-->$", re.M)
 
 
@@ -361,8 +383,8 @@ def main():
         ap.error("--since와 --days는 같이 쓰지 않는다(--since가 창을 정한다).")
     only = [x for x in args.only.split(",") if x.strip()] if args.only else None
 
-    result = collect(args.date, args.days, args.purpose, since=args.since, only=only,
-                     roster_check=not args.no_roster_check)
+    result = collect_with_retry(args.date, args.days, args.purpose, since=args.since, only=only,
+                                roster_check=not args.no_roster_check)
     if args.slug:
         result["slug"] = re.sub(r"[^0-9A-Za-z가-힣]+", "", args.slug)[:24]
 
@@ -374,9 +396,9 @@ def main():
             print(f"    {u['address']} | {u['name'][:24]} | {u['count']}통 | {u['subject'][:50]}"
                   f"  ({u['why']})", file=sys.stderr)
     if result["spam_count"]:
-        print(f"\n★ 스팸함에서 건진 발행분 {result['spam_count']}통(헤더에 ⚠스팸함) — 재료에는 "
-              "넣었으니 그대로 쓰되, Gmail 필터('스팸함으로 보내지 않음')를 만들라고 보고할 것.",
-              file=sys.stderr)
+        # 필터 생성 권유는 하지 않는다 — 운영자 요청(2026-10-02). 건져서 재료에 넣는 것으로 끝.
+        print(f"\n★ 스팸함에서 건진 발행분 {result['spam_count']}통(헤더에 ⚠스팸함) — 재료에 "
+              "넣었으니 그대로 쓸 것.", file=sys.stderr)
 
     if not result["items"]:
         span = f"{args.since} 이후" if args.since else f"{args.date} 기준 최근 {args.days}일간"

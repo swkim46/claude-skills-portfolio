@@ -80,7 +80,8 @@ def connect(mailbox: str = None):
     # Google displays app passwords in four groups of four; spaces are not part of it.
     password = env["GMAIL_APP_PASSWORD"].replace(" ", "")
 
-    imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+    # timeout: 서버가 응답 없이 붙잡고 있으면 재시도(digest.collect_with_retry)로 넘어가게 한다.
+    imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, timeout=30)
     try:
         imap.login(env["GMAIL_ADDRESS"], password)
         target = mailbox or find_all_mail(imap)

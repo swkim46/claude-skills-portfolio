@@ -21,7 +21,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from kis_client import (KisClient, KisError, snap_kr_price, kr_tick_size, market_session,
-                        order_excd, quote_excd)
+                        order_excd, quote_excd, buy_qty_within, account_mode, us_daytime_session,
+                        DAYTIME_QUOTE_EXCD)
 import risk_guard as rg
 
 HERE = Path(__file__).parent
@@ -100,6 +101,12 @@ def preflight(approved: dict, path: Path, limits: dict) -> None:
     if approved.get("schema_version") != rg.SCHEMA_VERSION:
         raise rg.Rejection(f"approved schema_version 불일치: {approved.get('schema_version')!r}")
 
+    # ★ 실계좌 전환(2026-10-12): 승인이 만들어진 계좌 모드와 지금 모드가 다르면 보내지 않는다 — 모의 잔고로 잰 수량을
+    #   실계좌로 보내거나 그 반대가 되는 길이다. 모드가 적히기 전의 승인(키 없음)은 모의에서만 받는다.
+    ap_mode = approved.get("account_mode") or "paper"
+    if ap_mode != account_mode(limits):
+        raise rg.Rejection(f"승인의 계좌 모드 {ap_mode!r} ≠ 지금 {account_mode(limits)!r} — risk_guard를 지금 모드로 다시 돌려라")
+
 
 def _send_cfg() -> dict:
     """전송 직전 갱신의 한도 — `config/limits.json`의 `send_refresh_max_pct`(기본 2.0%)."""
@@ -124,6 +131,7 @@ def refresh_limit(client: KisClient, order: dict, limits: dict = None) -> tuple:
     체결을 포기하는 것이고, 그게 애초의 문제다. 승인가보다 유리해졌으면 승인가를 그대로 쓴다
     (지정가가 시세 위에 있으면 시세에 체결된다 — 더 싸게 사는 것을 막을 이유가 없다).
     **수량은 승인 금액을 넘지 않게 내린다**(가격이 올랐으면 주 수를 줄인다 — 한도는 금액이다).
+    단 내림이 0주면 1주를 보낸다 — 아래 이탈 한도 안이라 초과는 한 주 값의 그 % 이내다(`buy_qty_within`).
     시세가 승인가에서 `send_refresh_max_pct`(기본 2%)보다 더 불리하게 달아났으면 **보내지 않는다** —
     그건 캡처 뒤에 오른 것을 쫓는 것이고, 다음 run이 새 가격으로 다시 판단한다.
     """
@@ -136,6 +144,8 @@ def refresh_limit(client: KisClient, order: dict, limits: dict = None) -> tuple:
             live = float(client.domestic_price(order["ticker"])["price"])
         else:
             excd_q = quote_excd(order.get("excd"))
+            if order.get("session") == "daytime":       # 주간거래 매도는 주간 세션 시세로(BAQ/BAY/BAA)
+                excd_q = DAYTIME_QUOTE_EXCD.get(order_excd(order.get("excd")), "BAQ")
             live = float(client.overseas_price(order["ticker"], excd=excd_q)["price"])
     except (KisError, KeyError, TypeError, ValueError) as e:
         return approved_px, qty, f"현재가 재조회 실패({type(e).__name__}) — 승인가 유지", None
@@ -165,33 +175,80 @@ def refresh_limit(client: KisClient, order: dict, limits: dict = None) -> tuple:
         px = round(px0 * (1 + bump), 2) if side == "BUY" else round(px0 * (1 - bump), 2)
     if px == approved_px and not worse:
         return approved_px, qty, "", None
-    new_qty = qty
+    new_qty, floor_one = qty, ""
     if side == "BUY":
-        # 틱 분(px − px0)만큼은 승인 금액 초과를 허용한다 — 한 틱 올린 대가로 한 주를 잃으면 채우기 목적이 깨진다.
-        # 시세 드리프트(px0 − 승인가)는 그대로 수량으로 흡수한다(한도는 금액이다).
-        allowed = approved_amt + max(0.0, px - px0) * qty
-        new_qty = min(qty, int(allowed // px)) if px > 0 else 0
+        # 틱 분(px − px0)과 호가·센트 반올림 분(px0 − base)은 승인 금액 초과를 허용한다 — 체결 우선 장치가 한 주를 잃게
+        # 하면 채우기 목적이 깨진다(반센트 승인가 1,791.005는 시세가 같아도 반올림 0.005 때문에 0주였다 — 2026-10-09).
+        # 시세 드리프트(px0 − 승인가)는 수량으로 흡수하되(한도는 금액이다), 내림이 0주면 1주를 보낸다(`buy_qty_within`).
+        allowed = approved_amt + (max(0.0, px - px0) + max(0.0, px0 - base)) * qty
+        new_qty = buy_qty_within(qty, allowed, px)
         if new_qty <= 0:
             return px, 0, "", f"승인 금액 {approved_amt:,.0f} 안에서 {px:,.2f}로는 0주 — 전송 안 함"
+        if new_qty * px > allowed + 1e-6:
+            floor_one = f" · 1주 하한(승인 금액 {approved_amt:,.2f} 대비 {(new_qty * px / approved_amt - 1) * 100:+.2f}%)"
     why = (f"승인가 {approved_px:,.2f} → {px:,.2f} (집행 시점 시세 {live:,.2f}, 승인 대비 {drift:+.2f}% · "
-           f"체결 우선 {ticks}틱)" + (f" · 수량 {qty}→{new_qty}(승인 금액 안)" if new_qty != qty else ""))
+           f"체결 우선 {ticks}틱)" + (f" · 수량 {qty}→{new_qty}(승인 금액 안)" if new_qty != qty else "") + floor_one)
     return px, new_qty, why, None
 
 
+# SOR 주문이 거래소 구분 때문에 거부됐는지 — 응답 문구로 본다(조회만으로는 거부 코드를 미리 알 수 없다 · 2026-10-12).
+EXCG_REJECT_HINTS = ("SOR", "NXT", "거래소", "EXCG", "대체거래")
+
+
+def is_excg_reject(err: Exception) -> bool:
+    return any(h in str(err) for h in EXCG_REJECT_HINTS)
+
+
 def place(client: KisClient, order: dict) -> dict:
-    """주문 1건 전송. 국내는 지정가, 미국은 지정가(모의는 지정가만 지원)."""
+    """주문 1건 전송. 국내는 지정가, 미국은 지정가(모의는 지정가만 지원).
+
+    ★ 실계좌 국내는 SOR로 보낸다(2026-10-12 사용자 결정). SOR이 거래소 구분 사유로 **거부**되면 같은 주문을 KRX로
+    한 번 다시 보낸다 — 거부는 접수되지 않은 것이라 중복 주문이 아니다. 결과에 `fallback`을 남기고 보고 첫 줄에 적는다.
+    미국 `session: daytime` 행은 주간거래 매도로 보낸다(손절·추적 전용 — kis_client가 매수를 거부한다).
+    """
     market = order.get("market", "KR")
     if market == "KR":
-        return client.domestic_order(
-            ticker=order["ticker"], side=order["action"],
-            qty=order["qty"], price=int(order["price"]),
-        )
+        kw = dict(ticker=order["ticker"], side=order["action"], qty=order["qty"], price=int(order["price"]))
+        try:
+            return client.domestic_order(**kw)
+        except KisError as e:
+            if client.kr_excg == "KRX" or not is_excg_reject(e):
+                raise
+            res = client.domestic_order(**kw, excg="KRX")
+            res["fallback"] = {"from": client.kr_excg, "to": "KRX", "error": str(e)[:200]}
+            print(f"  ↪ {order['ticker']} SOR 거부 → KRX 재전송 ({str(e)[:80]})")
+            return res
     # 시세용 코드(NYS)가 실려 오면 주문용(NYSE)으로 바꾼다 — 2026-09-15 1차 전송이 여기서 막혔다.
     excd = order_excd(order.get("excd") or "NASD")
+    if order.get("session") == "daytime":
+        return client.overseas_daytime_order(ticker=order["ticker"], side=order["action"], qty=order["qty"],
+                                             limit_price=float(order["price"]), excd=excd)
     return client.overseas_order(
         ticker=order["ticker"], side=order["action"],
         qty=order["qty"], limit_price=float(order["price"]), excd=excd,
     )
+
+
+def cap_check(order: dict, px: float, qty: int, cap: dict) -> tuple:
+    """★ 전송 직전 주문당 상한 재검사(2026-10-12). 반환 (보낼 수량, 메모, 거부 사유).
+
+    - 승인 수량 자체가 승인가 기준 상한을 넘으면 **우회된 승인**이다 → 보내지 않는다(거부 · 사고 기록 대상).
+    - 승인은 상한 안이었는데 전송 직전 시세 상승으로 넘었으면 상한 안으로 수량을 내린다(1주 미만이면 보내지 않는다).
+    매도는 검사하지 않는다(위험을 줄이는 주문).
+    """
+    if not cap or order.get("action") != "BUY":
+        return qty, "", ""
+    mult = 1.0 if order.get("market", "KR") == "KR" else float(cap.get("fx") or 0)
+    ap_q, _ = rg.order_cap_qty(float(order["price"]), mult, cap)
+    if ap_q is not None and int(order["qty"]) > ap_q:
+        return 0, "", (f"주문당 상한 우회 — 승인 {order['qty']}주가 승인가 기준 상한 {ap_q}주를 넘는다"
+                       f"(상한 {cap.get('max_krw', 0):,.0f}원 · 1주 초과 종목 {cap.get('max_shares')}주) — 전송 안 함")
+    now_q, why = rg.order_cap_qty(px, mult, cap)
+    if now_q is None or qty <= now_q:
+        return qty, "", ""
+    if now_q <= 0:
+        return 0, "", f"{why} — 전송 직전 시세로는 1주도 상한 안에 안 든다 — 전송 안 함"
+    return now_q, f"{why} — 전송 직전 시세 상승으로 {qty}→{now_q}주", ""
 
 
 def verify(client: KisClient, market: str) -> dict:
@@ -211,6 +268,37 @@ def _read_day(path: Path) -> dict:
         return d if isinstance(d, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def adjust_sell_dependent(buys: list, presell: list, day: dict, approved_name: str) -> tuple:
+    """★ FB-261003-10 — 매도 대금에 기대는 매수를 **실제 체결 대금**으로 다시 맞춘다. 반환 (보낼 매수, 건너뛴 것).
+
+    `risk_guard`는 같은 승인의 매도 대금을 예산에 넣고 그 돈을 쓰는 매수에 `needs_sell_fill`·`sell_dependent_amt`를 붙인다.
+    매도가 덜 체결되면 그만큼 매수를 줄인다 — 미체결 대금은 쓰지 않는다(이중 지출 방지)."""
+    expected = sum(int(o["qty"]) * float(o["price"]) for o in presell)
+    tk = {o["ticker"] for o in presell}
+    got = 0.0
+    for t in (day.get("trades") or []):
+        if t.get("ticker") in tk and t.get("action") == "SELL" and t.get("approved_ref") == approved_name:
+            f = t.get("fill") or {}
+            if f.get("verdict") in ("FILLED", "PARTIAL"):
+                got += float(f.get("filled_qty") or t.get("qty") or 0) * float(f.get("avg_price") or t.get("price") or 0)
+    ratio = min(1.0, got / expected) if expected > 0 else 0.0
+    out, skip = [], []
+    for b in buys:
+        dep = float(b.get("sell_dependent_amt") or 0)
+        if not b.get("needs_sell_fill") or dep <= 0 or ratio >= 0.999:
+            out.append(b)
+            continue
+        amt = int(b["qty"]) * float(b["price"]) - dep * (1 - ratio)
+        q = int(amt // float(b["price"])) if float(b["price"]) > 0 else 0
+        if q <= 0:
+            skip.append({k: b.get(k) for k in ("ticker", "action", "source", "qty")}
+                        | {"why": f"매도 대금 미체결 — 의존 매도 체결률 {ratio:.0%}라 살 돈이 없다(다음 run이 다시 낸다)"})
+            continue
+        out.append({**b, "qty": q, "reasons": list(b.get("reasons") or [])
+                    + [f"매도 체결률 {ratio:.0%} — 의존분만큼 {b['qty']}→{q}주로 줄였다"]})
+    return out, skip
 
 
 def dedupe_against_day(orders: list, prior_day: dict, approved_name: str) -> tuple:
@@ -312,7 +400,7 @@ def merge_day_record(path: Path, record: dict) -> dict:
 
 
 def _send_orders(client: KisClient, orders: list, market: str,
-                 approved_name: str = "", approved_at: str = "") -> tuple:
+                 approved_name: str = "", approved_at: str = "", cap: dict = None) -> tuple:
     """주문 목록을 전송하고 trades 행을 만든다. 반환 (trades, failures).
 
     행마다 `approved_ref`(승인 파일명)·`approved_at`을 적는다 — 멱등 전송(`dedupe_against_day`)과
@@ -343,6 +431,14 @@ def _send_orders(client: KisClient, orders: list, market: str,
             if why:
                 print(f"  · {o['ticker']} {why}")
                 o = {**o, "price": px, "qty": qty}
+            cq, cnote, cbad = cap_check(o, float(o["price"]), int(o["qty"]), cap)
+            if cbad:
+                raise ValueError(cbad)
+            if cnote:
+                print(f"  · {o['ticker']} {cnote}")
+                o = {**o, "qty": cq}
+            # ★ 2026-10-13 복구 — 10-12 20:56 주문 상한(cap_check) 추가 때 이 전송 줄이 빠져 `res` 미정의로
+            #   모든 전송이 브로커 호출 전에 죽었다(UnboundLocalError · 주문 0건). HEAD 판의 줄을 그대로 되살린다.
             res = place(client, o)
             if res.get("order_no"):
                 print(f"  OK {o['action']} {o['ticker']} → 주문번호 {res.get('order_no')}")
@@ -375,6 +471,7 @@ def _send_orders(client: KisClient, orders: list, market: str,
             # ★ 어느 논지의 **어느 다리**가 집행됐는지 — fill이 그 다리를 소진 표시하는 데 쓴다(2026-09-23).
             #   예전에는 risk_guard가 쓴 trigger_id가 여기서 떨어져, 체결 뒤에도 다리가 살아 매 run 재발화했다.
             "trigger_id": o.get("trigger_id"),
+            "session": o.get("session") or "regular",
             "discipline_reasons": o.get("reasons", []),
             # 근거 스냅샷 — 이 파일 하나로 "왜 샀는지"가 재구성돼야 한다.
             "proposal": o.get("proposal"),
@@ -392,8 +489,8 @@ def main() -> int:
     ap.add_argument("--real", action="store_true",
                     help="실전 서버. 모의 6개월 검증 전에는 쓰지 않는다.")
     ap.add_argument("--stamp", metavar="YYMMDD",
-                    help="산출물 파일명에 쓸 세션 날짜. 미국장은 KST 자정을 넘겨 "
-                         "한 run이 두 날짜로 갈라지므로 호출자가 고정해 넘긴다.")
+                    help="이 run의 스탬프(거래하는 세션의 현지 날짜 · 2026-10-14). 없으면 approved 파일 이름의 "
+                         "스탬프 — 자정을 넘긴 미국 run도 같은 스탬프로 기록된다.")
     ap.add_argument("--note", help="분석노트 — 체결 확정 줄을 §11에 쓴다")
     ap.add_argument("--no-wait", action="store_true",
                     help="전송만 하고 체결 확정(fill)을 건너뛴다. 기본은 확정까지 기다린다.")
@@ -405,6 +502,12 @@ def main() -> int:
     path = Path(args.approved)
     approved = rg._read_json(path, "approved")
     limits = rg._read_json(rg.LIMITS_PATH, "limits")
+    mode = account_mode(limits)
+    # ★ 계좌는 `account_mode` 하나가 정한다(2026-10-12). `--real`은 옛 호출과의 대조용 — 모드와 어긋나면 거부한다.
+    if args.real and mode != "real":
+        print(f"집행 거부 — --real인데 account_mode가 {mode!r}다. 계좌는 config/limits.json의 account_mode가 정한다.",
+              file=sys.stderr)
+        return 2
 
     try:
         preflight(approved, path, limits)
@@ -446,10 +549,15 @@ def main() -> int:
     if not args.send:
         print("\n실제로 보내려면 --send 를 붙여라.")
         return 0
+    if mode == "real_readonly":
+        print("집행 거부 — account_mode=real_readonly(조회 전용 주간): 실계좌는 읽기만 한다. 주문은 dry-run까지다.",
+              file=sys.stderr)
+        return 2
 
     # ★ 장외 전송 차단 — 2026-09-10 MSFT를 11:31 KST에 보내 `[40580000] 모의투자 장종료`로
     #   거부됐다. 브로커 거부는 무해하지만 그 run의 판단이 통째로 증발한다. 시간을 여기서 본다.
-    sess = market_session(market)
+    daytime = market == "US" and bool(orders) and all(o.get("session") == "daytime" for o in orders)
+    sess = us_daytime_session() if daytime else market_session(market)
     if not sess["is_open"] and not args.force_hours:
         print(f"집행 거부 — 장외: {sess['why']} (지금 {datetime.now(KST):%H:%M} KST). "
               f"정규장에 다시 돌리거나 --force-hours.", file=sys.stderr)
@@ -459,7 +567,10 @@ def main() -> int:
     if 0 <= left_min <= 10:
         print(f"  · 마감 {left_min:.0f}분 전 전송 — {'동시호가(15:30 체결)' if market == 'KR' else '마감 직전'}; 정정·취소 시간이 거의 없다")
 
-    client = KisClient(svr="real" if args.real else "paper", allow_real=args.real)
+    client = KisClient.for_mode(orders=True)
+    cap = approved.get("order_cap") or rg.order_cap_cfg(limits) or None
+    if cap and market != "KR" and not cap.get("fx"):
+        cap = {**cap, "fx": float(approved.get("order_cap_fx") or 0)}
 
     # 체결 확인의 기준선 — 전송 **전** 보유 수량. 주문번호가 나왔다는 것은 접수됐다는 뜻이지
     # 체결됐다는 뜻이 아니다. 이 기준선과 비교해야 "샀다"고 말할 수 있다.
@@ -529,7 +640,10 @@ def main() -> int:
     trades: list = []
     failures = 0
     funding = [o for o in orders if o.get("source") == "funding"]
-    rest = [o for o in orders if o.get("source") != "funding"]
+    # ★ FB-261003-10 — 매수가 대금을 기대는 일반 매도도 회전 매도처럼 **먼저 보내고 체결을 확인한다**.
+    dep_t = {t for o in orders if o.get("action") == "BUY" for t in (o.get("needs_sell_fill") or [])}
+    presell = [o for o in orders if o.get("action") == "SELL" and o.get("source") != "funding" and o.get("ticker") in dep_t]
+    rest = [o for o in orders if o.get("source") != "funding" and not any(o is x for x in presell)]
     # ★ 회전 매도는 **그 돈을 쓸 매수가 나갈 수 있을 때만** 판다(2026-09-23). 매도는 되돌릴 수 없고 매수는 다음 run이
     #   다시 낼 수 있으니, 되돌릴 수 없는 쪽을 뒤에 둔다. 실사례: 09-23 KR — 삼성생명 1주를 "테스 매수 자금 부족"만을
     #   이유로 팔아 체결(12:49)됐는데, 테스는 집행 시점 시세가 승인가 대비 +2.13%(한도 ±2.0%)라 `refresh_limit`가
@@ -555,8 +669,9 @@ def main() -> int:
             print(f"  ⊘ 보류 {so['action']} {so['ticker']} x{so['qty']} — {why}", file=sys.stderr)
             skipped.append({k: so.get(k) for k in ("ticker", "action", "source", "qty")} | {"why": why})
         funding = [o for o in funding if all(o is not b[0] for b in blocked_f)]
-    if funding:
-        t1, f1 = _send_orders(client, funding, market, path.name, approved_at)
+    first = funding + presell
+    if first:
+        t1, f1 = _send_orders(client, first, market, path.name, approved_at, cap)
         trades += t1
         failures += f1
         # ★ 전송 전 기준선을 행에 박는다 — 모의서버 국내 체결 TR이 아무것도 안 돌려줄 때
@@ -565,15 +680,15 @@ def main() -> int:
         if qty_before is not None:
             for t in t1:
                 t.setdefault("fill", {})["qty_before"] = qty_before.get(t.get("ticker"), 0)
-        pre = {"generated_at": datetime.now(KST).isoformat(), "svr": client.svr,
+        pre = {"generated_at": datetime.now(KST).isoformat(), "svr": client.svr, "account_mode": client.mode,
                "approved_ref": str(path), "approved_at": approved_at,
                "approved_orders": approved_snapshot(approved), "skipped": skipped,
                "signal_ref": approved.get("signal_ref"),
                "limits_sha256": approved.get("limits_sha256"), "trades": t1,
-               "fill_summary": {"sent": len(funding)}}
+               "fill_summary": {"sent": len(first)}}
         merge_day_record(out, pre)
         if not args.no_wait:
-            print("  회전 매도 체결 확정 대기 …")
+            print("  회전·의존 매도 체결 확정 대기 …")
             try:
                 rc_f = fill.confirm(out, client=client, max_sec=max(120, args.max_sec // 2),
                                     chase=True, quiet=False)
@@ -590,9 +705,14 @@ def main() -> int:
         # 확정된 매도 행은 이미 파일에 있다 — 아래 병합에서 중복되지 않게 뺀다.
         trades = []
         orders_left = rest
+        if presell and not args.no_wait:
+            orders_left, dep_skip = adjust_sell_dependent(rest, presell, _read_day(out), path.name)
+            for sk in dep_skip:
+                print(f"  ⊘ 보류 BUY {sk['ticker']} — {sk['why']}", file=sys.stderr)
+            skipped += dep_skip
     else:
         orders_left = orders
-    t2, f2 = _send_orders(client, orders_left, market, path.name, approved_at)
+    t2, f2 = _send_orders(client, orders_left, market, path.name, approved_at, cap)
     trades += t2
     failures += f2
 
@@ -606,15 +726,22 @@ def main() -> int:
     #   사실(정말 샀는가)이 터미널에만 찍히고 사라졌다 — `status`는 접수를 뜻하는 SENT뿐이라
     #   다음 run의 회고가 "제안한 것"을 "집행한 것"으로 읽었다.
     unfilled, fills = _report_fills(orders_left, qty_before, balance_after,
-                                    {t["ticker"]: t["status"] for t in trades})
+                                    {t["ticker"]: ("UNSENT" if (t.get("result") or {}).get("client_side")
+                                                   else t["status"]) for t in trades})
     for t in trades:
+        prev = t.get("fill") or {}
         t["fill"] = fills.get(t.get("ticker"), {"verdict": "UNKNOWN",
                                                 "note": "잔고 대조 불가 — 체결 여부 미확인"})
+        if (t.get("result") or {}).get("client_side") and prev.get("note"):
+            t["fill"] = {**t["fill"], "note": prev["note"]}      # 미전송 사유(client-side: …)를 덮지 않는다
 
     out.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "generated_at": datetime.now(KST).isoformat(),
         "svr": client.svr,
+        "account_mode": client.mode,
+        "fallbacks": [{"ticker": t["ticker"], **((t.get("result") or {}).get("fallback") or {})}
+                      for t in trades if (t.get("result") or {}).get("fallback")],
         "approved_ref": str(path),
         "approved_at": approved_at,
         "approved_orders": approved_snapshot(approved),
@@ -749,6 +876,18 @@ def _report_fills(orders: list, qty_before, balance_after, statuses: dict = None
     unfilled, fills = 0, {}
     for o in orders:
         t = o["ticker"]
+        if statuses.get(t) == "UNSENT":
+            # 우리가 보내지 않았다(전송 직전 갱신의 가격 이탈 등) — 브로커 거부가 아니다. 판정 어휘는 종결 6값을 지키되
+            # 화면·메모는 '미전송'으로 쓴다. *실사례(2026-10-09 US): 1주 0주 미전송이 '⊘ 거부 — 브로커가 받지 않았다'로
+            # 찍혀 노트 §11이 따로 해명해야 했다.*
+            fills[t] = {"verdict": "REJECTED", "qty_before": qty_before.get(t, 0),
+                        "qty_after": after.get(t, 0), "delta": 0,
+                        "requested": o["qty"] if o["action"] == "BUY" else -o["qty"],
+                        "limit_price": o["price"],
+                        "note": "client-side 미전송 — 브로커에 보낸 것이 없다(거부 아님)"}
+            print(f"  ⊘ 미전송 {o['action']} {t} {o.get('name','')} "
+                  f"— 클라이언트 측(브로커 거부 아님) · 걸려 있는 주문이 없다.")
+            continue
         if statuses.get(t) == "FAILED":
             fills[t] = {"verdict": "REJECTED", "qty_before": qty_before.get(t, 0),
                         "qty_after": after.get(t, 0), "delta": 0,

@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from kis_client import (KisClient, KisError, market_session, order_excd, quote_excd, snap_kr_price,
-                        EXCD_ORDER)
+                        EXCD_ORDER, buy_qty_within, us_daytime_session, next_trading_day, DAYTIME_QUOTE_EXCD)
 
 HERE = Path(__file__).parent
 JOURNAL_DIR = HERE / "journal"
@@ -91,6 +91,24 @@ def _chain(t: dict) -> list:
     return ch
 
 
+def _daytime(t: dict) -> bool:
+    """미국 주간거래 행인가(손절·추적 매도 전용 · 2026-10-12)."""
+    return t.get("market") == "US" and t.get("session") == "daytime"
+
+
+def _session(t: dict, now: datetime) -> dict:
+    """이 행의 세션 창 — 주간거래 행은 주간 창(KST 10:00–17/18:00), 나머지는 정규장."""
+    return us_daytime_session(now) if _daytime(t) else market_session(t.get("market", "KR"), now)
+
+
+def settle_date(market: str, trade_day) -> str:
+    """결제일 — 국내 T+2 · 미국 T+1(2024-05-28 미국 T+1 전환) 거래일. 세금 원장(tax_ledger.py)의 환율 기준일이다."""
+    d = trade_day
+    for _ in range(2 if (market or "KR").upper() == "KR" else 1):
+        d = next_trading_day((market or "KR").upper(), d)
+    return d.isoformat()
+
+
 def _status(client, t: dict, order_no: str, excd_hint: str = ""):
     """주문 1건의 브로커 상태. 반환 status dict 또는 None(조회 실패)."""
     try:
@@ -106,7 +124,8 @@ def _live_price(client, t: dict, excd: str):
     try:
         if t.get("market", "KR") == "KR":
             return float(client.domestic_price(t["ticker"])["price"])
-        return float(client.overseas_price(t["ticker"], excd=quote_excd(excd))["price"])
+        q = DAYTIME_QUOTE_EXCD.get(order_excd(excd), "BAQ") if _daytime(t) else quote_excd(excd)
+        return float(client.overseas_price(t["ticker"], excd=q)["price"])
     except (KisError, KeyError, TypeError, ValueError):
         return None
 
@@ -136,24 +155,34 @@ def chase_price(side: str, market: str, live: float, cur_limit: float,
 
 
 def chase_qty(side: str, remain: int, filled_amt: float, approved_amt: float, new_px: float) -> int:
-    """정정 수량 — 매수는 (승인 금액 − 이미 체결 금액) ÷ 새 가격을 넘지 않는다. 매도는 잔량 그대로."""
+    """정정·재발주 수량 — 매수는 (승인 금액 − 이미 체결 금액) ÷ 새 가격의 내림, **내림이 0주면 1주**
+    (`buy_qty_within` — 가격은 `chase_price`·`reorder_price`가 이미 이탈 한도 안으로 묶었다). 매도는 잔량 그대로."""
     if side != "BUY":
         return remain
-    room = approved_amt - filled_amt
-    return max(0, min(remain, int(room // new_px))) if new_px > 0 else 0
+    return buy_qty_within(remain, approved_amt - filled_amt, new_px)
 
 
 def _modify(client, t: dict, order_no: str, orgno: str, excd: str, qty: int, price: float,
             cancel: bool) -> dict:
     if t.get("market", "KR") == "KR":
-        return client.domestic_modify(order_no, orgno, qty, int(price), cancel=cancel)
+        # 원주문이 나간 거래소 구분으로 정정·취소한다(SOR 거부 뒤 KRX로 재전송된 건은 KRX).
+        excg = (t.get("result") or {}).get("excg") or None
+        kw = {"excg": excg} if excg and excg != getattr(client, "kr_excg", excg) else {}   # 기본과 같으면 넘기지 않는다
+        return client.domestic_modify(order_no, orgno, qty, int(price), cancel=cancel, **kw)
+    if _daytime(t):
+        return client.overseas_daytime_modify(order_no, t["ticker"], excd, qty, price, cancel=cancel)
     return client.overseas_modify(order_no, t["ticker"], excd, qty, price, cancel=cancel)
 
 
 def _place_new(client, t: dict, excd: str, qty: int, price: float) -> dict:
     """재발주 — 새 주문번호. 살아 있는 주문이 없을 때만 부른다(호출자가 취소 확정을 먼저 본다)."""
     if t.get("market", "KR") == "KR":
-        return client.domestic_order(ticker=t["ticker"], side=t["action"], qty=qty, price=int(price))
+        excg = (t.get("result") or {}).get("excg") or None
+        kw = {"excg": excg} if excg and excg != getattr(client, "kr_excg", excg) else {}
+        return client.domestic_order(ticker=t["ticker"], side=t["action"], qty=qty, price=int(price), **kw)
+    if _daytime(t):
+        return client.overseas_daytime_order(ticker=t["ticker"], side=t["action"], qty=qty,
+                                             limit_price=float(price), excd=excd)
     return client.overseas_order(ticker=t["ticker"], side=t["action"], qty=qty,
                                  limit_price=float(price), excd=excd)
 
@@ -189,7 +218,7 @@ def _try_reorder(client, t: dict, cfg: dict, now: datetime, excd: str, approved_
         return "skip:재발주 한도 %d회 소진" % max_n
     market = t.get("market", "KR")
     side = t.get("action", "BUY")
-    sess = market_session(market, now)
+    sess = _session(t, now)
     if now > sess["close"]:
         return "skip:장 마감"
     live = _live_price(client, t, excd)
@@ -223,6 +252,16 @@ def _finish(t: dict, verdict: str, filled: int, avg: float, now: datetime, sourc
     f = t.setdefault("fill", {})
     f.update({"verdict": verdict, "filled_qty": filled, "avg_price": avg,
               "confirmed_at": now.isoformat(), "source": source})
+    # ★ 결제일·결제일 환율(2026-10-12 실계좌 전환) — 해외주식 양도소득세는 결제일 기준환율로 원화 환산한다.
+    #   환율은 결제일이 지나야 정해지므로 여기서는 날짜만 적고, `tax_ledger.py --fill-fx`가 결제일 뒤 채운다.
+    if verdict in ("FILLED", "PARTIAL") and filled:
+        try:
+            mk = t.get("market", "KR")
+            f.setdefault("settle_date", settle_date(mk, _session(t, now)["session_date"]))   # 주간거래 행은 KST 날짜 기준
+            if mk == "US":
+                f.setdefault("settle_fx", None)
+        except Exception:                              # noqa: BLE001 — 결제일 계산 실패가 확정을 막지 않는다
+            pass
     if note:
         f["note"] = note
     f.pop("last_error", None)
@@ -262,8 +301,9 @@ def confirm(path: Path, client=None, cfg: dict = None, now_fn=None, sleep_fn=Non
         log("확정할 주문 없음 — 전건 종결 상태.")
     else:
         if client is None:
-            client = KisClient(svr=record.get("svr") or "paper",
-                               allow_real=(record.get("svr") == "real"))
+            # 실계좌 기록이면 지금 계좌 모드로 연다(real → 주문 가능 · real_readonly → 조회만 — 정정·취소는 거부된다).
+            client = (KisClient.for_mode(orders=True) if record.get("svr") == "real"
+                      else KisClient(svr="paper"))
         log(f"체결 확정 시작 — 미확정 {len(todo)}건 · 대기 {cfg['fill_wait_minutes']}분 · "
             f"정정 {cfg['fill_chase_max']}회/±{cfg['fill_chase_max_pct']}% · "
             f"취소 확정 뒤 재발주 {cfg.get('fill_reorder_max', 0)}회/±{cfg.get('fill_reorder_max_pct', 1.0)}%")
@@ -344,6 +384,13 @@ def _close_theses_after_exit(t: dict, now: datetime, log) -> None:
     f = t.get("fill") or {}
     if t.get("action") != "SELL" or f.get("verdict") not in ("FILLED", "PARTIAL"):
         return
+    if t.get("source") == "audit_reversal":
+        # 감사 소급 매도(2026-10-13) — 체결 확정을 원장에 적는다(전량 filled · 부분이면 잔량 pending). 멱등(주문번호로 한 번만).
+        try:
+            import reversals as rv
+            rv.settle_trade(t, JOURNAL_DIR, log=log)
+        except Exception as e:                   # noqa: BLE001 — 원장 갱신 실패가 체결 확정을 막지 않게
+            log(f"  ★ 감사 소급 원장 갱신 실패 — {type(e).__name__}: {e}", file=sys.stderr)
     store = JOURNAL_DIR / "theses.json"
     if not store.exists():
         return
@@ -582,8 +629,35 @@ def record_incidents(record: dict, path: Path, now: datetime) -> list:
     return ids
 
 
+def backfill_settle(record: dict) -> int:
+    """체결된 행에 빠진 결제일을 채운다 — 거래 기록을 쓸 때마다(`finalize`). 반환 채운 건수.
+
+    ★ 왜(2026-10-13): 결제일은 `_finish`(체결 TR 폴링으로 닫힌 행)에서만 찍혔다. 전송 직후 잔고 대조로 바로 FILLED가 된 행은
+    `confirm`이 다시 보지 않아 결제일이 영영 비었고(10-13 US 7건 중 6건), 세금 원장이 체결일·최신 환율로 대신 계산했다.
+    날짜는 그 행의 전송 시각(`ts`) 기준 세션일 — 기록을 나중에 다시 써도 바뀌지 않는다. 이미 있으면 손대지 않는다.
+    """
+    n = 0
+    for t in record.get("trades") or []:
+        f = t.get("fill") or {}
+        if t.get("status") in ("FAILED", None) or f.get("verdict") not in ("FILLED", "PARTIAL") or "settle_date" in f:
+            continue
+        try:
+            qty = int(f.get("filled_qty") or abs(int(f.get("delta") or 0)))
+            if qty <= 0:
+                continue
+            mk = t.get("market", "KR")
+            f["settle_date"] = settle_date(mk, _session(t, _parse_ts(t["ts"]))["session_date"])
+            if mk == "US":
+                f.setdefault("settle_fx", None)
+            n += 1
+        except Exception:                              # noqa: BLE001 — 결제일 계산 실패가 기록을 막지 않는다
+            continue
+    return n
+
+
 def finalize(record: dict, path: Path, now: datetime) -> dict:
     """대조 + 사고 기록 + `fill_confirmed`에 초과 건수 복사. `execute.merge_day_record`와 `_with_summary`가 부른다."""
+    backfill_settle(record)
     record["reconcile"] = reconcile(record)
     record_incidents(record, path, now)
     fc = record.get("fill_confirmed")
@@ -663,13 +737,13 @@ def _step(client, t: dict, cfg: dict, now: datetime, chase: bool, log) -> None:
             return _finish(t, "FILLED", filled, avg, now, src,
                            f"{how}로 수량 {approved_qty}→{filled} 축소(승인 금액 안) 후 전량 체결" + re_note)
         # 잔량도 체결도 0인데 취소 표시가 없다 — 마감 뒤 소멸로 본다(장중이면 다음 폴에 다시).
-        sess = market_session(market, now)
+        sess = _session(t, now)
         if now > sess["close"]:
             return _finish(t, "EXPIRED", 0, 0.0, now, src, "장 마감으로 소멸 — 체결 0")
         return
 
     # 여기부터 잔량이 있다.
-    sess = market_session(market, now)
+    sess = _session(t, now)
     if f.get("reorder_started"):
         started = _parse_ts(f["reorder_started"])
         wait_min = float(cfg.get("fill_reorder_wait_minutes", 10))

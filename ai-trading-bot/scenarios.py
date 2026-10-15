@@ -24,7 +24,7 @@ import json
 import types
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -169,7 +169,7 @@ def cmd_promote(a) -> int:
             k = norm(cond)
             if k and k not in have:
                 have[k] = tgt
-    n_new = n_dup = n_pid = n_alias = 0
+    n_new = n_dup = n_pid = n_alias = n_dupev = 0
     used = {int(m.group(1)) for s in d["scenarios"]
             for m in [re.match(rf"SC-{stamp}-(\d+)$", s.get("id", ""))] if m}
     nxt = max(used) + 1 if used else 1
@@ -220,15 +220,28 @@ def cmd_promote(a) -> int:
             row["claimed_persistent_id"] = claimed_missing
             row["sources"].append(f"persistent_id:{claimed_missing}(원장에 없음)")
         # 대응은 시그널이 실어 보냈으면 그대로, 아니면 response 문장에서 뽑는다.
-        row["actions"] = (r.get("actions") if isinstance(r.get("actions"), list)
-                          else extract_actions(r.get("response"), market))
+        # ★ 국내 시그널은 대응을 `action`(단수)에 싣기도 한다 — 2026-09-29 KR S7·S8이 그 키라
+        #   actions가 빈 채로 승격됐다(대응 없는 행 = 판정해도 집행할 것이 안 보인다).
+        if isinstance(r.get("responses"), dict) and r["responses"]:
+            # ★ 이벤트 단위(2026-10-12) — 한 행에 두 시장 대응. 키가 시장이다.
+            row["actions"] = [{"market": str(k).lower(), "ticker": "", "what": str(v)[:160], "done": False}
+                              for k, v in r["responses"].items() if str(v or "").strip()]
+        else:
+            row["actions"] = (r.get("actions") if isinstance(r.get("actions"), list)
+                              else extract_actions(r.get("response") or r.get("action"), market))
+        dup = _same_event_rows(d["scenarios"], row, market)
+        if dup:
+            row["possible_duplicate_of"] = dup
+            n_dupev += 1
+            print(f"  ★ {sid}: 같은 이벤트로 보이는 반대 시장 행 {', '.join(dup)}가 열려 있다 — 다음엔 `persistent_id`로 이어받고 "
+                  f"`scenarios.py respond`로 이 시장 대응만 더하라(같은 이벤트를 두 행으로 쓰지 않는다)", file=sys.stderr)
         d["scenarios"].append(row)
         have[key] = row
         by_id[sid] = row
         n_new += 1
     save(d)
     print(f"{p.name}: 신규 {n_new}건 승격 · 기존 조건 재등장 {n_dup}건(출처만 추가) "
-          f"· persistent_id 매칭 {n_pid}건(별칭 추가 {n_alias}) · 원장 총 {len(d['scenarios'])}건")
+          f"· persistent_id 매칭 {n_pid}건(별칭 추가 {n_alias}) · 반대 시장 같은 이벤트 의심 {n_dupev}건 · 원장 총 {len(d['scenarios'])}건")
     return 0
 
 
@@ -299,6 +312,125 @@ def _read_batch(path: Path) -> list:
     return out
 
 
+def _axis_driver(axis_id: str) -> str:
+    try:
+        m = json.loads((HERE / "journal" / "market_map.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    a = next((x for x in m.get("axes") or [] if x.get("id") == axis_id), None) or {}
+    return str(a.get("driver") or axis_id or "")
+
+
+def _same_event_rows(rows: list, row: dict, market: str) -> list:
+    """같은 이벤트로 보이는 **반대 시장의 열린 행** — 조건의 날짜가 같고, 둘 다 축이 있으면 요인도 같은 것(2026-10-12).
+    실사례: 10-14 CPI를 미국 run은 '핵심 CPI 0.2%'로, 국내 run은 '10년물 5.0%/5.2%'로 각자 두 행씩 따로 열었다."""
+    ev = _cond_event_date(row)
+    if ev is None:
+        return []
+    d0 = _axis_driver(row.get("axis") or "") if row.get("axis") else ""
+    out = []
+    for r in rows:
+        if r.get("status") != "open" or str(r.get("market") or "").lower() == market.lower():
+            continue
+        if _cond_event_date(r) != ev:
+            continue
+        if d0 and r.get("axis"):
+            if _axis_driver(r["axis"]) != d0:
+                continue
+        else:
+            a_terms = {t.lower() for t in _EVENT_TERMS.findall(str(row.get("condition") or ""))}
+            b_terms = {t.lower() for t in _EVENT_TERMS.findall(str(r.get("condition") or ""))}
+            if not (a_terms & b_terms):
+                continue
+        out.append(r["id"])
+    return out
+
+
+def cmd_respond(a) -> int:
+    """반대 시장이 연 시나리오 행에 **이 시장 대응**을 더한다 — 같은 이벤트를 새 행으로 다시 쓰지 않는다(2026-10-12)."""
+    d = load()
+    r = next((x for x in d["scenarios"] if x.get("id") == a.id), None)
+    if r is None:
+        print(f"그런 id가 없다: {a.id}", file=sys.stderr)
+        return 2
+    if r.get("status") == "merged":
+        print(f"{a.id}는 {r.get('merged_into')}에 병합됐다 — 그 id로", file=sys.stderr)
+        return 2
+    mk = a.market.lower()
+    acts = r.setdefault("actions", [])
+    mine = [x for x in acts if str(x.get("market") or "").lower() == mk]
+    if mine and not a.replace:
+        print(f"{a.id}에 이미 {mk.upper()} 대응이 있다: {mine[0].get('what')} — 바꾸려면 --replace", file=sys.stderr)
+        return 2
+    if a.replace:
+        r["actions"] = acts = [x for x in acts if str(x.get("market") or "").lower() != mk]
+    import sessions as _ss
+    acts.append({"market": mk, "ticker": a.ticker or "", "what": a.what[:160], "done": False,
+                 "added_by": f"{mk}:{_ss.run_stamp(mk)}"})       # 그 시장의 현재 run 스탬프(현지 거래일)
+    r.setdefault("judgments", []).append({"when": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "realized": r.get("realized"),
+                                          "acted": r.get("acted"), "note": f"{mk.upper()} 대응 추가 — {a.what[:80]}"
+                                          + (f" · {a.note}" if a.note else "")})
+    save(d)
+    print(f"{a.id}: {mk.upper()} 대응 추가 — {a.what[:80]}")
+    return 0
+
+
+STALE_TRADING_DAYS = 20     # 이 이상 열린 채 실현도 반증도 안 된 시나리오 = '지연·무소식' 가지가 없었다는 신호(목록만 · 자동으로 닫지 않는다)
+EVENT_GRACE_DAYS = 10       # 조건에 적힌 예정일 + 이 거래일이 지나도 미실현이면 같은 신호(지연 가지의 기본 예정일과 같은 값)
+# 앞이 글자·숫자·하이픈이면 날짜가 아니다 — 리서치 꼬리표(`R3-14`)·id(`SEC-EE-1`)를 날짜로 읽지 않는다.
+_COND_DATE = re.compile(r"(?<![\w-])(1[0-2]|0?[1-9])[/-](3[01]|[12]\d|0?[1-9])(?![\d-])")
+_EVENT_TERMS = re.compile(r"CPI|PCE|FOMC|PPI|고용|비농업|payroll|실적|[1-4]Q|MOU|관세|tariff|금리|10년물|10-year|국채|OAS|정기변경|"
+                          r"rebalanc|만기|선거|midterm|STEO|TrendForce|가이던스|guid|계약가|OPEC|휴전|ceasefire", re.I)
+
+
+def _cond_event_date(r: dict):
+    """조건 문구에 적힌 **가장 늦은** 날짜(M/D · MM-DD). 연도는 연 날짜(opened)의 해 — 연 달보다 앞이면 다음 해."""
+    try:
+        op = datetime.strptime(str(r.get("opened") or ""), "%y%m%d").date()
+    except ValueError:
+        return None
+    best = None
+    for mo, dd in _COND_DATE.findall(str(r.get("condition") or "")):
+        y = op.year + (1 if int(mo) < op.month - 6 else 0)
+        try:
+            d = date(y, int(mo), int(dd))
+        except ValueError:
+            continue
+        best = d if best is None or d > best else best
+    return best
+
+
+def _weekdays_between(a: date, b: date) -> int:
+    n, d = 0, a
+    while d < b:
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            n += 1
+    return n
+
+
+def stale(days: int = STALE_TRADING_DAYS, today: date = None) -> list:
+    """열린 지 `days` 거래일(평일)을 넘겼는데 실현되지 않은 열린 시나리오(FB-261012-1).
+    실사례(2026-10-12): 9-15에 연 MOU 두 갈래(좋은 내용·나쁜 내용)가 4주째 열려 있었다 — 실제로 온 것은 둘 다 아닌
+    '지연'이었고 그 행이 없어 닫을 수가 없었다. 이 목록이 다음 run에 '지연 가지를 세우거나 닫으라'고 붙는다."""
+    today = today or datetime.now(KST).date()
+    out = []
+    for r in load()["scenarios"]:
+        if r.get("status") != "open" or r.get("realized") is True:
+            continue
+        try:
+            op = datetime.strptime(str(r.get("opened") or ""), "%y%m%d").date()
+        except ValueError:
+            continue
+        n = _weekdays_between(op, today)
+        ev = _cond_event_date(r)
+        past = _weekdays_between(ev, today) if ev and ev < today else 0
+        if n >= days or past >= EVENT_GRACE_DAYS:
+            why = (f"열린 지 {n}거래일" + (f" · 예정일 {ev:%m-%d}에서 {past}거래일 지남" if past >= EVENT_GRACE_DAYS else ""))
+            out.append({**r, "_age_td": n, "_why": why})
+    return sorted(out, key=lambda r: -r["_age_td"])
+
+
 def cmd_list(a) -> int:
     d = load()
     rows = d["scenarios"]
@@ -315,7 +447,22 @@ def cmd_list(a) -> int:
                 if any(str(x.get("market") or "").lower() == a.affects for x in (r.get("actions") or []))]
     if a.open:
         rows = [r for r in rows if r.get("status") == "open"]
+    if getattr(a, "stale", False):
+        keep = {r["id"]: r["_why"] for r in stale(getattr(a, "days", None) or STALE_TRADING_DAYS)}
+        rows = [r for r in rows if r.get("id") in keep]
+        print(f"■ 오래 열린 시나리오 — {len(rows)}건 (열린 지 {getattr(a, 'days', None) or STALE_TRADING_DAYS}거래일 이상, "
+              f"또는 조건의 예정일에서 {EVENT_GRACE_DAYS}거래일 지남 · 미실현) — "
+              f"지연·무소식 가지를 세우거나(새 행 · next_check에 예정일) 닫는다\n")
+        for r in rows:
+            print(f"  {r['id']} [{r.get('market')}] {keep[r['id']]} · {str(r.get('condition') or '')[:100]}")
+        return 0
+    nc = getattr(a, "needs_check", "")
+    if nc:
+        # ★ 2026-10-01: 열린 시나리오 134건을 매 run 전건 다시 판정했다(대부분 '판정일 미도래'). 다음 확인일이
+        # 지나지 않았고 가격 조건도 없는 것은 판정이 바뀔 수 없으니 판정 대상에서 뺀다 — `judge --carry-forward`가 이월.
+        rows = [r for r in rows if r.get("status") == "open" and _needs_check(r, nc)]
     print(f"■ 시나리오 원장 — {len(rows)}건"
+          + (f" (판정 필요 — next_check ≤ {nc} · 날짜 없음 · 가격 조건)" if nc else "")
           + (" (열린 것만)" if a.open else "")
           + (f" · 대응 시장 {a.affects.upper()}" if a.affects else " · 전 시장") + "\n")
     if not rows:
@@ -325,7 +472,7 @@ def cmd_list(a) -> int:
     if brief:
         print("  (--brief: 행마다 조건·대응·마지막 판정 한 줄 — 판정 이력 전체는 `list --id <id>`)")
     for r in rows:
-        flag = {"open": "☐", "closed": "☑"}.get(r.get("status"), "?")
+        flag = {"open": "☐", "closed": "☑", "expired": "⌛"}.get(r.get("status"), "?")
         rz = {True: "실현", False: "미실현", None: "미판정"}[r.get("realized")]
         ac = {True: "대응함", False: "**대응 안 함**", None: "—"}[r.get("acted")]
         mks = sorted({x.get("market", "?") for x in (r.get("actions") or [])})
@@ -354,6 +501,31 @@ def cmd_list(a) -> int:
     return 0
 
 
+def _needs_check(r, day: str) -> bool:
+    """판정이 필요한가: 다음 확인일이 없거나 지났거나, 가격 조건이 걸려 있으면 True(보수적)."""
+    if r.get("price_cond"):
+        return True
+    nx = str(r.get("next_check") or "")
+    return (not re.fullmatch(r"\d{4}-\d{2}-\d{2}", nx)) or nx <= day
+
+
+def cmd_carry_forward(day: str) -> int:
+    d = load()
+    n = 0
+    for r in d["scenarios"]:
+        if r.get("status") != "open" or _needs_check(r, day):
+            continue
+        r.setdefault("judgments", []).append({
+            "when": datetime.now(KST).strftime("%Y-%m-%d %H:%M"), "realized": False, "acted": r.get("acted"),
+            "note": f"미도래 — next_check {r.get('next_check')} (자동 이월 · 가격 조건 없음)", "auto": True})
+        if r.get("realized") is None:
+            r["realized"] = False
+        n += 1
+    save(d)
+    print(f"자동 이월 {n}건 — next_check가 {day} 뒤이고 가격 조건이 없는 열린 시나리오")
+    return 0
+
+
 def cmd_judge(a) -> int:
     # ★ --batch: 판정을 JSONL(행마다 {"id","realized","acted"?,"note"?})로 한 번에 받는다.
     #   45건을 셸에서 하나씩 부르다 변수 명령(`J="python3 …"; $J`)이 전부 죽었다(2026-09-16 KR run).
@@ -369,10 +541,14 @@ def cmd_judge(a) -> int:
             sub = types.SimpleNamespace(
                 id=row["id"], realized={True: "y", False: "n"}.get(row["realized"], row["realized"]),
                 acted={True: "y", False: "n"}.get(row.get("acted"), row.get("acted")),
-                note=row.get("note") or "", batch="")
+                note=row.get("note") or "", batch="", carry_forward="",
+                next_check=row.get("next_check") or "", price_cond=row.get("price_cond"),
+                expire=bool(row.get("expire")))
             rc = max(rc, cmd_judge(sub))
         print(f"batch 판정 {len(rows)}건 ← {a.batch}")
         return rc
+    if getattr(a, "carry_forward", ""):
+        return cmd_carry_forward(a.carry_forward)
     d = load()
     hit = [r for r in d["scenarios"] if r.get("id") == a.id]
     if not hit:
@@ -387,7 +563,25 @@ def cmd_judge(a) -> int:
     if a.acted:
         r["acted"] = yes[a.acted]
     # 실현되지 않은 조건은 계속 기다릴 수 있다 — 닫는 것은 실현된 것뿐이다.
-    r["status"] = "closed" if r["realized"] else "open"
+    # ★ 단 **예정일이 지나 다시 올 수 없는 가지**는 `--expire`로 닫는다(status `expired`, 실현 아님). 예전엔 미실현 행을
+    #   닫을 길이 없어 지나간 이벤트의 가지가 열린 채 쌓였다 — 10-12에 48건(FB-261012-1).
+    expire = bool(getattr(a, "expire", False))
+    if expire and r["realized"]:
+        print(f"  ※ {a.id}: 실현된 행은 --expire가 아니라 그대로 닫힌다", file=sys.stderr)
+        expire = False
+    r["status"] = "closed" if r["realized"] else ("expired" if expire else "open")
+    nx = str(getattr(a, "next_check", "") or "")
+    if nx and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", nx):
+        print(f"  ※ {a.id}: next_check 형식이 YYYY-MM-DD가 아니다({nx!r}) — 기록하지 않고 매 run 판정 대상으로 둔다",
+              file=sys.stderr)
+        nx = ""
+    if r["realized"]:
+        r.pop("next_check", None)
+    elif nx:
+        r["next_check"] = nx
+    pc = getattr(a, "price_cond", None)
+    if pc is not None and pc != "":
+        r["price_cond"] = pc in (True, "y", "yes", "true", "1")
     r.setdefault("judgments", []).append({
         "when": datetime.now(KST).strftime("%Y-%m-%d %H:%M"),
         "realized": r["realized"], "acted": r.get("acted"), "note": a.note or ""})
@@ -516,12 +710,30 @@ def main() -> int:
     l.add_argument("--open", action="store_true")
     l.add_argument("--id", default="", help="한 건만")
     l.add_argument("--brief", action="store_true", help="행마다 한 줄(조건·대응·마지막 판정) — 이력은 --id로")
+    l.add_argument("--stale", action="store_true", help="열린 지 오래됐는데 실현 안 된 것(지연 가지 누락 후보)")
+    l.add_argument("--days", type=int, default=None, help="--stale 문턱(거래일, 기본 20)")
+    l.add_argument("--needs-check", default="", metavar="YYYY-MM-DD",
+                   help="그날 판정이 필요한 열린 것만(next_check ≤ 날짜 · 날짜 없음 · 가격 조건)")
     j = sub.add_parser("judge", help="실현·대응 판정 (--batch <jsonl>로 여러 건)")
     j.add_argument("--id", default="")
     j.add_argument("--realized", choices=["y", "n"], default="")
     j.add_argument("--batch", default="", help="JSONL: 행마다 {\"id\",\"realized\":\"y|n\",\"acted\"?,\"note\"?}")
     j.add_argument("--acted", choices=["y", "n"])
     j.add_argument("--note", default="")
+    j.add_argument("--next-check", default="", metavar="YYYY-MM-DD",
+                   help="조건이 바뀔 수 있는 가장 이른 날(지표·실적 발표일). 모르면 비운다 — 매 run 판정 대상")
+    j.add_argument("--price-cond", choices=["y", "n"], default=None, help="가격 조건이 걸렸는가(y면 매 run 판정)")
+    j.add_argument("--expire", action="store_true",
+                   help="미실현인 채 예정일이 지나 다시 올 수 없는 가지를 닫는다(status expired) — 배치는 행에 \"expire\": true")
+    j.add_argument("--carry-forward", default="", metavar="YYYY-MM-DD",
+                   help="next_check가 그날 뒤이고 가격 조건이 없는 열린 것을 '미도래'로 일괄 이월 기록")
+    rp = sub.add_parser("respond", help="반대 시장이 연 행에 이 시장 대응을 더한다(같은 이벤트는 한 행)")
+    rp.add_argument("--id", required=True)
+    rp.add_argument("--market", choices=["kr", "us"], required=True)
+    rp.add_argument("--what", required=True, help="대응 문장 — 무엇을 하나(종목·크기·다리)")
+    rp.add_argument("--ticker", default="")
+    rp.add_argument("--note", default="")
+    rp.add_argument("--replace", action="store_true", help="이 시장 대응을 바꾼다")
     du = sub.add_parser("due", help="실현됐는데 대응이 안 끝난 것")
     du.add_argument("--market", choices=["kr", "us"], default="")
     ac = sub.add_parser("act", help="대응 하나를 집행 완료로 표시")
@@ -537,11 +749,11 @@ def main() -> int:
                     help="그 시장에 대응이 걸린 것만")
     au.add_argument("--out", default="", help="게이트가 읽는 파일로 저장")
     a = ap.parse_args()
-    if a.cmd == "judge" and not a.batch and not (a.id and a.realized):
-        ap.error("judge에는 --id와 --realized, 또는 --batch <jsonl>이 필요하다")
+    if a.cmd == "judge" and not a.batch and not a.carry_forward and not (a.id and a.realized):
+        ap.error("judge에는 --id와 --realized, --batch <jsonl>, 또는 --carry-forward <날짜>가 필요하다")
     return {"promote": cmd_promote, "backfill": cmd_backfill, "list": cmd_list,
             "judge": cmd_judge, "audit": cmd_audit,
-            "due": cmd_due, "act": cmd_act, "merge": cmd_merge}[a.cmd](a)
+            "due": cmd_due, "act": cmd_act, "merge": cmd_merge, "respond": cmd_respond}[a.cmd](a)
 
 
 if __name__ == "__main__":

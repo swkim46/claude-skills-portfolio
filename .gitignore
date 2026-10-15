@@ -33,3 +33,12 @@ gmail-newsletter-analyzer/세상공부/*
 # 아래 두 파일은 합성 견본이다(회귀 테스트가 축 조인 키를 읽는다). 실제 지도·논지 원장은 비공개.
 !ai-trading-bot/journal/market_map.json
 !ai-trading-bot/journal/theses.json
+!ai-trading-bot/journal/sources.json
+
+# --- 2026-10-15: 테스트 러너·게이트 엔진이 만드는 원장과 로그, 편집 백업 ---
+gmail-newsletter-analyzer/test_logs/*
+.claude/skills/_stepgate/*.jsonl
+.claude/skills/_stepgate/code_*.json
+.claude/skills/_stepgate/_rubric_backups/
+**/_*backup*
+!gmail-newsletter-analyzer/test_logs/.gitkeep

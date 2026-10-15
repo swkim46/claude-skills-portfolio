@@ -1,0 +1,395 @@
+{
+  "collect": {
+    "intent": "놓친 급등·조기/늦은 매도·지표·검증 대상을 스크립트로 전수 수집했는가 — 판정 전 재료가 디스크에 있는가",
+    "observations": [
+      {
+        "id": "main_names_measured",
+        "variants": [
+          {
+            "ask": "수집 표의 측정 대상에 시총 상위 목록(config/main_names.json) 종목이 포함됐는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "수집이 유니버스와 지도 종목만 쟀고 시총 상위 목록은 빠졌는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "peak_not_close",
+        "variants": [
+          {
+            "ask": "급등을 창 안 저점→고점 최대 상승폭으로 쟀고 되돌림 열이 있는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "급등을 종가 대 종가 수익률로만 쟀는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "due_loaded",
+        "variants": [
+          {
+            "ask": "원장에서 적용됐고 검증일이 도래한 행을 수집이 전부 실었는가 — 그런 행이 없으면 Y (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "검증일이 도래한 적용 행 중 수집에서 빠진 것이 있는가 — 그런 행이 없으면 N (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "failures_disclosed",
+        "variants": [
+          {
+            "ask": "조회 실패가 있었다면 그 종목들을 '급등 여부 미확인'으로 수집 파일에 적었는가 — 실패가 없으면 Y (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "조회에 실패한 종목을 급등이 없는 것으로 취급했는가 — 실패가 없으면 N (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "tests_completed",
+        "variants": [
+          {
+            "ask": "이번 회차에 `python3 run_tests.py`를 돌렸고, 그 결과 줄(완주 또는 ★멈춤·실패·건수 감소)이 수집 머리에 박힌 것을 확인했는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "이번 회차에 `run_tests.py`를 돌리지 않았거나, 수집 머리의 [테스트] 줄을 보지 않고 넘어갔는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "loss_block_present",
+        "variants": [
+          {
+            "ask": "수집 파일에 '손실·약세 후보'·'기한 도래 전망'·'오래 열린 시나리오'·'지난주 판정 보정' 절이 있고 수집 실패 줄이 없는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "수집 파일에 손실·약세 후보 절이 없거나 '수집 실패'로 끝났는데 그대로 넘어갔는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      }
+    ],
+    "criteria": [
+      {
+        "check": "files",
+        "glob": "{dir}/data/feedback/수집_{week}.md",
+        "min": 1,
+        "minbytes": 500
+      },
+      {
+        "check": "files",
+        "glob": "{dir}/data/feedback/수집_{week}.json",
+        "min": 1,
+        "minbytes": 500
+      },
+      {
+        "check": "contains",
+        "file": "{dir}/data/feedback/수집_{week}.md",
+        "pat": "\\[수집\\] KR 급등 \\d+ · US 급등 \\d+",
+        "min": 1
+      },
+      {
+        "check": "contains",
+        "file": "{dir}/data/feedback/수집_{week}.md",
+        "pat": "## 조기 매도|## 늦은 매도|## 지표",
+        "min": 3
+      }
+    ]
+  },
+  "propose": {
+    "intent": "종목마다 결함·맞은 판단·운을 고점 전 단서로 판정하고, 결함을 유형으로 묶어 기대 효과·검증일·반례 점검과 함께 원장에 올렸는가",
+    "after": "collect",
+    "observations": [
+      {
+        "id": "all_rows_judged",
+        "variants": [
+          {
+            "ask": "수집의 놓친 급등·조기 매도·늦은 매도가 전부 §2 전수 판정 표에 한 줄씩 있는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "수집에 있었는데 §2 전수 판정 표에서 빠진 종목이 있는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "pre_peak_clue",
+        "variants": [
+          {
+            "ask": "결함으로 판정한 행마다 고점 전 날짜의 우리 기록 단서를 파일·절과 함께 인용했는가 — 단, 고점 전 기록이 아예 없는 커버리지 결함(시총 상위·감시 밖)은 그 사실을 적었으면 된 것으로 본다 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "결함 판정 중 고점 이후에야 알 수 있었던 사실로 채점했거나, 커버리지 결함도 아닌데 고점 전 단서 인용이 빠진 행이 있는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "cause_no_proper_noun",
+        "variants": [
+          {
+            "ask": "§3 제안의 원인 문장이 모두 고유명사를 바꿔도 성립하는 유형 문장인가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "§3 제안의 원인 문장에 특정 종목의 이름이나 티커가 들어간 것이 있는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "no_change_without_defect",
+        "variants": [
+          {
+            "ask": "맞은 판단이나 운으로 판정한 행에는 규칙 변경을 붙이지 않았는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "맞은 판단이나 운으로 판정한 행에 규칙 변경을 붙인 것이 있는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "counterexample_checked",
+        "variants": [
+          {
+            "ask": "제안마다 그 규칙이 있었다면 손해를 봤을 종목을 수집에서 찾아 적었는가(못 찾았으면 찾은 범위를 적었는가) (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "반례 점검 없이 올린 제안이 있는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "ledger_matches_report",
+        "variants": [
+          {
+            "ask": "§3 표의 FB id·종류·권한이 원장(journal/feedback.jsonl)의 행과 일치하는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "§3 표와 원장이 어긋나는 행(없는 id·다른 권한)이 있는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "loss_clock_based",
+        "variants": [
+          {
+            "ask": "§2-b의 오판 판정마다 울린 시계(무효 조건 집행·기한 경과·전망 miss·다리 발화+동인)가 적혀 있는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "§2-b에 울린 시계 없이 가격 하락만으로 오판을 준 행이 있는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "temporary_carried",
+        "variants": [
+          {
+            "ask": "§2-b의 일시적·관찰 판정마다 next_check가 있고 손실판정_<week>.json에 저장됐는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "next_check 없이 끝난 일시적·관찰 판정이 있거나 손실판정 파일을 남기지 않았는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "real_ready_reviewed",
+        "variants": [
+          {
+            "ask": "보고서 §5-b 실전 준비에 그 주 실전 점검표의 ★ 항목마다 원인과 조치(§3 제안 행 또는 승인 대기)를 적었는가 — 그 주 점검표가 없으면 Y (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "그 주 실전 점검표에 ★ 항목이 있는데 §5-b에 원인·조치 없이 넘어간 항목이 있는가 — 그 주 점검표가 없으면 N (Y/N)",
+            "must": "N"
+          }
+        ]
+      }
+    ],
+    "criteria": [
+      {
+        "check": "contains",
+        "file": "{deliverable}",
+        "pat": "\\[피드백\\] 놓친 급등 \\d+건 · 결함 \\d+ · 맞은 판단 \\d+ · 운 \\d+",
+        "min": 1
+      },
+      {
+        "check": "contains",
+        "file": "{deliverable}",
+        "pat": "## §1 한눈에|## §2 종목별 사후분석|## §3 유형별 제안|## §4 지난주 검증|## §5 적용 결과|## §6 한계",
+        "min": 6
+      },
+      {
+        "check": "contains",
+        "file": "{deliverable}",
+        "pat": "판정: (결함|맞은 판단|운)",
+        "min": 3
+      },
+      {
+        "check": "contains",
+        "file": "{deliverable}",
+        "pat": "언제 무엇을 평가했어야 했나",
+        "min": 3
+      },
+      {
+        "check": "contains",
+        "file": "{deliverable}",
+        "pat": "FB-{week}-\\d+",
+        "min": 1
+      },
+      {
+        "check": "contains",
+        "file": "{deliverable}",
+        "pat": "반례",
+        "min": 1
+      },
+      {
+        "check": "contains",
+        "file": "{dir}/journal/feedback.jsonl",
+        "pat": "\"week\": \"{week}\"",
+        "min": 1
+      },
+      {
+        "check": "contains",
+        "file": "{deliverable}",
+        "pat": "## §5-b 실전 준비",
+        "min": 1
+      }
+    ]
+  },
+  "apply": {
+    "intent": "권한 안의 제안만 skill-maintainer 절차로 적용하고(문서·루브릭·req_audit 동시), 승인 대기는 손대지 않았으며, 지난주 적용분을 검증하고 CHANGELOG에 남겼는가",
+    "after": "propose",
+    "observations": [
+      {
+        "id": "confirm_untouched",
+        "variants": [
+          {
+            "ask": "승인 대기(confirm) 행은 하나도 적용하지 않았는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "승인 대기(confirm) 행 중 적용한 것이 있는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "three_way_edit",
+        "variants": [
+          {
+            "ask": "적용한 규칙 변경마다 문서·봉인 루브릭·req_audit 행을 같은 편집에서 고쳤는가 — 적용한 규칙 변경이 없으면 Y (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "적용한 규칙 변경 중 문서·루브릭·req_audit 셋 가운데 하나라도 빠진 것이 있는가 — 적용한 규칙 변경이 없으면 N (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "sm_gate_passed",
+        "variants": [
+          {
+            "ask": "스킬 파일을 고쳤다면 skill-maintainer verify GATE PASS를 받았는가 — 스킬 파일을 안 고쳤으면 Y (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "스킬 파일을 고쳤는데 skill-maintainer verify GATE PASS 없이 끝냈는가 — 스킬 파일을 안 고쳤으면 N (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "next_check_set",
+        "variants": [
+          {
+            "ask": "적용한 행마다 원장에 next_check(날짜·지표)가 있는가 — 적용 행이 없으면 Y (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "next_check 없이 적용 표시한 행이 있는가 — 적용 행이 없으면 N (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "due_resolved",
+        "variants": [
+          {
+            "ask": "검증일이 도래한 지난주 적용 행을 전부 유지·철회·연기 중 하나로 처리하고 §4에 적었는가 — 도래 행이 없으면 Y (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "검증일이 도래했는데 처리하지 않고 남긴 적용 행이 있는가 — 도래 행이 없으면 N (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "gate_promotions_handled",
+        "variants": [
+          {
+            "ask": "`stepgate.py findings fact-check for=trade-run`의 승격 대기를 이번 회차에 trade-run 게이트 문항으로 올려 0건으로 만들었거나, 남긴 건마다 이유를 §5에 적었는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "`stepgate.py findings fact-check for=trade-run`에 승격 대기가 남았는데 게이트로 올리지도 않고 §5에 이유도 적지 않았는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "verify_post_events",
+        "variants": [
+          {
+            "ask": "§4에서 지난주 적용분의 유지·철회를 적용일 이후 사건만으로 다시 잰 값(verify의 '적용 후 값')으로 판정했고, 적용 후 표본이 없거나 측정 결함 위에 있던 행은 판정 대신 검증일을 미뤘는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "§4에 적용 전 사건이 섞인 창 지표만 보고 유지·철회를 판정한 행이 있는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      }
+    ],
+    "criteria": [
+      {
+        "check": "contains",
+        "file": "{dir}/CHANGELOG.md",
+        "pat": "자가 피드백 FB-{week}",
+        "min": 1
+      },
+      {
+        "check": "contains",
+        "file": "{deliverable}",
+        "pat": "## §5 적용 결과",
+        "min": 1
+      }
+    ]
+  }
+}

@@ -92,6 +92,17 @@ def validate(alloc, this_id: str) -> list:
                     or not isinstance(r.get("amount"), (int, float)) or float(r.get("amount")) < 0 \
                     or not str(r.get("why") or "").strip():
                 errs.append(f"allocation.reserved[{i}]: thesis_id·market(KR|US)·amount(≥0)·why가 전부 있어야 한다")
+    # ★ 시장 몫(2026-10-15 사용자 결정 — 실계좌는 한 주머니라 국내:미국 몫을 run마다 판단). 필수 여부는 잔고를 아는 risk_guard가 본다
+    #   (`cash_shared`) — 여기서는 구조만: KR·US 0~100 · 합 100 · why. 직전 몫과 다르면 change.why(직전 행에 몫이 없으면 첫 판단).
+    ms = alloc.get("market_share")
+    if ms is not None:
+        if not isinstance(ms, dict) or not all(isinstance(ms.get(k), (int, float)) and 0 <= float(ms.get(k)) <= 100
+                                               for k in ("KR", "US")):
+            errs.append("allocation.market_share는 {KR: n, US: m, why}(0~100 숫자)여야 한다")
+        elif abs(float(ms["KR"]) + float(ms["US"]) - 100) > 0.5:
+            errs.append(f"allocation.market_share 합이 100이 아니다: KR {ms['KR']} + US {ms['US']}")
+        elif len(str(ms.get("why") or "").strip()) < 10:
+            errs.append("allocation.market_share.why가 비었다 — 몫의 명분(시장 지도의 살아 있는 축·논지 수·구매력 칸)을 적어라")
     prev = last(exclude_id=this_id)
     based = alloc.get("based_on")
     if prev:
@@ -101,6 +112,9 @@ def validate(alloc, this_id: str) -> list:
         else:
             changed = (float(tgt) != float(prev.get("target_invested_pct") or 0)) if isinstance(tgt, (int, float)) else False
             changed = changed or (str(alloc.get("cash_reason") or "").strip() != str(prev.get("cash_reason") or "").strip())
+            pms = prev.get("market_share")
+            changed = changed or (isinstance(pms, dict) and isinstance(ms, dict)
+                                  and any(float(pms.get(k) or 0) != float(ms.get(k) or 0) for k in ("KR", "US")))
             ch = alloc.get("change")
             if changed and not (isinstance(ch, dict) and str(ch.get("why") or "").strip()):
                 errs.append("비율 또는 현금 명분이 직전 판단과 다른데 change.why가 없다 — 무엇이 새로 알려져 바꾸는지 적어라"
@@ -128,30 +142,45 @@ def cash_reason_needed(alloc: dict, reserved_pct: float) -> str:
     return ""
 
 
-def default_reserved(market: str, equity_by_market: dict, theses: list = None) -> list:
+def default_reserved(market: str, equity_by_market: dict, theses: list = None,
+                     buying=None, today: str = None) -> list:
     """기계가 논지 원장에서 계산한 예약 기본값 — armed 논지의 **다음 사다리 칸**(`entry_triggers` 중 아직 안 산
-    첫 칸) `size_pct` × 그 시장 자산. 이미 기록된 판단이라 모델이 매번 다시 정하지 않아도 된다."""
+    첫 칸) `size_pct` × 그 시장 자산. 이미 기록된 판단이라 모델이 매번 다시 정하지 않아도 된다.
+
+    ★ 2026-10-15 — 예약에서 빼는 것 넷(실측: 10-14 미국 run은 gap $6,684·현금 $8,885인데 이번 run이 **사고 있는**
+    JNJ·MET·LLY의 첫 칸 $4,887을 예약으로 묶어 쓸 수 있는 돈이 $3,998로 줄었고, 그래서 LLY 1주를 사려고 IBKR를 팔았다):
+    ① 이미 체결 표시(`fired`)가 있는 칸 — '아직 안 산 첫 칸'만 본다 ② 이번 시그널이 사는 종목(`buying`) — 그 돈은 매수 자체로 나간다
+    ③ `check: judge` 칸 — "지금 산다"는 판단 칸은 가격을 기다리는 사다리가 아니다(사지 않았으면 기다릴 돈도 없다)
+    ④ 만기(`expires`)가 지난 논지."""
     if theses is None:
         try:
             theses = json.loads((JOURNAL_DIR / "theses.json").read_text(encoding="utf-8")).get("theses") or []
         except (OSError, json.JSONDecodeError):
             theses = []
+    buying = {str(x) for x in (buying or ())}
+    today = today or datetime.now(KST).date().isoformat()
     out = []
     for t in theses:
         if t.get("status") != "armed":
+            continue
+        if str(t.get("ticker") or "") in buying:
+            continue
+        exp = str(t.get("expires") or "")[:10]
+        if exp and exp < today:
             continue
         mkt = str(t.get("market") or "").upper()
         eq = float((equity_by_market or {}).get(mkt) or 0)
         if eq <= 0:
             continue
         rungs = [r for r in (t.get("entry_triggers") or []) if isinstance(r, dict)]
-        if not rungs:
+        nxt = next((r for r in rungs if not r.get("fired")), None)
+        if not nxt or str(nxt.get("check") or "").strip().lower() == "judge":
             continue
-        pct = float(rungs[0].get("size_pct") or 0)
+        pct = float(nxt.get("size_pct") or 0)
         if pct <= 0:
             continue
         out.append({"thesis_id": t.get("id"), "market": mkt, "amount": round(eq * pct / 100),
-                    "why": f"{t.get('ticker')} 다음 칸 {rungs[0].get('id')} {pct:g}% 대기(논지 원장 기본값)"})
+                    "why": f"{t.get('ticker')} 다음 칸 {nxt.get('id')} {pct:g}% 대기(논지 원장 기본값)"})
     return out
 
 
@@ -171,6 +200,8 @@ def block(market: str = "") -> str:
             f"  현금 명분: {str(r.get('cash_reason') or '없음')[:200]}\n"
             f"  해제 조건: {str(r.get('cash_release_when') or '')[:160] or '(없음)'}\n"
             f"  예약: {res_s}\n"
+            + (f"  시장 몫: KR {r['market_share'].get('KR')} · US {r['market_share'].get('US')} — {str(r['market_share'].get('why') or '')[:120]}\n"
+               if isinstance(r.get("market_share"), dict) else "  시장 몫: (없음 — 실계좌는 첫 판단을 적는다)\n") +
             f"  직전 변경: {ch_s}\n"
             f"  → 이번 시그널 allocation.based_on = \"{r.get('id')}\". 유지하면 change: null, 바꾸면 change.why에 "
             f"무엇이 새로 알려졌는지(재료 확장·회고·이벤트 결과)를 적는다.")
@@ -187,7 +218,7 @@ def record(approved: dict, approved_ref: str = "") -> dict:
            "target_invested_pct": al.get("target_invested_pct"),
            "regime": al.get("regime"), "cash_reason": al.get("cash_reason"),
            "cash_release_when": al.get("cash_release_when"),
-           "reserved": al.get("reserved") or [], "change": al.get("change"),
+           "reserved": al.get("reserved") or [], "change": al.get("change"), "market_share": al.get("market_share"),
            "gap_pct": al.get("gap_pct"), "deployable": al.get("deployable"),
            "recorded_at": datetime.now(KST).isoformat(), "approved_ref": approved_ref}
     rs = [r for r in rows() if r.get("id") != row["id"]]

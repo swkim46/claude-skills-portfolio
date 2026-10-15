@@ -227,7 +227,8 @@
         "id": "label_missing",
         "ask": "재료 밖 외부 사실인데 [AI] 라벨이 없거나, 인과·의도 해석인데 [추정] 라벨이 없는 줄이 있는가",
         "severity": "high",
-        "cite_or_pass": true
+        "cite_or_pass": true,
+        "kind": "reader"
       },
       {
         "id": "unknown_as_none",
@@ -239,7 +240,8 @@
         "id": "single_case_generalization",
         "ask": "기사 한 건이나 사례 하나를 업황·종목 전체의 판정으로 확대한 줄이 있는가",
         "severity": "medium",
-        "cite_or_pass": true
+        "cite_or_pass": true,
+        "kind": "reader"
       },
       {
         "id": "sell_is_discipline_work",
@@ -257,7 +259,8 @@
         "id": "risk_notes_empty",
         "ask": "제안에 '무엇이 틀리면 무효가 되는가'가 비어 있거나 형식적으로만 채워진 것이 있는가",
         "severity": "medium",
-        "cite_or_pass": true
+        "cite_or_pass": true,
+        "kind": "reader"
       },
       {
         "id": "holdings_skipped",
@@ -269,13 +272,15 @@
         "id": "depth_asymmetry",
         "ask": "여러 종목을 비교하면서 어떤 종목만 얕게 보고 넘어가, 자료가 많은 종목이 좋아 보이게 된 곳이 있는가",
         "severity": "medium",
-        "cite_or_pass": true
+        "cite_or_pass": true,
+        "kind": "reader"
       },
       {
         "id": "sector_board_not_exhaustive",
         "ask": "§3 섹터 보드가 전수가 아닌가 — 브로커 로스터의 업종 중 표에서 통째로 빠진 것이 있거나, 안 본 섹터를 '미조사(—)' 행으로 남기지 않고 아예 지워 버린 곳이 있는가. 커버리지 n/전체를 §9에 적지 않은 것도 위반이다",
         "severity": "critical",
-        "cite_or_pass": true
+        "cite_or_pass": true,
+        "kind": "reader"
       },
       {
         "id": "cross_market_retro_missing",
@@ -287,19 +292,22 @@
         "id": "cycle_slot_skipped",
         "ask": "§4의 슬롯 3개 중 **순환**(갱신일이 가장 오래된 것·미조사 우선)이 비어 있는가. 일정·이상 슬롯만 채우면 뉴스가 미는 곳만 계속 보게 되므로 이 슬롯이 빠진 것은 구조적 위반이다",
         "severity": "high",
-        "cite_or_pass": true
+        "cite_or_pass": true,
+        "kind": "reader"
       },
       {
         "id": "sector_without_names",
         "ask": "§4에서 A등급으로 다룬 섹터 중 '③ 대표 종목 선정과 근거' 단이 없는 것이 있는가 — 종목까지 안 내려온 섹터 분석은 매매로 이어지지 않는다",
         "severity": "high",
-        "cite_or_pass": true
+        "cite_or_pass": true,
+        "kind": "reader"
       },
       {
         "id": "orphan_thesis",
         "ask": "§6의 종목 트리거 중 부모 섹터 시나리오 id가 없는 것이 있는가 (고아 논지). 부모가 없으면 종목 뉴스로 매매한다는 뜻이고, 그건 이 시스템이 진다고 선언한 속도 게임이다",
         "severity": "high",
-        "cite_or_pass": true
+        "cite_or_pass": true,
+        "kind": "reader"
       },
       {
         "id": "conclusion_without_outlet",
@@ -317,7 +325,8 @@
         "id": "blocked_link_left_open",
         "ask": "연쇄 고리 중 '막혔다·핵심 공백·확인 필요'로 끝난 행이 있는가. 종료 상태는 확인/반증/조사불가 셋뿐이고, 조사불가에는 resolves_when과 **예정일**이 반드시 있어야 한다 — 예정일 없는 조사불가는 포기를 상태로 위장한 것이다",
         "severity": "high",
-        "cite_or_pass": true
+        "cite_or_pass": true,
+        "kind": "reader"
       },
       {
         "id": "moving_trigger_basis",
@@ -329,25 +338,29 @@
         "id": "intraday_as_conclusion",
         "ask": "장중 시세를 종가인 것처럼 쓰거나, 핵심 논거(급등 직후다·이미 반영됐다 류)를 장중 등락에 기대어 세운 곳이 있는가. 장중에 썼다면 그 사실이 머리말이나 한계에 명시돼야 한다",
         "severity": "high",
-        "cite_or_pass": true
+        "cite_or_pass": true,
+        "kind": "reader"
       },
       {
         "id": "numbers_not_from_capture",
         "ask": "노트의 시세·지수 중 그 run의 캡처 파일(data/run_evidence/tools_*.md)에 없는 값이 있는가 — 호출할 때마다 값이 달라지므로 노트 안에서 숫자끼리 어긋나게 된다",
         "severity": "medium",
-        "cite_or_pass": true
+        "cite_or_pass": true,
+        "kind": "reader"
       },
       {
         "id": "calendar_event_not_fanned",
         "ask": "§5의 이벤트 중 걸리는 섹터가 하나뿐이거나 비어 있는 것이 있는가 — 기업 발표는 공급망·경쟁사·전방수요로 번지므로 한 이벤트가 최소 몇 갈래로 갈라져야 매크로로 연결한 것이다",
         "severity": "medium",
-        "cite_or_pass": true
+        "cite_or_pass": true,
+        "kind": "reader"
       },
       {
         "id": "yesterday_not_graded",
         "ask": "§1-A에서 전날 판단의 **근거**를 채점하지 않고 결과만 적었는가. 근거가 무너졌으면 앞으로 그 근거를 쓰지 않겠다고 명시하고 '오늘 무엇을 다르게 하는지'로 닫아야 한다",
         "severity": "medium",
-        "cite_or_pass": true
+        "cite_or_pass": true,
+        "kind": "reader"
       },
       {
         "id": "base_rate_skipped",
@@ -371,7 +384,8 @@
         "id": "one_sided_name",
         "ask": "심층 종목 중 사는 쪽·안 사는 쪽 한쪽만 쓴 것이 있는가",
         "severity": "critical",
-        "cite_or_pass": true
+        "cite_or_pass": true,
+        "kind": "reader"
       },
       {
         "id": "valuation_skipped",
@@ -383,19 +397,22 @@
         "id": "single_news_generalized",
         "ask": "기사 한 건을 업황 전체 판정으로 쓴 자리가 있는가",
         "severity": "major",
-        "cite_or_pass": true
+        "cite_or_pass": true,
+        "kind": "reader"
       },
       {
         "id": "hedge_flattened",
         "ask": "원문의 완곡어법(추측)을 확인된 사실과 같은 무게로 옮긴 자리가 있는가",
         "severity": "major",
-        "cite_or_pass": true
+        "cite_or_pass": true,
+        "kind": "reader"
       },
       {
         "id": "layer_mixed",
         "ask": "섹터 시나리오에 가격이 들어갔거나 종목 시나리오가 새 거시 주장을 한 자리가 있는가",
         "severity": "major",
-        "cite_or_pass": true
+        "cite_or_pass": true,
+        "kind": "reader"
       },
       {
         "id": "base_rate_wrong_cell",
@@ -414,9 +431,11 @@
         "ask": "출처 링크가 붙어 있으나 그 링크가 해당 주장을 실제로 뒷받침하지 않는 자리가 있는가",
         "severity": "critical",
         "cite_or_pass": true,
-        "needs_fetch": true
+        "needs_fetch": true,
+        "kind": "reader"
       }
-    ]
+    ],
+    "_kind_note": "2026-10-13 사용자: \"노트는 읽지 않는다 — 매매에 필요한 요소만 제대로 들어 있으면 다른 감사는 하지 마라.\" kind=reader lens는 감사 패킷·기록 허용 목록에서 빠진다(지우지 않고 남긴다 — 되돌리려면 kind를 지운다). 배경 서술의 사실 검증은 fact-check 갈래 ②가, 섹터 보드 전수·커버리지는 crosscheck.py가 기계로 본다."
   },
   "capture": {
     "deliverable_glob": "data/run_evidence/tools_*.md",

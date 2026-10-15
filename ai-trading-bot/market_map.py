@@ -194,9 +194,16 @@ def chains() -> int:
     return 0
 
 
+def _run_day(market: str = ""):
+    """지도·일정·섹터 이력에 적는 날짜 = 현재 run의 **세션 날짜**(현지 거래일 · 2026-10-14 — `sessions.run_date`).
+    시장을 모르면 현재 run 포인터, 포인터도 없으면 한국 날짜. 새벽에 돈 미국 run의 갱신이 다음 날로 찍히던 것을 막는다."""
+    import sessions as _ss
+    return _ss.run_date((market or "").lower())
+
+
 def upcoming(days: int) -> list:
     cal = _read(CAL, {"events": []})
-    today = datetime.now(KST).date()
+    today = _run_day()
     out = []
     for e in cal["events"]:
         try:
@@ -302,6 +309,10 @@ def gaps_check(days: int, note_path: str = "", out: str = "") -> int:
             unresolved.append((delta, e, sorted(tks)))
     line = f"공백 미해결 **{len(unresolved)}건** · 유니버스 걸린 이벤트 {len(unresolved) + len(passed)}건 (D-{days})"
     buf = [f"## 일정 → 논지 점검 — D-{days}", "", line, ""]
+    untagged = [a["id"] for a in _open_forecast_axes() if not a.get("driver")]
+    if untagged:
+        buf += [f"- 요인(driver) 태그 없는 열린 축 {len(untagged)}개: {', '.join(untagged[:10])}"
+                f"{' …' if len(untagged) > 10 else ''} — `market_map.py axis-tag --axis <id> --driver <요인>`", ""]
     for delta, e, tks in unresolved:
         buf.append(f"- ★ D-{delta} {e['date']} **{e['event']}** — 유니버스 {', '.join(tks)}: "
                    f"논지 없음, §5 `[통과]` 없음 → **논지를 세우거나 노트 §5에 "
@@ -330,7 +341,7 @@ def add(path: Path, kind: str) -> int:
                 if not a.get(k):
                     raise SystemExit(f"축에 {k}가 없다: {a.get('id', '?')}")
             m["axes"] = [x for x in m["axes"] if x["id"] != a["id"]]   # 같은 id는 갱신
-            a["updated"] = datetime.now(KST).strftime("%Y-%m-%d")
+            a["updated"] = _run_day().isoformat()
             m["axes"].append(a)
             print(f"{'갱신' if a['id'] in have else '등록'}: 축 {a['id']} {a['name']}")
         _write(MAP, m)
@@ -355,7 +366,7 @@ def add(path: Path, kind: str) -> int:
             if dup:
                 print(f"이미 있음: {e['date']} {e['event']}")
                 continue
-            e["added"] = datetime.now(KST).strftime("%Y-%m-%d")
+            e["added"] = _run_day().isoformat()
             c["events"].append(e)
             print(f"등록: {e['date']} {e['event']}")
         c["events"].sort(key=lambda x: x["date"])
@@ -385,6 +396,300 @@ def axes_index() -> tuple:
             if tk:
                 by_tk.setdefault(tk, []).append(aid)
     return by_tk, by_id
+
+
+# ---------------------------------------------------------------- 요인(driver) · 충돌(conflicts_with) — FB-261012-3·4
+#
+# ★ 축을 나눠도 요인은 하나일 수 있다. 실사례(2026-10-08~12): 전력 기자재·메모리 장비·기판·ESS를 서로 다른 축으로
+#   관리했지만 전부 "AI 투자가 계속 돈이 된다"는 한 요인에 걸려 있어, 기사 하나에 같이 흔들렸다. 축마다 `driver`를
+#   달고 보유를 요인으로 다시 묶어 양 시장 합산으로 잰다. 상한이 아니다 — 최대 요인이 꺾이는 가지를 대응표에 두게 한다.
+# ★ 같은 메커니즘을 두 시장이 반대 부호로 들고 있으면 `conflicts_with`로 잇는다. 실사례: 미국 전망이 "데이터센터
+#   일정 지연"을 위험(−)으로 적은 기간에 국내 전망은 같은 경로의 기자재를 기회(+)로 샀다.
+
+def _open_forecast_axes() -> list:
+    m = _read(MAP, {"axes": []})
+    return [a for a in (m.get("axes") or [])
+            if a.get("id") and a.get("direction") and (a.get("status") or "open") == "open"]
+
+
+def _axis_members(ax: dict) -> dict:
+    """축의 종목 → 부호(+1/−1). `names`(sign 있음)와 `beneficiaries`(전망 수혜 · sign 있으면 따름)를 합친다."""
+    out = {}
+    for n in (ax.get("names") or []):
+        if isinstance(n, dict) and n.get("ticker"):
+            out[str(n["ticker"]).strip()] = -1 if (n.get("sign") or "+") == "-" else 1
+    for b in (ax.get("beneficiaries") or []):
+        tk = str(b.get("ticker") or "").strip()
+        if tk and tk not in out:
+            out[tk] = -1 if (b.get("sign") or "+") == "-" else 1
+    return out
+
+
+def _latest_snapshot(market: str):
+    cands = []
+    for f in MATERIAL_DIR.glob(f"snapshot_*_{market.lower()}.json"):
+        if not re.fullmatch(r"snapshot_\d{6}_[a-z]{2}\.json", f.name):
+            continue
+        try:
+            cands.append((json.loads(f.read_text(encoding="utf-8")).get("generated_at") or "", f))
+        except (json.JSONDecodeError, OSError):
+            continue
+    return sorted(cands)[-1][1] if cands else None
+
+
+def exposure_by_driver(market: str = "KR", stamp: str = "") -> dict:
+    """보유를 **요인(driver)별**로 묶은 노출 — 양 시장 합산 원화, 분모는 포트폴리오 자산(`risk_guard.portfolio_equity`).
+
+    한 종목은 같은 요인 안에서 한 번만 센다(축 둘에 걸려도 요인이 같으면 한 번). 역노출(sign −)은 음수.
+    `driver`가 없는 축은 축 id를 요인으로 쓰고 `untagged`로 표시한다(태그를 달라는 신호)."""
+    import risk_guard as rg
+    market = (market or "KR").upper()
+    sp = MATERIAL_DIR / f"snapshot_{stamp}_{market.lower()}.json" if stamp else None
+    if sp is None or not sp.exists():
+        sp = _latest_snapshot(market)
+    if sp is None:
+        return {"ok": False, "why": f"{market} 스냅샷이 없다", "rows": []}
+    bal = (json.loads(sp.read_text(encoding="utf-8")).get("balance") or {})
+    pf = rg.portfolio_equity(market, bal)
+    fx = pf.get("fx") or 0
+    total = pf.get("krw") or 0
+    held = {}
+    for mk, part in (pf.get("parts") or {}).items():
+        mult = fx if mk == "US" else 1.0
+        if mk == "US" and not fx:
+            continue
+        for pos in part.get("positions") or []:
+            v = float(pos.get("eval_amt") or 0) * mult
+            if v > 0:
+                held[str(pos.get("ticker"))] = {"krw": v, "market": mk, "name": pos.get("name") or ""}
+    if not total:
+        total = sum(h["krw"] for h in held.values())
+    drivers = {}
+    for ax in _open_forecast_axes():
+        d = str(ax.get("driver") or "").strip() or ax["id"]
+        row = drivers.setdefault(d, {"driver": d, "axes": [], "members": {}, "untagged": not ax.get("driver")})
+        row["axes"].append(ax["id"])
+        row["untagged"] = row["untagged"] and not ax.get("driver")
+        for tk, sg in _axis_members(ax).items():
+            row["members"][tk] = max(row["members"].get(tk, sg), sg)
+    rows, mapped = [], set()
+    for d, row in drivers.items():
+        kr = us = 0.0
+        tks = []
+        for tk, sg in row["members"].items():
+            h = held.get(tk)
+            if not h:
+                continue
+            mapped.add(tk)
+            if h["market"] == "US":
+                us += sg * h["krw"]
+            else:
+                kr += sg * h["krw"]
+            tks.append(f"{tk}{'(−)' if sg < 0 else ''}")
+        if not tks:
+            continue
+        rows.append({"driver": d, "kr_pct": kr / total * 100 if total else 0.0, "us_pct": us / total * 100 if total else 0.0,
+                     "total_pct": (kr + us) / total * 100 if total else 0.0, "tickers": sorted(tks),
+                     "axes": row["axes"], "untagged": row["untagged"]})
+    rows.sort(key=lambda r: -r["total_pct"])
+    unm = sum(h["krw"] for tk, h in held.items() if tk not in mapped)
+    return {"ok": bool(pf.get("ok")), "why": pf.get("why", ""), "total_krw": total, "rows": rows,
+            "unmapped_pct": unm / total * 100 if total else 0.0,
+            "unmapped": sorted(tk for tk in held if tk not in mapped), "snapshot": sp.name,
+            "untagged_axes": sorted(a["id"] for a in _open_forecast_axes() if not a.get("driver"))}
+
+
+def render_exposure(res: dict) -> str:
+    L = ["## 요인별 노출 — 양 시장 합산(포트폴리오 자산 대비)", ""]
+    if not res.get("rows"):
+        return "\n".join(L + [f"(계산 불가 — {res.get('why') or '보유 없음'})", ""])
+    top = res["rows"][0]
+    L.append(f"**최대 요인 `{top['driver']}` {top['total_pct']:.1f}%** (KR {top['kr_pct']:.1f}% · US {top['us_pct']:.1f}%) — "
+             f"이 요인이 꺾이면 무엇을 줄이나를 §7 대응표에 한 행으로 둔다(상한 아님)")
+    L += ["", "| 요인 | KR% | US% | 합산% | 종목 | 축 |", "|---|---|---|---|---|---|"]
+    for r in res["rows"]:
+        L.append(f"| {r['driver']}{' (태그 없음)' if r['untagged'] else ''} | {r['kr_pct']:.1f} | {r['us_pct']:.1f} | "
+                 f"{r['total_pct']:.1f} | {' · '.join(r['tickers'])} | {' · '.join(r['axes'])} |")
+    L += ["", f"축에 안 걸린 보유 {res['unmapped_pct']:.1f}%: {' · '.join(res['unmapped']) or '없음'} · "
+              f"요인 태그 없는 열린 축 {len(res['untagged_axes'])}개 · 잔고 {res['snapshot']}", ""]
+    if not res.get("ok"):
+        L.append(f"※ 포트폴리오 자산을 다 못 쟀다 — {res.get('why')}")
+    return "\n".join(L)
+
+
+def cmd_exposure(a) -> int:
+    res = exposure_by_driver(a.market)
+    s = render_exposure(res)
+    print(s)
+    if a.out:
+        Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(a.out).write_text(s + "\n", encoding="utf-8")
+        print(f"→ {a.out}")
+    return 0 if res.get("rows") else 1
+
+
+# ---------------------------------------------------------------- 교차 시장 입력(xmarket) — 2026-10-12 사용자
+#
+# ★ "국내장과 미국장이 100% 연계되지는 않지만 독립적이지도 않다 — 무조건 상호 연관해서 전망과 시나리오를 짜라."
+#   `bridge`는 반대 시장의 **가격 움직임**만 이쪽 섹터로 넘겼고, 반대 시장이 **판단을 바꾼 것**(전망 확신도·방향·반증 고리·
+#   새 시나리오·손절 발화)은 넘어오지 않았다. 그래서 미국이 데이터센터 지연을 위험으로 적는 동안 국내는 같은 경로를 샀다.
+#   이 블록이 2단 이어받기에 그것을 기계로 붙이고, 노트 §1-B ④가 "저쪽이 바꾼 것 → 이쪽 뜻"을 적는다.
+
+def _prev_run_stamp(market: str, stamp: str) -> str:
+    """이 시장의 직전 run 스탬프(작업기록 파일 기준) — 없으면 7일 전."""
+    st = sorted(m.group(1) for f in JOURNAL.glob(f"worklog_*_{market.lower()}*.md")
+                for m in [re.search(r"worklog_(\d{6})_", f.name)] if m and m.group(1) < stamp)
+    if st:
+        return st[-1]
+    return (datetime.strptime(stamp, "%y%m%d") - timedelta(days=7)).strftime("%y%m%d")
+
+
+def xmarket(market: str, stamp: str, since: str = "") -> dict:
+    """반대 시장이 `since` 이후 바꾼 판단 — 전망 갱신 · 반증 고리 · 이쪽 대응이 빈 시나리오 · 손절·추적 발화 · 요인별 방향 표."""
+    market = market.lower()
+    other = "us" if market == "kr" else "kr"
+    since = since or _prev_run_stamp(market, stamp)
+    since_d = datetime.strptime(since, "%y%m%d").strftime("%Y-%m-%d")
+    m = _read(MAP, {"axes": []})
+    axes = {a["id"]: a for a in m.get("axes") or [] if a.get("id")}
+    # ① 전망 갱신 — 반대 시장 run이 남긴 forecast_update 파일(정확) + 그 시장 종목이 걸린 축의 updated(보조)
+    upd = {}
+    for f in sorted((HERE / "data" / "run_evidence").glob(f"forecast_update_*_{other}.json")):
+        mm_ = re.search(r"forecast_update_(\d{6})_", f.name)
+        if not mm_ or not (since <= mm_.group(1) <= stamp):
+            continue
+        for it in _read(f, []) or []:
+            if not isinstance(it, dict) or not it.get("id"):
+                continue
+            note = next((str(v) for k, v in it.items() if k.startswith("note_")), "")
+            upd[it["id"]] = {"axis": it["id"], "run": f"{other}:{mm_.group(1)}", "confidence": it.get("confidence"),
+                             "note": note[:260], "file": f.name}
+    files_seen = sorted({u["file"] for u in upd.values()})
+    for u in upd.values():
+        ax = axes.get(u["axis"]) or {}
+        u["direction"] = ax.get("direction")
+        u["driver"] = ax.get("driver") or ""
+        u["here_names"] = sorted(str(b.get("ticker")) for b in ax.get("beneficiaries") or []
+                                 if str(b.get("market") or _market_of(b.get("ticker"))).lower() == market)
+    # ② 반증 고리 — 갱신된 축에서
+    refuted = [{"axis": aid, "step": c.get("step"), "claim": str(c.get("claim") or "")[:120]}
+               for aid in upd for c in (axes.get(aid) or {}).get("chain") or [] if c.get("status") == "반증"]
+    # ③ 반대 시장이 연 시나리오 중 이쪽 대응이 없는 것
+    sc_rows = (_read(JOURNAL / "scenarios.json", {"scenarios": []}) or {}).get("scenarios") or []
+    mark = re.compile(rf"\[{market.upper()}\s*영향\s*없음", re.I)
+    missing = []
+    for r in sc_rows:
+        if r.get("status") != "open" or not str(r.get("opened_by") or r.get("market") or "").lower().startswith(other):
+            continue
+        if not (since <= str(r.get("opened") or "") <= stamp):
+            continue
+        acts = r.get("actions") or []
+        if any(str(x.get("market") or "").lower() == market for x in acts):
+            continue
+        blob = " ".join([str(r.get("condition") or ""), str(r.get("response") or "")] + [str(x.get("what") or "") for x in acts])
+        if mark.search(blob):
+            continue
+        missing.append({"id": r["id"], "opened": r.get("opened"), "condition": str(r.get("condition") or "")[:140],
+                        "axis": r.get("axis") or "", "their": " · ".join(str(x.get("what") or "")[:60] for x in acts[:2])})
+    # ④ 반대 시장의 손절·추적 발화
+    th = (_read(THESES, {"theses": []}) or {}).get("theses") or []
+    fired = []
+    for t in th:
+        if str(t.get("market") or "").lower() != other:
+            continue
+        for g in t.get("exit_triggers") or []:
+            fa = str(g.get("fired_at") or "")[:10]
+            if fa and fa >= since_d and str(g.get("check") or "") not in ("", "judge"):
+                ax = axes.get(t.get("axis_id")) or {}
+                fired.append({"ticker": t.get("ticker"), "name": t.get("name") or "", "thesis": t["id"], "leg": g.get("id"),
+                              "check": g.get("check"), "at": fa, "driver": ax.get("driver") or t.get("axis_id") or ""})
+    # ⑤ 요인별 방향 표
+    drv = {}
+    for aid, ax in axes.items():
+        if not ax.get("direction") or (ax.get("status") or "open") != "open":
+            continue
+        d = str(ax.get("driver") or "").strip() or "(요인 없음)"
+        drv.setdefault(d, []).append({"axis": aid, "direction": ax["direction"], "confidence": ax.get("confidence"),
+                                      "markets": sorted(_forecast_markets(ax)),
+                                      "unlinked": driver_conflicts(ax, list(axes.values()))})
+    return {"market": market, "other": other, "stamp": stamp, "since": since, "forecast_updates": list(upd.values()),
+            "update_files": files_seen,
+            "refuted": refuted, "scenarios_missing_here": missing, "fired_there": fired, "drivers": drv}
+
+
+def render_xmarket(r: dict) -> str:
+    mk, ot = r["market"].upper(), r["other"].upper()
+    L = [f"## 교차 시장 입력 — {ot}가 {r['since']} 이후 바꾼 판단 → {mk} 오늘 입력", "",
+         f"> `bridge`(③)는 {ot}의 **가격**을 넘긴다. 이 블록은 {ot}가 **판단을 바꾼 것**을 넘긴다 — 노트 §1-B ④에 항목마다 "
+         f"'{mk}에 무슨 뜻인가' 한 줄. 이쪽 대응이 빈 시나리오는 `scenarios.py respond`로 {mk} 대응을 더하거나 "
+         f"`[{mk} 영향 없음 — 이유]`를 노트 §7에 적는다.", "",
+         f"[교차] 전망 갱신 {len(r['forecast_updates'])} · 반증 고리 {len(r['refuted'])} · {mk} 대응 빈 시나리오 "
+         f"{len(r['scenarios_missing_here'])} · {ot} 손절·추적 발화 {len(r['fired_there'])} · 요인 안 부호 혼재 미연결 "
+         f"{sum(1 for rows in r['drivers'].values() for x in rows if x['unlinked'])}", ""]
+    L += [f"### ① {ot} 전망 갱신", "",
+          f"출처: {', '.join('`' + f + '`' for f in r.get('update_files') or []) or f'**{ot} run의 forecast_update 파일 없음 — 전망 갱신을 못 읽었다(없음이 아니다)**'}", ""]
+    if r["forecast_updates"]:
+        L += ["| 축 | 요인 | 방향·확신도 | 갱신 run | {0} 종목 | 메모 |".format(mk), "|---|---|---|---|---|---|"]
+        for u in r["forecast_updates"]:
+            L.append(f"| {u['axis']} | {u['driver'] or '—'} | {u['direction']} {u['confidence']} | {u['run']} | "
+                     f"{' · '.join(u['here_names']) or '없음'} | {u['note'].replace('|', '/')[:200]} |")
+    else:
+        L.append("*(없음)*")
+    L += ["", f"### ② 반증으로 바뀐 고리", ""]
+    L += [f"- {x['axis']} 고리 {x['step']}: {x['claim']}" for x in r["refuted"]] or ["*(없음)*"]
+    L += ["", f"### ③ {ot}가 연 시나리오 중 {mk} 대응이 없는 것 — 응답 필수", ""]
+    if r["scenarios_missing_here"]:
+        L += ["| id | 열린 날 | 조건 | 축 | 저쪽 대응 |", "|---|---|---|---|---|"]
+        for x in r["scenarios_missing_here"]:
+            L.append(f"| {x['id']} | {x['opened']} | {x['condition'].replace('|', '/')} | {x['axis'] or '—'} | {x['their'].replace('|', '/')} |")
+    else:
+        L.append("*(없음)*")
+    L += ["", f"### ④ {ot} 손절·추적 발화(요인별)", ""]
+    L += [f"- {x['at']} {x['ticker']} {x['name']} {x['leg']} `{x['check']}` · 요인 {x['driver']} · {x['thesis']}"
+          for x in r["fired_there"]] or ["*(없음)*"]
+    L += ["", "### ⑤ 요인별 전망 방향 — 두 시장", "", "| 요인 | 축 | 방향 | 확신도 | 시장 | 상태 |", "|---|---|---|---|---|---|"]
+    for d, rows in sorted(r["drivers"].items(), key=lambda kv: -len(kv[1])):
+        mixed = len({x["direction"] for x in rows}) > 1
+        for x in rows:
+            st = ("★ 미연결: " + ", ".join(x["unlinked"])) if x["unlinked"] else ("부호 혼재·연결됨" if mixed else "")
+            L.append(f"| {d} | {x['axis']} | {x['direction']} | {x['confidence']} | {'·'.join(x['markets']) or '?'} | {st} |")
+    return "\n".join(L) + "\n"
+
+
+def cmd_xmarket(a) -> int:
+    r = xmarket(a.market, a.stamp, a.since)
+    s = render_xmarket(r)
+    print(s)
+    if a.out:
+        Path(a.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(a.out).write_text(s, encoding="utf-8")
+        print(f"→ {a.out}")
+    return 0
+
+
+def cmd_axis_tag(a) -> int:
+    """축에 `driver`·`conflicts_with`를 단다. 충돌은 **양방향**으로 기록한다."""
+    m = _read(MAP, {"axes": []})
+    by = {x.get("id"): x for x in m.get("axes") or []}
+    ax = by.get(a.axis)
+    if ax is None:
+        raise SystemExit(f"지도에 없는 축: {a.axis}")
+    if a.driver:
+        ax["driver"] = a.driver.strip()
+    for other in [x.strip() for x in (a.conflicts_with or "").split(",") if x.strip()]:
+        if other not in by:
+            raise SystemExit(f"충돌 축이 지도에 없다: {other}")
+        if other == a.axis:
+            raise SystemExit("자기 자신과 충돌할 수 없다")
+        for x, y in ((ax, other), (by[other], a.axis)):
+            lst = x.setdefault("conflicts_with", [])
+            if y not in lst:
+                lst.append(y)
+    # ★ `updated`는 건드리지 않는다 — 전망 갱신 수(3단 생성줄)와 교차 시장 입력이 그 날짜를 '전망을 바꾼 날'로 읽는다.
+    ax["tagged"] = _run_day().isoformat()
+    _write(MAP, m)
+    print(f"{a.axis}: driver={ax.get('driver')} · conflicts_with={ax.get('conflicts_with') or []}")
+    return 0
 
 
 def axis_of(ticker: str) -> list:
@@ -511,8 +816,53 @@ def created_before_news(ax: dict) -> tuple:
                 + ("" if ok else " — 뉴스가 먼저였다"))
 
 
-def forecast_validate(ax: dict) -> list:
-    """전망 필드 검증. 반환 문제 목록(비어 있으면 통과)."""
+def _forecast_markets(ax: dict) -> set:
+    """전망이 종목을 둔 시장 — 수혜 표와 `names`를 합친다."""
+    out = set()
+    for b in ax.get("beneficiaries") or []:
+        if b.get("ticker"):
+            out.add(str(b.get("market") or _market_of(b.get("ticker"))).upper())
+    for n in ax.get("names") or []:
+        if isinstance(n, dict) and n.get("ticker"):
+            out.add(_market_of(n.get("ticker")))
+    return out
+
+
+def driver_conflicts(ax: dict, axes: list) -> list:
+    """같은 요인(`driver`)의 다른 열린 전망 중 방향이 반대인데 `conflicts_with`로 안 이어진 축 id."""
+    d = str(ax.get("driver") or "").strip()
+    if not d or ax.get("direction") not in ("+", "-"):
+        return []
+    out = []
+    for o in axes or []:
+        if o.get("id") == ax.get("id") or not o.get("direction") or (o.get("status") or "open") != "open":
+            continue
+        if str(o.get("driver") or "").strip() != d or o.get("direction") == ax.get("direction"):
+            continue
+        if o["id"] in (ax.get("conflicts_with") or []) or ax.get("id") in (o.get("conflicts_with") or []):
+            continue
+        if _split_covers(ax, o["id"]) or _split_covers(o, ax.get("id")):
+            continue
+        out.append(o["id"])
+    return out
+
+
+def _split_covers(ax: dict, other_id: str) -> bool:
+    """`split_why`가 그 상대를 덮는가 — 문자열이면 이 축의 모든 반대 부호 상대, 사전이면 키에 든 상대만."""
+    sw = ax.get("split_why")
+    if isinstance(sw, dict):
+        return bool(str(sw.get(other_id) or "").strip())
+    return bool(str(sw or "").strip())
+
+
+def forecast_validate(ax: dict, axes: list = None) -> list:
+    """전망 필드 검증. 반환 문제 목록(비어 있으면 통과).
+
+    ★ 2026-10-12 사용자: "국내장과 미국장이 100% 연계되지는 않지만 독립적이지도 않다 — 무조건 상호 연관해서 전망을 짜라."
+      전망의 단위는 시장이 아니라 요인이다. ① 수혜 표가 한 시장뿐이면 반대 시장에 왜 걸리는 종목이 없는지
+      (`no_cross_market_why`)를 적어야 하고 ② 같은 요인의 열린 전망과 방향이 반대면 `conflicts_with`로 잇거나 왜
+      메커니즘이 다른지(`split_why`)를 적어야 한다. 실사례: 미국 전망은 데이터센터 일정 지연을 위험으로, 국내 전망은
+      같은 경로의 기자재를 기회로 들고 있었다(10-02~10-12 국내 손실의 84%)."""
     p = []
     if ax.get("direction") not in ("+", "-"):
         p.append("direction은 '+' 또는 '-'")
@@ -537,6 +887,15 @@ def forecast_validate(ax: dict) -> list:
         for b in bens:
             if not b.get("ticker") or b.get("order") not in (1, 2, 3):
                 p.append(f"수혜 행에 ticker·order(1|2|3)가 있어야 한다: {b}")
+        mks = _forecast_markets(ax)
+        if len(mks) == 1 and not str(ax.get("no_cross_market_why") or "").strip():
+            other = "US" if "KR" in mks else "KR"
+            p.append(f"수혜 표가 {next(iter(mks))} 종목뿐이다 — {other} 쪽에 이 요인으로 움직이는 종목(동종 업종·공급망·환율·외국인 "
+                     f"수급 경로)을 수혜·피해로 넣거나, 없으면 무엇을 봤는데 왜 없는지 `no_cross_market_why`에 적어라")
+    for oid in driver_conflicts(ax, axes or []):
+        if True:
+            p.append(f"같은 요인({ax.get('driver')})의 열린 전망 {oid}와 방향이 반대다 — `conflicts_with`로 잇거나(대응표에 충돌 가지가 "
+                     f"생긴다) 왜 메커니즘이 다른지 `split_why`에 적어라")
     return [x for x in p if x]
 
 
@@ -546,6 +905,8 @@ def cmd_forecast(a) -> int:
         rows = m["axes"]
         if a.open:
             rows = [x for x in rows if (x.get("status") or "open") == "open" and x.get("direction")]
+        if getattr(a, "driver", ""):
+            rows = [x for x in rows if str(x.get("driver") or "") == a.driver]
         n_blank = 0
         print(f"■ 전망 원장 — {len(rows)}건" + (" (열린 전망만)" if a.open else "") + "\n")
         for ax in rows:
@@ -595,22 +956,36 @@ def cmd_forecast(a) -> int:
                 merged += [v for k, v in old_bens.items() if k not in seen]
                 base["beneficiaries"] = merged
             base.setdefault("status", "open")
-            base.setdefault("opened", datetime.now(KST).strftime("%Y-%m-%d"))
+            base.setdefault("opened", _run_day().isoformat())
             for k in ("name", "thesis"):
                 if not base.get(k):
                     raise SystemExit(f"축에 {k}가 없다: {it.get('id', '?')}")
-            probs = forecast_validate(base)
+            same = [x for x in m["axes"] if x.get("id") != base.get("id") and x.get("direction")
+                     and (x.get("status") or "open") == "open" and base.get("driver")
+                     and str(x.get("driver") or "") == str(base.get("driver"))]
+            if same:
+                print(f"  · 같은 요인({base.get('driver')})의 열린 전망 {len(same)}건 — 반대 시장 판단을 먼저 본다:", file=sys.stderr)
+                for x in same:
+                    print(f"      {x['id']:<32} {x['direction']} conf {x.get('confidence')} · 시장 "
+                          f"{'·'.join(sorted(_forecast_markets(x))) or '?'}", file=sys.stderr)
+            elif not base.get("driver"):
+                print("  ※ 요인(driver)이 없다 — `axis-tag --driver`로 달면 같은 요인의 반대 시장 전망이 여기 뜬다", file=sys.stderr)
+            probs = forecast_validate(base, m["axes"])
             if probs:
                 raise SystemExit(f"전망 {it.get('id')} 검증 실패:\n  - " + "\n  - ".join(probs))
             for b in base["beneficiaries"]:
                 b.setdefault("priced", None)
                 b.setdefault("market", _market_of(b.get("ticker")))
                 b.setdefault("in_universe", None)
-            base["updated"] = datetime.now(KST).strftime("%Y-%m-%d")
+            base["updated"] = _run_day().isoformat()
             cbn, why = created_before_news(base)
             base["created_before_news"] = cbn
             base["created_before_news_why"] = why
             m["axes"] = [x for x in m["axes"] if x["id"] != base["id"]] + [base]
+            for oid in base.get("conflicts_with") or []:          # 충돌은 양방향으로 남긴다
+                o = next((x for x in m["axes"] if x.get("id") == oid), None)
+                if o is not None and base["id"] not in (o.get("conflicts_with") or []):
+                    o.setdefault("conflicts_with", []).append(base["id"])
             print(f"{'갱신' if it.get('id') in by_id else '등록'}: 전망 {base['id']} "
                   f"{base['direction']} {base['horizon_weeks']}주 · "
                   f"{'선행' if cbn else ('뉴스 후' if cbn is False else '?')} ({why})")
@@ -626,7 +1001,7 @@ def cmd_forecast(a) -> int:
             raise SystemExit(f"status는 {FORECAST_STATUSES}")
         ax["status"] = a.status
         sc = ax.setdefault("score", {})
-        sc["judged"] = datetime.now(KST).strftime("%Y-%m-%d")
+        sc["judged"] = _run_day().isoformat()
         if a.excess is not None:
             sc["excess_pct"] = a.excess
         sc["note"] = a.note or sc.get("note", "")
@@ -719,7 +1094,7 @@ def priced_measure(axis_id: str, days: int = 20) -> dict:
         raise SystemExit(f"{axis_id}에 수혜 종목이 없다")
     wl = _read(HERE / "config" / "watchlist.json", {})
     bench = (wl.get("benchmarks") or {})
-    c = KisClient(svr="paper")
+    c = KisClient.for_mode()
     end = datetime.now(KST)
     start = (end - timedelta(days=days * 2 + 10))
 
@@ -772,7 +1147,7 @@ def priced_measure(axis_id: str, days: int = 20) -> dict:
                       if v["vs_bench"] is not None and v["vs_lead"] is not None
                       else f"20일 {v['ret20']:+.1f}%")
     # 축에 기록한다 — 측정일과 함께. 잰 것만 덮고 못 잰 것은 그대로 둔다.
-    today = datetime.now(KST).strftime("%Y-%m-%d")
+    today = _run_day().isoformat()
     for b in bens:
         v = out.get(b["ticker"])
         if v:
@@ -898,8 +1273,8 @@ def board(market: str, record: bool, quick: bool) -> int:
 
     m = _read(MAP, {"axes": []})
     state = _sector_state(m)
-    today = datetime.now(KST).strftime("%Y-%m-%d")
-    c = KisClient(svr="paper")
+    today = _run_day(market).isoformat()
+    c = KisClient.for_mode()
 
     try:
         rows, bench_name, bench = _fetch_board(c, market, quick)
@@ -1059,7 +1434,7 @@ def cmd_grade(a) -> int:
     if a.grade not in ("A", "B", "C", "—"):
         raise SystemExit("등급은 A·B·C 또는 —")
     s["grade"] = a.grade
-    s["updated"] = datetime.now(KST).strftime("%Y-%m-%d")
+    s["updated"] = _run_day().isoformat()
     if a.note:
         s["status"] = a.note
     if a.research:
@@ -1151,7 +1526,7 @@ def bridge(closed: str, record: bool = False, score: bool = False) -> int:
         print(f"{BRIDGE.name}에 links가 없다.", file=sys.stderr)
         return 2
     prep = "kr" if closed == "us" else "us"
-    c = KisClient(svr="paper")
+    c = KisClient.for_mode()
     try:
         closed_rows, cb_name, cb = _fetch_board(c, closed, quick=True)
     except KisError as e:
@@ -1202,7 +1577,7 @@ def bridge(closed: str, record: bool = False, score: bool = False) -> int:
 
 def _record_bridge(closed: str, prep: str, preds: list) -> None:
     BRIDGE_LOG.parent.mkdir(parents=True, exist_ok=True)
-    rec = {"date": datetime.now(KST).strftime("%Y-%m-%d"), "closed": closed,
+    rec = {"date": _run_day(prep).isoformat(), "closed": closed,
            "prep": prep, "preds": preds}
     with BRIDGE_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -1222,7 +1597,7 @@ def _score_bridge(c, closed: str, prep: str, by_key: dict) -> None:
     if not BRIDGE_LOG.exists():
         print("\n  (채점할 직전 예측이 없다 — 이번 run부터 --record로 쌓인다)")
         return
-    today = datetime.now(KST).strftime("%Y-%m-%d")
+    today = _run_day(prep).isoformat()
     prev = None
     for line in BRIDGE_LOG.read_text(encoding="utf-8").splitlines():
         try:
@@ -1282,7 +1657,7 @@ def cycle(prep: str, note: str = "", sectors: str = "") -> int:
 
     m = _read(MAP, {"axes": [], "sectors": []})
     state = _sector_state(m)
-    today = datetime.now(KST).strftime("%Y-%m-%d")
+    today = _run_day(prep).isoformat()
 
     if sectors:                       # 이번 run의 관찰을 기록한다
         # ★ 코드는 이 시장 로스터에 있는 것만 받는다 — 2026-09-16 KR run이 `0003,0026,0027`을 적어
@@ -1321,7 +1696,7 @@ def cycle(prep: str, note: str = "", sectors: str = "") -> int:
     past = [r for r in hist if r.get("date") != today]
     if past:
         try:
-            rows, _, bench = _fetch_board(c := KisClient(svr="paper"), prep, quick=False)
+            rows, _, bench = _fetch_board(c := KisClient.for_mode(), prep, quick=False)
             act = {r["key"]: r for r in rows}
         except (KisError, SystemExit) as e:
             act, bench = {}, 0.0
@@ -1419,6 +1794,7 @@ def main() -> int:
     fc = sub.add_parser("forecast", help="전망 원장 — 축을 방향·기간·수혜 순서로")
     fcs = fc.add_subparsers(dest="sub", required=True)
     fl = fcs.add_parser("list"); fl.add_argument("--open", action="store_true")
+    fl.add_argument("--driver", default="", help="그 요인의 전망만(두 시장)")
     fa = fcs.add_parser("add"); fa.add_argument("--file", required=True)
     fa.add_argument("--replace-beneficiaries", action="store_true",
                     help="수혜 표를 병합하지 않고 파일의 것으로 교체한다(priced가 지워진다)")
@@ -1430,6 +1806,19 @@ def main() -> int:
     fs.add_argument("--out", default="")
     pr = sub.add_parser("priced", help="수혜 종목이 이미 값에 들어갔는지 — 20일 상대수익")
     pr.add_argument("--axis", required=True); pr.add_argument("--days", type=int, default=20)
+    ex = sub.add_parser("exposure", help="요인(driver)별 노출 — 양 시장 합산")
+    ex.add_argument("--by", choices=["driver"], default="driver")
+    ex.add_argument("--market", choices=["kr", "us"], default="kr", help="이번 run 시장(그 시장 잔고를 먼저 쓴다)")
+    ex.add_argument("--out", default="")
+    xm = sub.add_parser("xmarket", help="교차 시장 입력 — 반대 시장이 바꾼 전망·반증·대응 빈 시나리오·발화")
+    xm.add_argument("--market", choices=["kr", "us"], required=True, help="이번 run 시장")
+    xm.add_argument("--stamp", required=True, help="YYMMDD")
+    xm.add_argument("--since", default="", help="YYMMDD — 기본은 이 시장의 직전 run")
+    xm.add_argument("--out", default="")
+    at = sub.add_parser("axis-tag", help="축에 요인(driver)·충돌 축(conflicts_with)을 단다")
+    at.add_argument("--axis", required=True)
+    at.add_argument("--driver", default="")
+    at.add_argument("--conflicts-with", default="", help="쉼표로 여러 축 — 양방향으로 기록")
     ax = sub.add_parser("axis", help="축 조회 — 축 하나로 양 시장 종목을 꺼낸다")
     ax.add_argument("--axis", default="", help="축 id (예: ai_memory)")
     ax.add_argument("--ticker", default="", help="이 종목이 걸린 축을 찾는다")
@@ -1438,6 +1827,12 @@ def main() -> int:
 
     if args.cmd == "axis":
         return cmd_axis(args)
+    if args.cmd == "exposure":
+        return cmd_exposure(args)
+    if args.cmd == "axis-tag":
+        return cmd_axis_tag(args)
+    if args.cmd == "xmarket":
+        return cmd_xmarket(args)
     if args.cmd == "forecast":
         return cmd_forecast(args)
     if args.cmd == "priced":

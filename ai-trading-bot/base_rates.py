@@ -69,6 +69,25 @@ def fetch(client: KisClient, ticker: str, market: str, excd: str, days: int) -> 
     return rows
 
 
+def touch_prob(rows: list, level: float, horizon: int) -> dict:
+    """★ FB-261003-5 — 진입 기준가가 **기간 안에 실제로 닿을 확률**. rows는 최신순.
+
+    지금 가격 대비 기준가의 깊이(%)를 과거 모든 날에 대입해, 그날 종가에서 그 깊이만큼 아래가 이후 `horizon`거래일
+    안의 저가에 닿은 비율을 센다. 첫 피드백: 최근 45일 진입 다리 39개 중 7개만 발화했다(테스는 현재가보다 37.7% 아래)."""
+    asc = list(reversed([r for r in rows if r.get("close")]))
+    if len(asc) < horizon + 20 or level <= 0:
+        return {"prob": None, "n": 0}
+    now = float(asc[-1]["close"])
+    depth = level / now - 1
+    hit = n = 0
+    for i in range(len(asc) - horizon):
+        base = float(asc[i]["close"]) * (1 + depth)
+        lows = [float(r.get("low") or r["close"]) for r in asc[i + 1:i + 1 + horizon]]
+        n += 1
+        hit += min(lows) <= base
+    return {"prob": hit / n if n else None, "n": n, "depth_pct": depth * 100, "now": now, "horizon": horizon}
+
+
 def forward_returns(rows: list, idx: int) -> dict:
     """rows는 최신순. idx일 종가 기준 앞으로 n거래일 수익률(%)."""
     base = rows[idx]["close"]
@@ -143,9 +162,11 @@ def main() -> int:
     ap.add_argument("--days", type=int, default=500, help="조회 일수(달력 기준)")
     ap.add_argument("--up2", type=float, default=5.0, help="'급등' 판정 기준 (2거래일 누적 %%)")
     ap.add_argument("--out", default="", help="결과를 파일에도 쓴다(append) — dispatch 게이트가 읽는다")
+    ap.add_argument("--touch", type=float, default=None, help="진입 기준가 — 기간 안 도달 확률(reach_prob)을 낸다")
+    ap.add_argument("--horizon", type=int, default=20, help="--touch의 기간(거래일, 기본 20 — 논지 horizon_days를 넣어라)")
     args = ap.parse_args()
 
-    c = KisClient(svr="paper")
+    c = KisClient.for_mode()
     try:
         rows = fetch(c, args.ticker, args.market, args.excd, args.days)
     except KisError as e:
@@ -154,6 +175,16 @@ def main() -> int:
     if len(rows) < 60:
         print(f"일별 시세가 {len(rows)}행뿐 — 기저율을 낼 수 없다(최소 60행).", file=sys.stderr)
         return 2
+    if args.touch is not None:
+        tp = touch_prob(rows, args.touch, args.horizon)
+        line = (f"[도달 확률] {args.ticker} 기준가 {args.touch:,.2f} (현재 {tp.get('now', 0):,.2f} 대비 {tp.get('depth_pct', 0):+.1f}%) · "
+                f"{args.horizon}거래일 안 도달 {('%.0f%%' % (tp['prob'] * 100)) if tp.get('prob') is not None else '산정 불가'} "
+                f"(n={tp.get('n')}) → 논지 다리에 reach_prob {round(tp['prob'], 2) if tp.get('prob') is not None else 'null'} · reach_n {tp.get('n')}")
+        print(line)
+        if args.out:
+            Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+            with Path(args.out).open("a", encoding="utf-8") as f:
+                f.write(f"\n{line}\n")
     if args.out:
         import io as _io, contextlib as _ctx
         buf = _io.StringIO()

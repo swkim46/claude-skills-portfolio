@@ -218,6 +218,10 @@ def run(signal_path: Path, apply: bool) -> int:
     run_id = sig.get("run_id", signal_path.stem)
     # 냉각은 날짜로 센다 — 같은 날 두 시장을 도는 것으로 끝나면 안 된다.
     session_date = (sig.get("generated_at") or "")[:10] or datetime.now(KST).strftime("%Y-%m-%d")
+    _sm = re.match(r"signal_(\d{6})_(kr|us)", signal_path.name)
+    if _sm:                                   # 2026-10-14 — 시그널 스탬프의 세션 날짜(현지 거래일)가 우선
+        import sessions as _ss
+        session_date = _ss.session_iso(_sm.group(1), _sm.group(2))
 
     # 보유 종목 — 제외 판정에 필요하다. 스냅샷에서 읽는다(네트워크 불필요).
     # ★ 스냅샷이 없으면 **반영을 하지 않는다.** 예전에는 조용히 넘어갔고, 그 결과
@@ -246,8 +250,17 @@ def run(signal_path: Path, apply: bool) -> int:
     if snap:
         b = snap.get("balance") or {}
         equity = (b.get("cash") or 0) + sum(p.get("eval_amt", 0) or 0 for p in b.get("positions", []))
+        # ★ 2026-10-03 — 1주 가격 상한의 분모를 **두 계좌 합산 자산(원화)**으로. 다른 비중 규칙은 이미 합산이 분모인데
+        #   이 규칙만 국내 계좌 자산을 써서 고가 대형주(1주 100만 원대)가 시총 상위인데도 편입되지 못했다.
+        try:
+            import risk_guard as _rg
+            _pf = _rg.portfolio_equity("KR", b) if str(b.get("currency") or "KRW") == "KRW" else {}
+            if _pf.get("ok") and _pf.get("krw"):
+                equity = float(_pf["krw"])
+        except Exception:                                  # noqa: BLE001 — 실패하면 그 시장 자산(보수적)
+            pass
 
-    client = KisClient(svr="paper")
+    client = KisClient.for_mode()
     added, removed, rejected = [], [], []
 
     # ---------------------------------------------------------------- 편입
@@ -259,7 +272,36 @@ def run(signal_path: Path, apply: bool) -> int:
     if stale:
         print(f"  · 대기열 정리 {len(stale)}건 — 이미 유니버스에 있다: {', '.join(sorted(stale))}")
 
-    cands = sig.get("watchlist_candidates") or []
+    cands = list(sig.get("watchlist_candidates") or [])
+    proposed = {f"{(c.get('market') or ('US' if c.get('excd') else ('KR' if str(c.get('ticker', '')).isdigit() else 'US'))).upper()}:{c.get('ticker')}"
+                for c in cands}
+    # ★ FB-261003-3 ① 냉각을 채운 대기 후보는 **이번 run이 다시 제안하지 않아도** 관문을 재판정한다 — 예전엔 다시 제안돼야만
+    #   판정해서, 냉각을 마친 후보가 대기열에 남은 채 오르는 것을 지켜봤다(AMD·GEV·삼성전기).
+    for k, v in list(pending.items()):
+        if k in proposed or k in in_uni or len(set(v.get("dates") or [])) < rules["cooling_days"]:
+            continue
+        m_, t_ = k.split(":", 1)
+        cands.append({"ticker": t_, "market": m_, "name": v.get("name", ""), "axis": v.get("axis", ""),
+                      "excd": v.get("excd", ""), "why": "냉각을 채운 대기 후보 재판정", "_recheck": True})
+    # ★ FB-261003-3 ② 시총 상위(config/main_names.json)는 **감시 대상으로 자동 편입**한다 — 냉각·run당 상한·유니버스 상한에서
+    #   빠지고 관문(시총·거래대금·플래그)은 그대로. 매수는 여전히 논지가 있어야 한다. "삼성전자 같은 메인 종목을 못 잡는 게
+    #   말이 안 된다"(사용자 10-02) — 감시 밖이면 논지조차 못 선다.
+    try:
+        mn = json.loads((HERE / "config" / "main_names.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        mn = {}
+    for m_ in ("KR", "US"):
+        for r in mn.get(m_) or []:
+            k = f"{m_}:{r.get('ticker')}"
+            if r.get("ticker") and k not in in_uni and k not in proposed:
+                cands.append({"ticker": r["ticker"], "market": m_, "name": r.get("name", ""), "excd": r.get("excd", ""),
+                              "axis": "", "why": "시총 상위(main_names) — 감시 자동 편입", "_main": True})
+    _seen_c, _uniq = set(), []
+    for c in cands:                                   # 같은 종목이 제안·재판정·시총 상위로 겹치면 한 번만 본다
+        _m = (c.get("market") or ("US" if c.get("excd") else ("KR" if str(c.get("ticker", "")).isdigit() else "US"))).upper()
+        if (_m, c.get("ticker")) not in _seen_c:
+            _seen_c.add((_m, c.get("ticker"))); _uniq.append(c)
+    cands = _uniq
     for c in cands:
         ticker = c.get("ticker", "")
         # ★ 시장 추론: 명시값 > 거래소 코드 > **티커 모양**(6자리 숫자 = KR). 예전엔 둘 다 없으면 KR로 떨어져
@@ -283,10 +325,13 @@ def run(signal_path: Path, apply: bool) -> int:
         if bad:
             rej(f"금지 패턴 '{bad}'")
             continue
-        if len(cur) >= rules["max_universe"].get(market, 99):
-            rej(f"유니버스 상한 {rules['max_universe'][market]}종목 도달")
+        is_main = bool(c.get("_main"))
+        main_set = {r.get("ticker") for r in (mn.get(market) or [])}
+        non_main = [e for e in cur if e.get("source") != "main_names" and e.get("ticker") not in main_set]
+        if not is_main and len(non_main) >= rules["max_universe"].get(market, 99):
+            rej(f"유니버스 상한 {rules['max_universe'][market]}종목 도달(시총 상위 편입분은 세지 않는다)")
             continue
-        if len([a for a in added if a["market"] == market]) >= rules["max_adds_per_run"]:
+        if not is_main and len([a for a in added if a["market"] == market and not a.get("main")]) >= rules["max_adds_per_run"]:
             rej(f"이번 run 편입 상한 {rules['max_adds_per_run']}건 도달")
             continue
 
@@ -301,14 +346,15 @@ def run(signal_path: Path, apply: bool) -> int:
         # 펌핑 표적이 아니다)과 금액 상한이고, 냉각은 속도를 늦추고 사람이 대시보드에서
         # 볼 시간을 벌 뿐이다.
         seen = set(pending.get(key, {}).get("dates", []))
-        seen.add(session_date)
+        if not c.get("_recheck"):
+            seen.add(session_date)                 # 재판정은 제안이 아니다 — 날짜를 늘리지 않는다
         runs = sorted(set(pending.get(key, {}).get("runs", [])) | {run_id})
         prev_check = (pending.get(key) or {}).get("last_check")
         pending[key] = {"dates": sorted(seen), "runs": runs, "name": name,
                         "axis": c.get("axis", ""), "excd": c.get("excd", "")}
         if prev_check:
             pending[key]["last_check"] = prev_check
-        if len(seen) < rules["cooling_days"]:
+        if not is_main and len(seen) < rules["cooling_days"]:
             rej(f"냉각 중 — 서로 다른 {len(seen)}/{rules['cooling_days']}일 제안됨")
             continue
 
@@ -342,14 +388,16 @@ def run(signal_path: Path, apply: bool) -> int:
             continue
 
         entry = {"ticker": ticker, "name": name,
-                 "added": datetime.now(KST).strftime("%Y-%m-%d"),
+                 "added": session_date,
                  "why": c.get("why", ""), "axis": c.get("axis", ""),
                  "aliases": c.get("aliases") or ([name] if name else []),
                  "added_by": "universe_apply", "run_id": run_id,
                  "gates": {k: v for k, v in info.items() if k != "price"}}
         if c.get("excd"):
             entry["excd"] = c["excd"]
-        added.append({"market": market, "entry": entry, "price": info["price"]})
+        if is_main:
+            entry["source"] = "main_names"
+        added.append({"market": market, "entry": entry, "price": info["price"], "main": is_main})
         pending.pop(key, None)
 
     # ---------------------------------------------------------------- 제외

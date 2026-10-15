@@ -125,7 +125,14 @@ def zones(points: list, tol_pct: float = 1.5) -> list:
     for z in out:
         z["touches"] = len(z["prices"])
         z["price"] = round(z["price"], 2)
+        # 구간의 위·아래 끝(2026-10-13 차트스쿨 01 반영) — 반응한 저가들은 조금씩 달라 평균 한 값이 아니라 띠로 쓴다.
+        #   진입은 윗선(hi)에서 닿고, 손절은 아랫선(lo) 아래에 건다(theses_levels.md · theses.leg_problems).
+        z["lo"], z["hi"] = round(min(z["prices"]), 2), round(max(z["prices"]), 2)
     return out
+
+
+def _fmt(v: float) -> str:
+    return f"{v:,.2f}".rstrip("0").rstrip(".")
 
 
 def support_resistance(rows: list, span: int = 3, tol_pct: float = 1.5) -> dict:
@@ -136,13 +143,13 @@ def support_resistance(rows: list, span: int = 3, tol_pct: float = 1.5) -> dict:
     res = [z for z in zones(highs, tol_pct) if z["price"] > cur and z["touches"] >= 2]
     out = {}
     for i, z in enumerate(sorted(sup, key=lambda x: -x["price"])[:2], 1):
-        out[f"support_{i}"] = {"price": z["price"],
+        out[f"support_{i}"] = {"price": z["price"], "lo": z["lo"], "hi": z["hi"],
                                "basis": f"{i}차 지지 — 스윙 저점 {z['touches']}회 "
-                                        f"({', '.join(sorted(z['dates'])[-2:])})"}
+                                        f"({', '.join(sorted(z['dates'])[-2:])}) · 구간 {_fmt(z['lo'])}~{_fmt(z['hi'])}"}
     for i, z in enumerate(sorted(res, key=lambda x: x["price"])[:2], 1):
-        out[f"resistance_{i}"] = {"price": z["price"],
+        out[f"resistance_{i}"] = {"price": z["price"], "lo": z["lo"], "hi": z["hi"],
                                   "basis": f"{i}차 저항 — 스윙 고점 {z['touches']}회 "
-                                           f"({', '.join(sorted(z['dates'])[-2:])})"}
+                                           f"({', '.join(sorted(z['dates'])[-2:])}) · 구간 {_fmt(z['lo'])}~{_fmt(z['hi'])}"}
     return out
 
 
@@ -214,7 +221,7 @@ def main() -> int:
     ap.add_argument("--excd", default="NAS", help="해외 거래소 코드 (NAS·NYS·AMS)")
     args = ap.parse_args()
 
-    c = KisClient(svr="paper")
+    c = KisClient.for_mode()
     end = datetime.now(KST)
     start = end - timedelta(days=args.days)
     try:

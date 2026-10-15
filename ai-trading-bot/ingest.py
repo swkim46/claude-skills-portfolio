@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import dart_feed
-from kis_client import KisClient, KisError, quote_excd, us_buying_power
+from kis_client import KisClient, KisError, quote_excd, us_buying_power, balance_for, same_account
 
 HERE = Path(__file__).parent
 CONFIG_DIR = HERE / "config"
@@ -92,7 +92,8 @@ def soft_alerts(positions: list, limits: dict) -> list:
 
 
 def prev_equity(market: str):
-    """직전 기록된 equity — 당일 손익률(서킷브레이커 입력)을 계산하기 위해."""
+    """직전 기록된 equity — 당일 손익률(서킷브레이커 입력)을 계산하기 위해.
+    ★ 같은 계좌 계열 행만(2026-10-15) — 실계좌 첫 미국 run이 모의 미국 자산(약 $100k)을 전일 값으로 읽으면 당일 −100%로 차단기가 걸린다."""
     if not EQUITY_PATH.exists():
         return None
     for line in reversed(EQUITY_PATH.read_text(encoding="utf-8").splitlines()):
@@ -102,7 +103,7 @@ def prev_equity(market: str):
             row = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if row.get("market") == market:
+        if row.get("market") == market and same_account(row):
             return row.get("equity")
     return None
 
@@ -129,6 +130,7 @@ def collect_prices(client: KisClient, market: str, watchlist: dict, positions: l
                     ticker, excd=quote_excd(meta.get("excd")))
             prices[ticker] = {
                 "price": q["price"], "change_pct": q["change_pct"],
+                "prev_close": q.get("prev_close"),     # 전일 종가 — 지지 구간 종가 이탈 판정(support_break · 2026-10-14)
                 # 종목명은 워치리스트가 원본이다 — 국내 시세 TR은 종목명을 주지 않는다.
                 "name": meta.get("name") or q.get("name", ""),
                 "sector": q.get("sector", ""),
@@ -325,22 +327,99 @@ def link_hop(news_path: str, watchlist: dict, axes: list, status: dict = None) -
     return "\n".join(out) + "\n"
 
 
-def _fetch_text(url: str) -> tuple:
-    """HTML → 본문 텍스트(거칠게). 반환 (텍스트, 오류)."""
+PDF_MAX_BYTES = 20_000_000
+PDF_TIMEOUT = 60
+# 브라우저를 흉내 낸 UA를 막고 **용도를 밝힌 UA**를 요구하는 기관(sec.gov 공정접근 정책 — 세상공부 fetch_article.py
+# 2026-09-28 실측: 브라우저 UA 403 · 아래 UA 200). 새로 403이 나는 기관이 있으면 도메인만 보탠다.
+UA_BROWSER = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+UA_DECLARED = "personal-research-notes (non-commercial; ai-trading-bot fetch.py)"
+DECLARED_UA_HOSTS = ("sec.gov",)
+
+
+def _ua_for(url: str) -> str:
+    from urllib.parse import urlparse
+    host = (urlparse(url).hostname or "").lower()
+    return UA_DECLARED if any(host == h or host.endswith("." + h) for h in DECLARED_UA_HOSTS) else UA_BROWSER
+
+
+def _looks_pdf_url(url: str) -> bool:
+    return url.lower().split("?")[0].split("#")[0].endswith(".pdf")
+
+
+def is_pdf(raw: bytes, ctype: str, url: str) -> bool:
+    """매직바이트가 1순위 — 서버가 octet-stream·text/html로 잘못 내보내는 경우가 있다."""
+    return raw[:5] == b"%PDF-" or ctype == "application/pdf" or _looks_pdf_url(url)
+
+
+def pdf_text(raw: bytes) -> tuple:
+    """PDF 바이트 → (본문, 쪽수, 오류). 텍스트 층이 없으면(스캔 이미지) 본문 '' + 오류.
+
+    ★ 2026-10-02: 리서치 보조 작업자가 PDF 주소를 WebFetch로 열어 **사용자 화면에 다운로드 카드**가 떴고,
+    본문은 '깨진 PDF'라며 못 읽었다(09-24~10-02 16회 전부 실패). PDF는 여기서 끝낸다 — WebFetch·브라우저 금지.
+    """
+    import io as _io
+    try:
+        import pypdf
+    except ImportError:
+        return "", 0, "pypdf 없음 — python3 -m pip install pypdf"
+    try:
+        r = pypdf.PdfReader(_io.BytesIO(raw))
+        if getattr(r, "is_encrypted", False):
+            r.decrypt("")
+        pages = [(pg.extract_text() or "") for pg in r.pages]
+    except Exception as e:                      # noqa: BLE001 — 파싱 실패도 '못 받았다'로 적는다
+        return "", 0, f"PDF 파싱 실패 ({type(e).__name__}: {str(e)[:60]})"
+    body = re.sub(r"\n\s*\n+", "\n", "\n".join(pages)).strip()
+    if len(body) < 200:
+        return "", len(pages), f"PDF 본문 없음(스캔 이미지 {len(pages)}쪽) — 브라우저로 재시도하지 말 것"
+    return body, len(pages), ""
+
+
+def _fetch_text_meta(url: str) -> tuple:
+    """(본문, 오류, {kind: pdf|html, pages, ctype}). HTML은 거칠게 본문만, PDF는 pypdf로 텍스트를 뽑는다."""
     import urllib.request, html as _html
+    meta = {"kind": "pdf" if _looks_pdf_url(url) else "html", "pages": 0, "ctype": ""}
     req = urllib.request.Request(url, headers={
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "User-Agent": _ua_for(url),
+        "Accept": "text/html,application/xhtml+xml,application/pdf,*/*;q=0.8",
         "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.7"})
     try:
-        with urllib.request.urlopen(req, timeout=LINK_HOP_TIMEOUT) as r:
-            raw = r.read(600_000)
+        with urllib.request.urlopen(req, timeout=PDF_TIMEOUT if meta["kind"] == "pdf" else LINK_HOP_TIMEOUT) as r:
+            ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            meta["ctype"] = ctype
+            raw = r.read(PDF_MAX_BYTES if (meta["kind"] == "pdf" or ctype == "application/pdf") else 600_000)
     except Exception as e:                      # noqa: BLE001 — 어떤 실패든 '못 받았다'로 적는다
-        return "", f"{type(e).__name__}: {str(e)[:80]}"
+        err = f"{type(e).__name__}: {str(e)[:80]}"
+        # PDF는 정적 문서라 아카이브 사본이 같은 문서다 — 스크립트를 막는 기관(ERCOT 403, 2026-10-03 실측)은
+        # Wayback `id_`(원본 그대로)로 한 번 더 묻는다. HTML 기사는 당일 사본이 없고 내용이 바뀌므로 하지 않는다.
+        code = getattr(e, "code", 0)
+        if meta["kind"] == "pdf" and code in (401, 403, 429):
+            from datetime import datetime as _dt
+            wb = f"https://web.archive.org/web/{_dt.now().year}id_/{url}"
+            try:
+                # Wayback은 파이썬이 브라우저를 흉내 내면 봇으로 막는다(429, 2026-10-03 실측) — 용도를 밝힌 UA로 묻는다.
+                with urllib.request.urlopen(urllib.request.Request(wb, headers={"User-Agent": UA_DECLARED}),
+                                            timeout=PDF_TIMEOUT) as r:
+                    raw = r.read(PDF_MAX_BYTES)
+                    meta["ctype"] = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                    meta["via"] = f"wayback ({r.geturl()[:80]})"
+                if raw[:2] == b"\x1f\x8b":
+                    import gzip as _gz
+                    raw = _gz.decompress(raw)
+            except Exception as e2:             # noqa: BLE001
+                return "", f"{err} · Wayback도 실패({type(e2).__name__})", meta
+        else:
+            return "", err, meta
+    if is_pdf(raw, meta["ctype"], url):
+        meta["kind"] = "pdf"
+        body, meta["pages"], err = pdf_text(raw)
+        return body, err, meta
+    meta["kind"] = "html"
     try:
         s = raw.decode("utf-8", errors="ignore")
     except Exception:
-        return "", "디코딩 실패"
+        return "", "디코딩 실패", meta
     # 네이버 기사는 본문이 #dic_area 안에 있다 — 있으면 그것만.
     m = re.search(r'id="dic_area"[^>]*>(.*?)</article>', s, re.S) or \
         re.search(r"<article[^>]*>(.*?)</article>", s, re.S)
@@ -349,11 +428,17 @@ def _fetch_text(url: str) -> tuple:
     body = re.sub(r"<br\s*/?>|</p>|</div>", "\n", body)
     body = re.sub(r"<[^>]+>", " ", body)
     body = _html.unescape(body)
-    body = re.sub(r"[ \t ]+", " ", body)
+    body = re.sub(r"[ \t\u3000]+", " ", body)
     body = re.sub(r"\n\s*\n+", "\n", body).strip()
     if len(body) < 200:
-        return "", f"본문 {len(body)}자 — 렌더링 필요하거나 차단"
-    return body, ""
+        return "", f"본문 {len(body)}자 — 렌더링 필요하거나 차단", meta
+    return body, "", meta
+
+
+def _fetch_text(url: str) -> tuple:
+    """HTML·PDF → 본문 텍스트. 반환 (텍스트, 오류) — 시그니처 유지(링크 한 홉·fetch.py가 쓴다)."""
+    body, err, _ = _fetch_text_meta(url)
+    return body, err
 
 
 def material_deficit(md_path: Path, news_status: dict, is_weekday: bool) -> str:
@@ -419,6 +504,10 @@ def calendar_from_material(md_path: Path, watchlist: dict, stamp: str) -> int:
                for e in cal["events"]}
     # 표의 달은 재료 스탬프의 달로 본다(주간 표는 월을 안 적는다). 스탬프 월보다 작은 날짜면 다음 달.
     y, mo = 2000 + int(stamp[:2]), int(stamp[2:4])
+    # 등록 날짜 = 이 run의 세션 날짜(현지 거래일 · 2026-10-14) — 시장은 재료 파일 이름에서
+    import sessions as _ss
+    _parts = md_path.stem.split("_")
+    _added = _ss.session_iso(stamp[:6], _parts[2] if len(_parts) > 2 else "kr")
     added = 0
     for line in txt.splitlines():
         m = RX_WEEKDAY.match(line.strip())
@@ -442,7 +531,7 @@ def calendar_from_material(md_path: Path, watchlist: dict, stamp: str) -> int:
                     cal["events"].append({"date": date, "event": ev, "kind": "실적",
                                           "key": f"{tk.lower()}_er_{date[2:].replace('-', '')}",
                                           "axis": "", "why": f"재료 주간 캘린더에서 자동 등록 ({stamp})",
-                                          "added": datetime.now(KST).strftime("%Y-%m-%d"),
+                                          "added": _added,
                                           "names": [tk]})
                     have.add((date, ev)); have_tk.add((date, tk)); added += 1
     if added:
@@ -638,40 +727,24 @@ def main() -> int:
     ap.add_argument("--days", type=int, default=1, help="뉴스레터 수집 창(직전 노트 이후 일수)")
     ap.add_argument("--real", action="store_true")
     ap.add_argument("--stamp", metavar="YYMMDD",
-                    help="산출물 파일명에 쓸 세션 날짜. 미국장은 KST 자정을 넘겨 "
-                         "한 run이 두 날짜로 갈라지므로 호출자가 고정해 넘긴다.")
+                    help="산출물 파일명에 쓸 세션 날짜(거래하는 세션의 현지 날짜). 없으면 현재 run 포인터 "
+                         "또는 sessions.session_stamp — stage.py capture가 고정해 넘긴다.")
     args = ap.parse_args()
 
     market = args.market.upper()
-    client = KisClient(svr="real" if args.real else "paper", allow_real=args.real)
+    # ★ 계좌는 `account_mode`가 정한다(2026-10-12 실계좌 전환) — 수집은 주문하지 않으므로 실계좌도 조회 전용으로 연다.
+    client = KisClient.for_mode()
+    if args.real and client.svr != "real":
+        print(f"      --real은 무시된다 — account_mode={client.mode} (config/limits.json)", file=sys.stderr)
     watchlist = _read_json(WATCHLIST_PATH, {}) or {}
 
     print(f"[1/4] 잔고 조회 ({market})")
-    if market == "KR":
-        balance = client.domestic_balance()
-        # ★ 합산 분모의 환율은 **이 run 시점** 값이어야 한다(2026-09-23). 예전엔 KR run이 반대편(미국) 스냅샷의
-        #   환율을 그대로 썼고, 그 값이 반나절 낡아 1,384.30 vs 당일 기준가 1,358.2(−1.89%)로 US북이 약 2.6M원
-        #   과대계상됐다. 조회 1회로 오늘 값을 같이 담는다 — 실패하면 없는 채로 두고(반대편 스냅샷 값으로 물러선다)
-        #   사유를 적는다.
-        try:
-            bp_fx = us_buying_power(client, watchlist)
-            if bp_fx.get("exchange_rate"):
-                balance["exchange_rate"] = bp_fx["exchange_rate"]
-                balance["exchange_rate_at"] = datetime.now(KST).isoformat()
-        except (KisError, KeyError, TypeError) as e:
-            print(f"      환율 조회 실패(반대편 스냅샷 값으로 물러선다): {type(e).__name__}", file=sys.stderr)
-    else:
-        balance = client.overseas_balance()
-        # 해외 예수금은 잔고 TR이 아니라 체결기준현재잔고 TR에서 읽는다.
-        # 실패하면 cash=None을 유지한다 — risk_guard가 매수를 보류한다.
-        # 해외 구매력 — journal과 같은 헬퍼를 쓴다(로직이 흩어지면 한쪽만 고쳐지는 사고가 난다).
-        bp = us_buying_power(client, watchlist)
-        balance["cash"] = bp["cash"]
-        balance["cash_field"] = bp["cash_field"]
-        balance["exchange_rate"] = bp["exchange_rate"]
-        balance["deposit_only"] = bp["deposit_only"]
-        if bp["error"]:
-            print(f"      구매력 조회 실패(매수 보류됨): {bp['error']}", file=sys.stderr)
+    # ★ 잔고는 `kis_client.balance_for` 하나로 잰다(2026-10-15 — 수집·저널·매도 전용 pass가 같은 것을 쓴다).
+    #   KR: 국내 잔고 + 이 시점 환율(합산 분모의 환율은 이 run 값이어야 한다 — 2026-09-23 반나절 낡은 환율로 US북 2.6M원 과대계상)
+    #   US: 해외 잔고 + 구매력(예수금이 아니다 · 실패하면 cash=None — risk_guard가 매수를 보류한다)
+    balance, bal_err = balance_for(client, market, watchlist)
+    if bal_err:
+        print(f"      {bal_err}" + (" (매수 보류됨)" if market != "KR" else ""), file=sys.stderr)
 
     positions = balance.get("positions", [])
     cash = balance.get("cash")
@@ -714,7 +787,10 @@ def main() -> int:
     prev = prev_equity(market)
     day_pnl_pct = round((equity - prev) / prev * 100, 3) if prev else None
 
-    stamp = f"{args.stamp or format(datetime.now(KST), '%y%m%d')}_{market.lower()}"
+    # 스탬프 = 거래하는 세션의 현지 날짜(2026-10-14 · `sessions.run_stamp` — 진행 중 run이면 그 스탬프)
+    import sessions as _ss
+    run_st = args.stamp or _ss.run_stamp(market.lower())
+    stamp = f"{run_st}_{market.lower()}"
     snap_path = DATA_DIR / f"snapshot_{stamp}.json"
     md_path = DATA_DIR / f"material_{stamp}.md"
 
@@ -729,6 +805,7 @@ def main() -> int:
         "generated_at": datetime.now(KST).isoformat(),
         "market": market,
         "svr": client.svr,
+        "account_mode": client.mode,
         "balance": balance,
         "prices": prices,
         "price_errors": errors,
@@ -748,7 +825,7 @@ def main() -> int:
 
     # 세상공부(사회·시장 읽기) + 링크 한 홉 — 둘 다 외부 입력이다.
     print("[+] 세상공부 · 링크 원문")
-    st_stamp = args.stamp or format(datetime.now(KST), "%y%m%d")
+    st_stamp = run_st
     ws = world_study_section(before_stamp=st_stamp)
     axes = (_read_json(HERE / "journal" / "market_map.json", {}) or {}).get("axes") or []
     hop_status = {}

@@ -4,11 +4,20 @@
 뉴스레터 노트는 같은 제도가 반복 등장한다(금산법·장기보유특별공제·상법 특별결의…).
 매번 처음부터 T1을 다시 찾으면 fact-check 시간의 대부분이 재작업이다.
 
+    python3 cache_claims.py extract 세상공부/세상공부_261006_노트_v1_0.md
+        → 노트의 `[AI]` 줄을 `_raw_sources/AI클레임_261006.md`로(형식 고정 · 손으로 만들지 말 것)
+    python3 cache_claims.py extract 세상공부/세상공부_261006_노트_v1_1.md --add 2,5
+        → 목록이 이미 있으면 목록에 없는 줄만 번호와 함께 보여준다. 보강으로 새로 넣은 줄만 골라 덧붙인다
+          (fact-check 교정으로 바뀐 줄은 이미 검증됐으니 덧붙이지 않는다)
+
     python3 cache_claims.py split _raw_sources/AI클레임_260831.md
         → 캐시 대조(A) / 신규 조달(B)로 갈라 `*_작업.md`로 저장
 
     python3 cache_claims.py add "금산법 10%룰" MATCH https://... --note "제24조 제1항 제3호"
     python3 cache_claims.py add "국민연금 목표비중" STALE https://... --volatile
+    python3 cache_claims.py add --batch _raw_sources/캐시등재_261006.jsonl
+        → 여러 건은 파일로 한 번에. 행마다 {"key","verdict","url","note","volatile"} — 셸 반복문·변수에 명령을
+          담는 방식은 zsh에서 죽는다(2026-10-06 `C="python3 cache_claims.py add"; $C …` 10건 command not found)
 
     python3 cache_claims.py keys        # 키의 변별력 점검(앵커 없음·약한 키)
     python3 cache_claims.py selftest    # 매칭 회귀 테스트
@@ -192,6 +201,94 @@ def claims_from(path):
     return out
 
 
+def extract_claims(text):
+    """노트 본문에서 `[AI]` 줄을 (카테고리, 소속 항목, 줄) 목록으로. 헤더(첫 `---` 앞)는 보지 않는다."""
+    body = text.split("\n---", 1)[1] if "\n---" in text else text
+    out, cat, parent = [], "", ""
+    for l in body.split("\n"):
+        if l.startswith("## "):
+            cat, parent = l[3:].strip(), ""
+            continue
+        if l.startswith("- "):
+            parent = l[2:].strip()
+        if "[AI]" in l:
+            claim = l.strip()
+            if claim.startswith("- "):
+                claim = claim[2:]
+            out.append((cat, "" if l.startswith("- ") else parent, claim))
+    return out
+
+
+def _claim_entry(n, cat, parent, claim):
+    s = "%d. **[%s]** %s\n" % (n, cat, claim)
+    if parent:
+        p = parent.replace("**", "")
+        s += "   - (소속 항목: %s)\n" % (p[:100] + "…" if len(p) > 100 else p)
+    return s + "\n"
+
+
+def cmd_extract(argv):
+    """노트의 `[AI]` 줄 → 클레임 목록 파일. 처음엔 전부 쓰고, 목록이 있으면 없는 줄만 보여 준다.
+
+    왜 도구인가: 이 단계가 손작업이라 회차마다 즉석 파이썬으로 목록을 만들고 고쳤다. 2026-10-06에는
+    보강 줄 3건을 덧붙이다 `**`를 정규식에 넘겨 `re.error`로 죽었다. 형식이 회차마다 달라
+    `claims_from`이 두 형식을 다 받게 된 것도 같은 원인이다. 여기서는 정규식 치환을 하지 않는다.
+    """
+    if not argv:
+        raise SystemExit("usage: extract <노트.md> [--out <목록.md>] [--add 1,3]")
+    note = argv[0]
+    m = re.match(r"^세상공부_(\d{6})_노트_(v\d+_\d+)\.md$", os.path.basename(note))
+    if not m:
+        raise SystemExit("노트 파일명이 `세상공부_YYMMDD_노트_vN_M.md`가 아니다: %s" % note)
+    day, ver = m.group(1), m.group(2)
+    out = argv[argv.index("--out") + 1] if "--out" in argv else \
+        os.path.join(HERE, "_raw_sources", "AI클레임_%s.md" % day)
+    claims = extract_claims(open(note, encoding="utf-8").read())
+    if not claims:
+        print("`[AI]` 0건 — fact-check를 건너뛰고 헤더에 그렇게 적을 것")
+        return
+    if not os.path.isfile(out):
+        with open(out, "w", encoding="utf-8") as f:
+            f.write("# [AI] 클레임 — 세상공부 %s 노트 %s\n\n" % (day, ver))
+            f.write("> 노트에서 `[AI]`(원문에 없어 내가 덧붙인 외부 사실)로 표시한 줄을 번호로 뽑은 것. 소속 항목은 맥락 확인용.\n")
+            f.write("> `[추정]`(인과·의도 해석)은 출처로 확정할 수 없어 검증 대상이 아니므로 뽑지 않았다"
+                    "(같은 줄에 섞인 `[추정]` 부분도 판정 대상 아님).\n")
+            f.write("> 노트 원본: `세상공부/%s`\n\n" % os.path.basename(note))
+            for i, (cat, parent, claim) in enumerate(claims, 1):
+                f.write(_claim_entry(i, cat, parent, claim))
+        print("클레임 %d건 → %s" % (len(claims), out))
+        return
+    have = claims_from(out)
+    ckey = lambda t: norm(t.replace("[AI]", "").replace("[추정]", ""))   # noqa: E731 — 라벨·문장부호 무시
+    have_n = {ckey(h) for h in have}
+    missing = [c for c in claims if ckey("**[%s]** %s" % (c[0], c[2])) not in have_n]
+    if "--add" not in argv:
+        print("목록 %d건 · 노트 `[AI]` %d줄 · 목록에 없는 줄 %d개" % (len(have), len(claims), len(missing)))
+        hs = [sig(h) for h in have]
+        for k, (cat, _, claim) in enumerate(missing, 1):
+            a = sig(claim)
+            near = max(((len(a & b) / max(1, min(len(a), len(b))), j) for j, b in enumerate(hs, 1)),
+                       default=(0, 0))
+            tag = "≈목록 %d번 교정본?" % near[1] if near[0] >= 0.5 else "새 줄?"
+            print("  [%d] %-14s (%s) %s" % (k, tag, cat, claim[:80]))
+        if missing:
+            print("\n→ 보강으로 새로 넣은 줄만 `--add 번호,…`로 덧붙인다. "
+                  "fact-check 교정으로 바뀐 줄은 이미 검증됐으므로 덧붙이지 않는다(목록·리포트 번호 유지)")
+        return
+    picks = [int(x) for x in argv[argv.index("--add") + 1].split(",") if x.strip()]
+    bad = [k for k in picks if not 1 <= k <= len(missing)]
+    if bad:
+        raise SystemExit("번호 %s가 범위(1～%d) 밖 — 먼저 `--add` 없이 돌려 번호를 볼 것" % (bad, len(missing)))
+    start = len(have) + 1
+    with open(out, "a", encoding="utf-8") as f:
+        f.write("\n> **%s 덧붙임** — `%s`에 새로 넣은 `[AI]` 줄 %d건. 위 1～%d번은 그대로 둔다.\n\n"
+                % (date.today().isoformat(), ver, len(picks), len(have)))
+        for j, k in enumerate(picks):
+            cat, parent, claim = missing[k - 1]
+            f.write(_claim_entry(start + j, cat, parent, claim))
+    print("추가 %d건(번호 %d～%d) → %s" % (len(picks), start, start + len(picks) - 1, out))
+
+
 def cmd_split(path):
     """캐시는 '건너뛰기'가 아니라 '웹 조회 없이 대조'다.
 
@@ -265,21 +362,45 @@ def cmd_split(path):
 
 
 def cmd_add(argv):
+    if argv[:1] == ["--batch"]:
+        return cmd_add_batch(argv[1])
     if len(argv) < 3:
-        raise SystemExit('usage: add "<용어>" <MATCH|MISMATCH|STALE> <URL> [--note "..."] [--volatile]')
+        raise SystemExit('usage: add "<용어>" <MATCH|MISMATCH|STALE> <URL> [--note "..."] [--volatile]\n'
+                         '       add --batch <jsonl>')
     key, verdict, url = argv[0], argv[1], argv[2]
     note = ""
     if "--note" in argv:
         note = argv[argv.index("--note") + 1]
     cache = load()
+    _add_one(cache, key, verdict, url, note, "--volatile" in argv)
+    save(cache)
+
+
+def cmd_add_batch(path):
+    """행마다 JSON 한 건 — {"key","verdict","url","note"?,"volatile"?}. 저장은 끝에 한 번."""
+    cache, n = load(), 0
+    for i, raw in enumerate(open(path, encoding="utf-8"), 1):
+        if not raw.strip():
+            continue
+        try:
+            r = json.loads(raw)
+            key, verdict, url = r["key"], r["verdict"], r["url"]
+        except (ValueError, KeyError) as e:
+            raise SystemExit("%s %d행을 못 읽음(%s) — 아무것도 저장하지 않았다" % (path, i, e))
+        _add_one(cache, key, verdict, url, r.get("note", ""), bool(r.get("volatile")))
+        n += 1
+    save(cache)
+    print("\n%d건 등재 → %s" % (n, CACHE))
+
+
+def _add_one(cache, key, verdict, url, note, volatile):
     cache[key] = {
         "verdict": verdict, "source": url, "note": note,
         "as_of": date.today().isoformat(),
-        "volatile": "--volatile" in argv,
+        "volatile": volatile,
         "tokens": sorted(sig(key + " " + note)),
     }
-    save(cache)
-    print("등재: %s (%s%s)" % (key, verdict, " · 시효" if cache[key]["volatile"] else ""))
+    print("등재: %s (%s%s)" % (key, verdict, " · 시효" if volatile else ""))
     # ★ 키의 변별력을 등재 시점에 알린다 — 나중에 오적중이나 미적중으로 드러나면 이미 늦다.
     kt = key_tokens(key)
     if not kt:
@@ -333,6 +454,13 @@ def cmd_selftest():
         bad += 0 if good else 1
         print("  %s %-28s %.2f (문턱 %.2f)  [%s]"
               % ("✓" if good else "✗", name, s, hit_threshold(key), key))
+    # extract — 카테고리·소속 항목 추적(2026-10-07 도구화)
+    fake = "# t\n> 머리 `[AI]`\n\n---\n\n## 거시·시장\n\n- **금리 상승** (10/6)\n    - 정의 = 무엇 `[AI]`\n    - 해석 `[추정]`\n- 단독 사실 `[AI]`\n"
+    ex = extract_claims(fake)
+    good = (len(ex) == 2 and ex[0] == ("거시·시장", "**금리 상승** (10/6)", "정의 = 무엇 `[AI]`")
+            and ex[1] == ("거시·시장", "", "단독 사실 `[AI]`"))
+    bad += 0 if good else 1
+    print("  %s extract 카테고리·소속 추적          %s" % ("✓" if good else "✗", ex))
     if stems("제도") != {"제도"}:
         print("  ✗ 과다절단 방지 — stems('제도')=%s" % sorted(stems("제도")))
         bad += 1
@@ -378,6 +506,8 @@ def main():
         cmd_split(sys.argv[2])
     elif cmd == "add":
         cmd_add(sys.argv[2:])
+    elif cmd == "extract":
+        cmd_extract(sys.argv[2:])
     elif cmd == "list":
         for k, v in sorted(load().items()):
             print("%-28s %-11s %s %s" % (k, v["verdict"], v["as_of"],

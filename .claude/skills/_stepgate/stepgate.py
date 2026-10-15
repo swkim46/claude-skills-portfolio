@@ -44,9 +44,17 @@ verdict 토큰: %TEMP%\\claude_stepgate\\<skill>.ledger 에 최신 1개(순서 �
   # ── 비동기 감사(T2/T3) ──
   stepgate.py enqueue      <skill> <cp> deliverable=<abspath> [dir=…]   # 감사 큐 적재 + 발사 프롬프트
   stepgate.py audit-judge  <reqid>                                      # 감사 패킷(lens) 출력
-  stepgate.py audit-judge  <reqid> --record subverdict=PASS|FAIL findings=… evidence=…
+  stepgate.py audit-judge  <reqid> --record subverdict=PASS|FAIL findings=… evidence=… [lenses=<id,…>]
   stepgate.py resolve      <skill> deliverable=<abspath>               # T3 사인오프 게이트(전 감사 PASS 확인)
   stepgate.py audit-status <skill>                                      # 활성 감사 PENDING/PASS/FAIL 집계
+  # ── 승격 원장(감사 지적 → 게이트) ──
+  stepgate.py findings <skill[,skill…]> [for=<대상 스킬>] [min=2]      # lens별 FAIL run 수 · 승격 대기
+  stepgate.py promoted <skill> lens=<id> into=<대상> [note=…]           # 게이트·기계 검사로 올렸음을 기록
+  stepgate.py rubric-add  <skill> <cp> spec=<json> [mode=async] [dry=1] # 봉인 cp에 문항 덧붙이기(열람 없이)
+  stepgate.py rubric-drop <skill> <cp> ids=<a,b,…> [dry=1]              # 봉인 cp에서 문항 빼기(열람 없이)
+    spec = {"observations":[{"id":…, "variants":[{"ask":…,"must":"Y"},{"ask":…,"must":"N"}]}, …]}
+    · 추가할 id가 이미 있거나 두 극성(Y·N)이 아니면 거부 · 병합본을 validate_cp로 검사한 뒤에만 기록
+    · 기록 전 `_<skill>_rubric_backup_YYMMDD[b].json` 백업 · 출력은 id·mode·백업 파일명뿐(정답지 내용 미출력)
 
 exit: PASS=0 · FAIL=1 · NEEDS-JUDGE/HOLD(보류)=2 · 사용오류=3.
 audit: 끝난 세션 JSONL을 *결정론 규칙*으로 스캔(모델 자의 해석 0) — 게이트 미호출(R1)·봉인 정답지
@@ -155,6 +163,19 @@ def run_criterion(c, args):
             type(e).__name__, str(e)[:160], c.get("check", ""))
 
 
+def _dir_fallback(p, args):
+    """상대 경로가 cwd 기준으로 없고 `dir=`가 있으면 그 폴더 기준 경로를 돌려준다.
+
+    ★ 2026-10-01: 셸 작업 폴더가 프로젝트 밖이라 `config/limits.json` 같은 상대 경로 기준이
+    0건으로 읽혀 dispatch 게이트가 산출물 결손 없이 FAIL했다. 판정은 바꾸지 않고
+    '어디서 찾느냐'만 보정한다(cwd에 있으면 그대로 cwd 기준).
+    """
+    d = (args.get("dir") or "").strip()
+    if not p or os.path.isabs(p) or not d:
+        return p
+    return os.path.join(d, p)
+
+
 def _run_criterion(c, args):
     kind = c.get("check", "")
     if kind == "files":
@@ -166,6 +187,9 @@ def _run_criterion(c, args):
         if err:
             return False, err
         files = [f for f in glob.glob(g) if os.path.isfile(f) and os.path.getsize(f) >= minb]
+        if not files and g and not os.path.isabs(g) and _dir_fallback(g, args) != g:
+            g = _dir_fallback(g, args)
+            files = [f for f in glob.glob(g) if os.path.isfile(f) and os.path.getsize(f) >= minb]
         return len(files) >= need, "files matched=%d (need>=%d, >=%dB)" % (len(files), need, minb)
     if kind == "contains":
         f = resolve(c.get("file", ""), args)
@@ -177,6 +201,8 @@ def _run_criterion(c, args):
         need, err = _int_field(c, args, "min", 1)
         if err:
             return False, err
+        if f and not os.path.isfile(f) and os.path.isfile(_dir_fallback(f, args)):
+            f = _dir_fallback(f, args)
         if not f or not os.path.isfile(f):
             return False, "file not found: %s" % f
         try:
@@ -188,6 +214,8 @@ def _run_criterion(c, args):
         return n >= need, "pattern hits=%d (need>=%d) file=%s" % (n, need, f)
     if kind == "exists":
         p = resolve(c.get("path", ""), args)
+        if p and not os.path.exists(p) and os.path.exists(_dir_fallback(p, args)):
+            p = _dir_fallback(p, args)
         if p and os.path.isdir(p):
             ok = len(os.listdir(p)) > 0
         elif p:
@@ -324,6 +352,17 @@ def _run_criterion(c, args):
             return False, "deliverable이 빈 파일이다: %s" % f
         ok = bool(re.search(pat, base))
         return ok, "deliverable 파일명 vN_M 형식=%s (pat<%s> name=%s)" % (ok, pat, base or "-")
+    if kind == "code_audit":
+        # ★ 2026-10-13 — 코드 편집 절차(skill-maintainer §2: 백업 → code_edit_check → 테스트)를 워커의 답이 아니라
+        #   디스크 기록으로 판정한다. 기준선 뒤 바뀐 `.py`마다 그 수정 뒤 통과한 검사 기록·같은 폴더 백업·테스트 완주를 본다.
+        #   PASS면 기준선을 지금 상태로 옮긴다(다음 편집부터 다시 센다).
+        sm = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                                          "skill-maintainer", "scripts"))
+        if sm not in sys.path:
+            sys.path.insert(0, sm)
+        import code_edit_audit as _cea
+        ok, text = _cea.audit(commit=True, quiet=True)
+        return ok, text.replace("\n", " | ")[:700]
     return False, "unknown check '%s'" % kind
 
 
@@ -400,7 +439,7 @@ OBS_KEYS = {"ask", "attest_must", "check", "file", "id", "minlen", "variants"}
 VAR_KEYS = {"ask", "must"}
 CRIT_KEYS = {"cell_min", "cell_pat", "check", "file", "glob", "max_run", "min",
              "min_distinct", "minbytes", "pat", "path", "raw_pat"}
-CHECK_KINDS = {"contains", "deliverable_name", "exists", "files", "xlsx_highlight",
+CHECK_KINDS = {"code_audit", "contains", "deliverable_name", "exists", "files", "xlsx_highlight",
                "xlsx_links", "xlsx_no_crammed_src"}
 
 
@@ -605,6 +644,48 @@ def load_audit_rubric(skill):
         return None
 
 
+# ---- 승격 원장 -------------------------------------------------------------------
+# 감사 지적은 감사 큐(임시 폴더 · clear로 지워짐)에만 남아, 같은 유형이 run마다 반복돼도 셀 수 없었다.
+# 그래서 감사 결과를 기록할 때마다 여기에 영구로 한 줄 남기고(`findings`로 집계), 게이트·기계 검사로
+# 올린 lens는 `promoted`로 표시한다 — 감사에서 반복해 잡히는 유형을 게이트로 올리는 근거 파일(2026-10-07).
+PROMO_LEDGER = os.environ.get("STEPGATE_PROMO_LEDGER") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "promotion_ledger.jsonl")
+
+
+def _promo_append(obj):
+    with open(PROMO_LEDGER, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def _promo_read():
+    out = []
+    if os.path.isfile(PROMO_LEDGER):
+        with open(PROMO_LEDGER, encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    try:
+                        out.append(json.loads(line))
+                    except ValueError:
+                        pass
+    return out
+
+
+def _active_lenses(cpr, deliverable=""):
+    """감사 대상 lens — `kind: reader`(읽는 사람용 · 2026-10-13 trade-run 노트)는 패킷·기록 허용 목록에서 뺀다(지우지 않고 남긴다).
+    `kind: order`(주문 근거 전용 · 2026-10-13 17:30 — 매매 근거는 배경보다 빡빡하게)는 산출물 이름에 `주문근거`가 있을 때만 넣는다.
+    산출물을 모르면(큐 유실 복구) 기록 허용 쪽은 넓게 — order도 받는다."""
+    name = os.path.basename(str(deliverable or ""))
+    order_ok = (not deliverable) or ("주문근거" in name)
+    return [L for L in (cpr or {}).get("lenses", [])
+            if L.get("kind") != "reader" and (L.get("kind") != "order" or order_ok)]
+
+
+def _audit_lens_ids(skill, cp, deliverable=""):
+    ar = load_audit_rubric(skill) or {}
+    return [L.get("id") for L in _active_lenses(ar.get(cp), deliverable) if L.get("id")]
+
+
 # 봉인 정답지를 가리키는 문자열인가. `audit_rubrics/`는 비봉인이라 제외한다.
 _RX_RUBRIC_BAK = re.compile(r"[_\-.]rubric[s]?[_\-.].*backup|backup.*[_\-.]rubric[s]?[_\-.]", re.I)
 # 셸로 파일을 읽는 흔한 수단. 이 목록에 없는 방법이 남는 것은 인정한다(탐지지 예방 아님).
@@ -679,12 +760,42 @@ def _enqueue(skill, cp, args):
     버전)**을 SUPERSEDED 처리(재빌드·버전상승 시 옛 FAIL/PENDING이 RESOLVE를 막지 않게) — 다른
     산출물 계열은 공존(서로 죽이지 않음). 계열 SUPERSEDE가 없으면 v3_1→v3_2처럼 파일명이 바뀔 때
     구버전 감사가 좀비로 누적돼 폴더 resolve를 계속 막던 문제를 근본 차단. deliverable= 필수."""
+    return _enqueue_ex(skill, cp, args)[0]
+
+
+DUP_WINDOW_SEC = 600    # 같은 내용의 산출물에 대한 감사가 이 안에 이미 떠 있으면 새로 띄우지 않는다
+
+
+def _content_sha(path):
+    try:
+        with open(path, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()[:16]
+    except OSError:
+        return ""
+
+
+def _enqueue_ex(skill, cp, args):
+    """(reqid, 중복 여부). ★ 2026-10-15 — 같은 cp·같은 **내용**(파일 바이트 해시)의 PENDING 감사가 10분 안에 있으면
+    그 reqid를 돌려주고 새로 띄우지 않는다. `deliv_hash`는 경로 해시라 내용 중복을 못 잡았다 — 10-14 미국 run은 같은 판정표에
+    감사 둘이 2분 간격으로 떠 회차를 두 번 먹었다."""
     deliverable = args.get("deliverable", "").strip()
     wf = _wf_key(skill, args)
     qp = queue_path(skill, wf)
     dh = deliv_hash(deliverable) if deliverable else ""
     ss = _series_stem(deliverable) if deliverable else ""
+    csha = _content_sha(deliverable) if deliverable else ""
     coll = read_queue_collapsed(qp)
+    if csha:
+        now = time.time()
+        for rid, o in coll.items():
+            if o.get("cp") != cp or o.get("status") != "PENDING" or o.get("content_sha") != csha:
+                continue
+            try:
+                t0 = time.mktime(time.strptime(str(o.get("ts_enq")), "%Y-%m-%d %H:%M:%S"))
+            except (ValueError, TypeError):
+                continue
+            if now - t0 <= DUP_WINDOW_SEC:
+                return rid, True
     for rid, o in coll.items():
         if o.get("cp") != cp or o.get("status") == "SUPERSEDED":
             continue
@@ -700,12 +811,29 @@ def _enqueue(skill, cp, args):
     # 지워도(같은 스킬 워크플로) audit-judge가 reqid만으로 엔트리를 복구해 결과를 기록하게(유실 방지).
     reqid = "%s__%s__%s__%d" % (skill, cp, wf, int(time.time() * 1000))
     obj = {"reqid": reqid, "skill": skill, "cp": cp,
-           "deliverable": deliverable, "deliv_hash": dh,
+           "deliverable": deliverable, "deliv_hash": dh, "content_sha": csha,
            "wfid": wf, "dir": args.get("dir", ""),
            "status": "PENDING", "subverdict": None, "findings": "", "evidence": "",
            "ts_enq": time.strftime("%Y-%m-%d %H:%M:%S"), "ts_done": None, "agent": None}
     append_queue(qp, obj)
-    return reqid
+    return reqid, False
+
+
+def _print_dup_block(skill, cp, reqid, deliverable):
+    print("GATE ENQUEUED [%s:%s] req=%s — 같은 내용의 이 산출물을 감사하는 에이전트가 이미 떠 있다(10분 안). "
+          "새로 띄우지 않는다 — 그 결과를 기다린다(회차를 두 번 먹지 않게 · 2026-10-15)." % (skill, cp, reqid))
+    print("  산출물: %s" % deliverable)
+
+
+def _findings_file_hint(entry):
+    """감사 결과 전문을 남길 경로 제안 — 작업 폴더에 data/run_evidence가 있으면 그 아래, 없으면 산출물 옆."""
+    deliv = entry.get("deliverable", "") or ""
+    stem = os.path.splitext(os.path.basename(deliv))[0] or "audit"
+    tag = time.strftime("%m%d_%H%M")
+    d = entry.get("dir", "") or ""
+    base = os.path.join(d, "data", "run_evidence") if d and os.path.isdir(os.path.join(d, "data", "run_evidence")) \
+        else (os.path.dirname(deliv) or ".")
+    return os.path.join(base, "audit_%s_%s.md" % (stem, tag))
 
 
 def _print_fire_block(skill, cp, reqid, deliverable):
@@ -718,7 +846,13 @@ def _print_fire_block(skill, cp, reqid, deliverable):
     print("1) `SG audit-judge %s` 로 감사 패킷(lens·directives)을 받는다." % reqid)
     print("2) 산출물을 실제로 열고 lens별로 위반을 *그대로 인용*(라인/셀좌표/캡션). 인용 못 하면 그 lens는 PASS.")
     print("3) needs_fetch lens는 링크를 실제 WebFetch해 수치 착지 확인.")
-    print("4) 종료: `SG audit-judge %s --record subverdict=PASS|FAIL findings=<위반요약> evidence=<핵심 인용>`" % reqid)
+    print("★ 전수 보고: 첫 위반에서 멈추지 말고 **모든 lens의 모든 위반**을 한 번에 찾아 결함 유형별로 묶어 "
+          "보고하라(같은 유형이 다른 행에도 있으면 그 행들까지). 회차마다 일부만 보고하면 수정·재감사가 끝없이 반복된다.")
+    print("4) 종료: `SG audit-judge %s --record subverdict=PASS|FAIL findings=<위반요약> evidence=<핵심 인용> "
+          "lenses=<위반 lens id,…> findings_file=<결과 전문 파일>`(FAIL이면 lenses 필수 — 승격 원장이 유형별로 반복을 센다)" % reqid)
+    print("5) 결과 전문(lens별 위반 전부·인용·행 번호)을 패킷이 제안하는 경로에 파일로 쓰고 findings_file=로 넘긴다 — "
+          "원장에는 400자만 남아 반복 유형을 못 센다(2026-10-15).")
+    print("6) 안전: 요청 헤더·URL·쿼리에 사용자 식별자(이메일·이름·계정)를 넣지 않는다 · 산출물·원장·작업 파일을 고치지 않는다(읽기만).")
     print("----- END FIRE -----")
 
 
@@ -1087,8 +1221,8 @@ def cmd_judge(skill, cp, kv_args):
         print("GATE PASS [%s:%s] (async floor — substance는 비동기 감사로 이관)" % (skill, cp))
         deliverable = args.get("deliverable", "").strip()
         if deliverable:
-            reqid = _enqueue(skill, cp, args)
-            _print_fire_block(skill, cp, reqid, deliverable)
+            reqid, dup = _enqueue_ex(skill, cp, args)
+            (_print_dup_block if dup else _print_fire_block)(skill, cp, reqid, deliverable)
         else:
             print(">>> [경고] deliverable= 미제출 → 비동기 감사 큐 적재 생략. "
                   "발행 직전 RESOLVE가 0건으로 FAIL 처리된다(deliverable=<abspath> 주고 재실행 권장).")
@@ -1387,8 +1521,8 @@ def cmd_enqueue(skill, cp, kv_args):
     if not deliverable:
         print("GATE ERROR: enqueue <skill> <cp> deliverable=<abspath> [dir=…] — deliverable 필수")
         sys.exit(3)
-    reqid = _enqueue(skill, cp, args)
-    _print_fire_block(skill, cp, reqid, deliverable)
+    reqid, dup = _enqueue_ex(skill, cp, args)
+    (_print_dup_block if dup else _print_fire_block)(skill, cp, reqid, deliverable)
 
 
 def cmd_audit_judge(a):
@@ -1443,38 +1577,92 @@ def cmd_audit_judge(a):
                           "  PASS를 기록하려면 그 파일에서 **그대로** 뽑은 20자 이상 문구를 내라."
                           % why)
                     sys.exit(3)
+        # ★ FAIL은 어느 lens인지 밝혀야 한다 — 승격 원장이 유형(lens)별로 run을 세어 반복을 찾는다.
+        lenses = [x.strip() for x in kv.get("lenses", "").split(",") if x.strip()]
+        valid = _audit_lens_ids(skill, cp, deliverable)
+        if sv == "FAIL" and valid:
+            if not lenses:
+                print("AUDIT-JUDGE ERROR: subverdict=FAIL엔 lenses=<위반 lens id,…> 필요 — 승격 원장이 "
+                      "유형별로 반복을 센다.\n  이 cp의 lens: %s" % ", ".join(valid))
+                sys.exit(3)
+            bad = [x for x in lenses if x not in valid]
+            if bad:
+                print("AUDIT-JUDGE ERROR: 없는 lens id %s — 이 cp의 lens: %s" % (bad, ", ".join(valid)))
+                sys.exit(3)
         # ★ 기록된 FAIL은 덮어쓸 수 없다. 큐가 append-only이고 읽을 때 마지막 줄만 접으므로,
         #   예전에는 FAIL 뒤에 PASS를 한 줄 더 쓰면 FAIL이 사라졌다. 수정했으면
         #   **새 vN_M으로 새 reqid를 받아 재감사**하는 것이 규약이다(같은 reqid 갱신이 아니다).
         cur = read_queue_collapsed(path).get(reqid) or {}
+        # ★ 대체된 감사(2026-10-15) — 같은 산출물이 다시 judge돼 이 요청이 SUPERSEDED가 된 뒤에 결과가 오면, 결과는 남기되
+        #   큐 상태는 SUPERSEDED 그대로(옛 FAIL이 되살아나 resolve를 막지 않게) · 승격 원장 행에 superseded 표시(회차로 세지 않게).
+        superseded = str(cur.get("status")) == "SUPERSEDED"
+        ffile = kv.get("findings_file", "").strip()
+        if ffile and not os.path.isfile(ffile):
+            print("AUDIT-JUDGE ERROR: findings_file=%s 이 없다 — 결과 전문을 먼저 파일로 써라." % ffile)
+            sys.exit(3)
         if str(cur.get("status")) == "FAIL" and sv == "PASS":
             print("AUDIT-JUDGE ERROR: 이 reqid는 이미 FAIL로 기록됐다 — PASS로 덮을 수 없다.\n"
                   "  산출물을 새 vN_M으로 고치고 그 cp를 다시 judge해 **새 감사**를 받아라.\n"
                   "  기존 위반: %s" % (str(cur.get("findings") or cur.get("evidence"))[:200]))
             sys.exit(3)
         upd = dict(entry)
-        upd["status"] = sv
+        upd["status"] = "SUPERSEDED" if superseded else sv
         upd["subverdict"] = sv
         upd["findings"] = kv.get("findings", "")
         upd["evidence"] = kv.get("evidence", "")
         upd["ts_done"] = time.strftime("%Y-%m-%d %H:%M:%S")
         upd["agent"] = "recorded"
+        if ffile:
+            upd["findings_file"] = os.path.abspath(ffile)
         append_queue(path, upd)
+        try:
+            # run 키 = 산출물 계열(버전 표기를 뺀 파일명) — 같은 run의 재감사는 한 번으로 센다.
+            row = {"type": "finding", "ts": upd["ts_done"], "skill": skill, "cp": cp,
+                   "run": _series_stem(deliverable) or entry.get("wfid") or reqid,
+                   "reqid": reqid, "status": sv, "lenses": lenses,
+                   "findings": kv.get("findings", "")[:400]}
+            if superseded:
+                row["superseded"] = True
+            if ffile:
+                row["findings_file"] = os.path.abspath(ffile)
+            _promo_append(row)
+        except OSError as e:
+            print("  [주의] 승격 원장 기록 실패(%s) — 감사 결과 자체는 기록됐다." % e)
+        if superseded:
+            print("AUDIT RECORD [%s:%s] req=%s → %s (대체된 요청 — 결과는 남기되 회차·해소 대상이 아니다)" % (skill, cp, reqid, sv))
+            sys.exit(0)
         print("AUDIT RECORD [%s:%s] req=%s → %s" % (skill, cp, reqid, sv))
         if sv == "FAIL":
-            print("  위반: %s" % kv.get("findings", "") or kv.get("evidence", ""))
+            print("  위반: %s" % (kv.get("findings", "") or kv.get("evidence", "")))
             sys.exit(1)
         sys.exit(0)
-    # packet 모드
+    _print_packet(skill, cp, deliverable, entry, reqid)
+
+
+def _preaudit_path(entry):
+    """모의 감사 결과 파일 — 작업 폴더에 data/run_evidence가 있으면 그 아래, 없으면 산출물 옆."""
+    deliv = entry.get("deliverable", "") or ""
+    stem = os.path.splitext(os.path.basename(deliv))[0] or "audit"
+    d = entry.get("dir", "") or ""
+    base = os.path.join(d, "data", "run_evidence") if d and os.path.isdir(os.path.join(d, "data", "run_evidence")) \
+        else (os.path.dirname(deliv) or ".")
+    return os.path.join(base, "preaudit_%s.md" % stem)
+
+
+def _print_packet(skill, cp, deliverable, entry, reqid, preview=False):
+    """감사 패킷(lens·directives) — 정식 감사(audit-judge)와 모의 감사(audit-packet-preview)가 같은 것을 받는다(2026-10-15)."""
     ar = load_audit_rubric(skill)
-    print("== AUDIT PACKET [%s:%s] req=%s ==" % (skill, cp, reqid))
+    if preview:
+        print("== AUDIT PACKET PREVIEW [%s:%s] — 모의 감사(큐에 없음 · 원장에 안 남는다 · --record 하지 않는다) ==" % (skill, cp))
+    else:
+        print("== AUDIT PACKET [%s:%s] req=%s ==" % (skill, cp, reqid))
     print("산출물: %s" % deliverable)
     if entry.get("dir"):
         print("작업 폴더: %s" % entry["dir"])
     if not ar or cp not in ar:
         print("[경고] audit_rubric 없음(_stepgate/audit_rubrics/%s.json[%s]) — 기본 빡빡 검수: "
               "스킬 가이드 전반을 산출물과 *그대로 인용* 대조, 인용 못 하면 PASS." % (skill, cp))
-    elif not (ar[cp].get("lenses") or []):
+    elif not _active_lenses(ar[cp], deliverable):
         # ★ cp는 있는데 렌즈가 0개면 감사자가 볼 것이 없다 — 그러면 **아무 검사도 없이
         #   PASS**가 나온다. "렌즈가 없다"는 통과가 아니라 **감사 정의 오류**다.
         print("AUDIT ERROR: audit_rubric[%s][%s]에 lens가 0개다 — 검사할 것이 없는 감사는 "
@@ -1484,12 +1672,62 @@ def cmd_audit_judge(a):
     else:
         cpr = ar[cp]
         print("아래 lens를 *각각* 판정하라. 규칙: 위반 라인/셀좌표/캡션을 *그대로 인용* 못 하면 그 lens는 PASS(추측 FAIL 무효).")
+        # 도메인 지시문(2026-10-15) — 산출물 파일 이름이 `domain_by_name`의 정규식(키)과 맞으면 '일상·실무 정보' 지시문을 그 도메인
+        #   문장으로 바꾼다. 매매 판정표에 "기업 공시 기준을 들이대지 마라"가 나가 공시·IR이 T1인 판정표에 틀린 기준이 걸렸다.
+        dom = next((t for k, t in (cpr.get("domain_by_name") or {}).items()
+                    if re.match(k, os.path.basename(deliverable or ""))), None)
         for d in cpr.get("global_directives", []):
+            if dom and "일상·실무 정보" in d:
+                d = dom
             print("  ※ %s" % d)
-        for L in cpr.get("lenses", []):
+        print("  ※ 안전: 요청 헤더·URL·쿼리에 사용자 식별자(이메일·이름·계정)를 넣지 않는다(SEC 등 User-Agent도 일반 문자열) · "
+              "산출물·원장·작업 파일을 고치지 않는다 — 감사자는 읽기만 한다.")
+        basis = ""
+        if (deliverable or "").endswith("_판정.md"):
+            cand = deliverable[:-len("_판정.md")] + ".md"
+            basis = cand if os.path.isfile(cand) else ""
+        if basis:
+            print("  ※ 판정 기준 고정본: %s — 판정 행의 '원 문구'는 이 파일과 대조한다(덧붙임 절의 번호도 포함)." % basis)
+        try:
+            with open(deliverable, encoding="utf-8", errors="ignore") as fh:
+                has_scope = "PROPAGATE SCOPE" in fh.read()
+        except (OSError, TypeError):
+            has_scope = False
+        if has_scope:
+            print("  ※ 교정 전파 도구가 훑은 파일 목록은 산출물의 `PROPAGATE SCOPE` 줄에 있다 — 범위를 좁히는 목록이 아니다. "
+                  "그 밖의 사본에 옛 값이 있으면 그것도 위반으로 짚는다.")
+            print("  ※ 거래 기록(`journal/trades_*.json`)은 보낸 주문의 기록이라 고치지 않는다 — 옛 문구가 남은 행에 `corrections_applied`"
+                  "(교정 id·옛 문구·새 문구)가 붙어 있으면 그 사본은 전파된 것이다. 그 표시가 없는 행만 위반으로 짚는다(2026-10-15).")
+        print("  ※ 결과 전문 파일(제안 경로): %s → --record findings_file=<경로>" % _findings_file_hint(entry))
+        act = _active_lenses(cpr, deliverable)
+        n_reader = sum(1 for L in cpr.get("lenses", []) if L.get("kind") == "reader")
+        if n_reader:
+            print("  ※ 읽는 사람용 lens %d개는 이 감사의 대상이 아니다(kind=reader) — 아래 lens만 본다." % n_reader)
+        if any(L.get("kind") == "order" for L in act):
+            print("  ※ 주문 근거 판정표다 — 주문 전용 lens(kind=order)까지 본다. 이 결과로 판정표를 재채점해 체결된 매수의 근거가 "
+                  "무너지면 소급(되돌림 매도)된다 — 지적마다 판정표 행(L…)을 짚어라.")
+        for L in act:
             nf = " [needs_fetch: 링크 실제 WebFetch]" if L.get("needs_fetch") else ""
             print("  - lens[%s] (%s)%s: %s" % (L.get("id", "?"), L.get("severity", "?"), nf, L.get("ask", "")))
-    print("종료: SG audit-judge %s --record subverdict=PASS|FAIL findings=<위반 요약(없으면 빈)> evidence=<핵심 인용>" % reqid)
+    if preview:
+        print("종료(모의): 지적 전문을 %s 에 쓰고 끝낸다 — --record 하지 않는다. 지적은 유형 단위로 전 행에서 고친 뒤 정식 judge."
+              % _preaudit_path(entry))
+        return
+    print("종료: SG audit-judge %s --record subverdict=PASS|FAIL findings=<위반 요약(없으면 빈)> evidence=<핵심 인용> "
+          "lenses=<위반 lens id,…>(FAIL이면 필수) findings_file=<결과 전문 파일>" % reqid)
+
+
+def cmd_audit_packet_preview(skill, cp, kv_args):
+    """모의 감사 패킷 — 정식 `judge` 전에 같은 lens·지시문으로 다른 에이전트가 판정표를 먼저 본다(큐·원장 기록 없음 · 2026-10-15).
+    왜: '자기 lens 사전 점검'은 같은 문맥이 자기 글을 봐서 '지적 0'만 적었다. 정식 감사와 똑같은 패킷으로 다른 눈이 보게 한다."""
+    args = parse_kv(kv_args)
+    deliverable = args.get("deliverable", "").strip()
+    if not deliverable or not os.path.isfile(deliverable):
+        print("GATE ERROR: audit-packet-preview <skill> <cp> deliverable=<abspath> [dir=…] — 산출물 파일이 필요하다")
+        sys.exit(3)
+    entry = {"deliverable": deliverable, "dir": args.get("dir", "")}
+    _print_packet(skill, cp, deliverable, entry, "preview", preview=True)
+    sys.exit(0)
 
 
 def _onedrive_sync(folder):
@@ -1571,6 +1809,231 @@ def cmd_audit_status(skill, kv_args):
         print("  · %s cp=%s 산출물=%s" % (o.get("status"), o.get("cp"), o.get("deliverable")))
 
 
+def cmd_findings(skills, kv_args):
+    """lens별로 FAIL이 나온 서로 다른 run 수를 세고, 아직 게이트·기계 검사로 올리지 않은 것을 '승격 대기'로 낸다."""
+    args = parse_kv(kv_args)
+    target = args.get("for", "").strip()
+    try:
+        need = int(args.get("min", "2"))
+    except ValueError:
+        need = 2
+    wanted = [x for x in skills.split(",") if x]
+    recs = _promo_read()
+    runs, last, sample = {}, {}, {}
+    for r in recs:
+        if r.get("type") != "finding" or r.get("status") != "FAIL" or r.get("skill") not in wanted:
+            continue
+        for L in r.get("lenses") or []:
+            k = (r["skill"], L)
+            runs.setdefault(k, set()).add(r.get("run") or r.get("reqid"))
+            last[k] = max(last.get(k, ""), r.get("ts", ""))
+            sample[k] = r.get("findings", "")
+    done = {}
+    for r in recs:
+        if r.get("type") != "promoted" or r.get("skill") not in wanted:
+            continue
+        into = str(r.get("into", ""))
+        # 원 스킬 자신의 게이트·기계 검사(`fact-check:verdict`·`fact-check:lint_verdict`)는 그 스킬을 부르는
+        # 모든 쪽에 걸리므로 어느 대상에서 보든 승격으로 친다. 다른 스킬의 게이트는 그 대상에서만.
+        if not target or into.startswith(r["skill"] + ":") or into.split(":")[0] == target:
+            done.setdefault((r["skill"], r.get("lens")), []).append(into)
+    print("FINDINGS [%s]%s — 원장 %s" % (",".join(wanted), (" for=" + target) if target else "", PROMO_LEDGER))
+    # 감사가 실제로 돌고 있는지 — 마지막 실제 기록(소급분 제외). 매 run 관측용 감사가 끊기면 원장이 말라 승격이 멈춘다.
+    tot, lastrec = {}, {}
+    for r in recs:
+        if r.get("type") == "finding" and r.get("skill") in wanted and r.get("reqid") != "backfill":
+            tot[r["skill"]] = tot.get(r["skill"], 0) + 1
+            if r.get("ts", "") >= lastrec.get(r["skill"], ("", ""))[0]:
+                lastrec[r["skill"]] = (r.get("ts", ""), r.get("run", ""))
+    for sk in wanted:
+        if sk in lastrec:
+            print("  마지막 감사 기록 [%s] %s · %s (실제 기록 %d건)" % (sk, lastrec[sk][0], lastrec[sk][1], tot[sk]))
+        else:
+            print("  마지막 감사 기록 [%s] 없음" % sk)
+    due = 0
+    for k in sorted(runs, key=lambda k: (-len(runs[k]), k)):
+        n = len(runs[k])
+        if k in done:
+            mark = "승격됨 → " + ", ".join(sorted(set(done[k])))
+        elif n >= need:
+            mark = "★ 승격 대기"
+            due += 1
+        else:
+            mark = "관찰"
+        print("  %-12s %-28s run %d · 최근 %s · %s" % (k[0], k[1], n, last[k][:10], mark))
+    print("승격 대기 %d건%s" % (due, " — skill-maintainer로 게이트(봉인 루브릭 문항)나 기계 검사에 올리고 "
+                                  "`promoted`로 기록할 것" if due else ""))
+    sys.exit(0)
+
+
+def cmd_promoted(skill, kv_args):
+    args = parse_kv(kv_args)
+    lens, into = args.get("lens", "").strip(), args.get("into", "").strip()
+    if not lens or not into:
+        print("GATE ERROR: promoted <skill> lens=<id> into=<대상 스킬:cp | 스킬:lint 등> [note=…]")
+        sys.exit(3)
+    _promo_append({"type": "promoted", "ts": time.strftime("%Y-%m-%d %H:%M:%S"), "skill": skill,
+                   "lens": lens, "into": into, "note": args.get("note", "")})
+    print("PROMOTED [%s] lens=%s → %s" % (skill, lens, into))
+    sys.exit(0)
+
+
+def _rubric_backup_path(skill):
+    """`_<skill>_rubric_backup_YYMMDD[b|c…].json` — 같은 날 백업이 있으면 덮지 않고 글자를 붙인다."""
+    base = os.path.join(os.path.dirname(RUBRIC_DIR), "_%s_rubric_backup_%s" % (skill, time.strftime("%y%m%d")))
+    p = base + ".json"
+    for suf in "bcdefghijklmnopqrstuvwxyz":
+        if not os.path.exists(p):
+            return p
+        p = base + suf + ".json"
+    print("GATE ERROR: 오늘 백업 이름이 모두 찼다 — 오래된 백업을 정리하라(cleanup_backups.py)")
+    sys.exit(3)
+
+
+def _rubric_write(skill, cp, rubric, dry):
+    """병합본을 검사한 뒤에만 기록한다. 기록 전 백업 · 임시 파일은 `.json`이 아닌 이름(R-ORPHAN·audit glob 보호)."""
+    validate_cp(skill, cp, rubric[cp])
+    if dry:
+        print("DRY-RUN OK [%s:%s] — 구조 검사 통과, 기록하지 않음" % (skill, cp))
+        return
+    import shutil
+    src = os.path.join(RUBRIC_DIR, skill + ".json")
+    bak = _rubric_backup_path(skill)
+    shutil.copy(src, bak)   # copy2는 원본의 옛 수정 시각을 복사해 백업 청소(--keep-days)가 오늘 백업을 묵은 것으로 본다
+    tmp = os.path.join(RUBRIC_DIR, ".%s.tmp" % skill)
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(rubric, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    os.replace(tmp, src)
+    print("   백업: %s" % os.path.basename(bak))
+
+
+def cmd_rubric_add(skill, cp, kv_args):
+    """봉인 cp에 관찰 항목을 **덧붙인다**(기존 항목은 읽어서 보여 주지도, 바꾸지도 않는다).
+
+    ★ 왜 엔진 명령인가: 유지보수자가 문항을 올리려고 봉인 루브릭을 Read·셸로 열면 사후 감사 R2
+      (정답지 열람)에 걸리고, 같은 세션에 게이트 통과 기록이 있으면 그 게이트까지 무효가 된다.
+      엔진이 파일을 읽어 병합하면 정답지가 대화에 들어오지 않는다(2026-10-08 승격 작업에서 도입).
+    """
+    args = parse_kv(kv_args)
+    spec_p = args.get("spec", "").strip()
+    mode = args.get("mode", "").strip()
+    dry = str(args.get("dry", "")).strip() not in ("", "0")
+    if mode and mode != "async":
+        print("GATE ERROR: mode는 async만 지정할 수 있다(현재 '%s')" % mode)
+        sys.exit(3)
+    rubric = load_rubric(skill)
+    if rubric is None or cp not in rubric:
+        print("GATE ERROR: 루브릭·체크포인트 없음 — %s:%s" % (skill, cp))
+        sys.exit(3)
+    new, new_crit = [], []
+    if spec_p:
+        try:
+            with open(spec_p, encoding="utf-8") as fh:
+                spec = json.load(fh) or {}
+            new = spec.get("observations") or []
+            # 디스크 기준도 덧붙일 수 있다(2026-10-13) — 워커의 답과 무관하게 판정하는 검사. 기존 기준은 보여 주지 않는다.
+            new_crit = spec.get("criteria") or []
+        except (ValueError, OSError, AttributeError) as e:
+            print("GATE ERROR: spec 로드 실패 %s :: %s" % (spec_p, e))
+            sys.exit(3)
+    if not new and not new_crit and not mode:
+        print("GATE ERROR: 덧붙일 것이 없다 — spec=<json>(observations·criteria) 또는 mode=async")
+        sys.exit(3)
+    crit_errs = []
+    for i, c in enumerate(new_crit):
+        if not isinstance(c, dict) or c.get("check") not in CHECK_KINDS or set(c) - CRIT_KEYS:
+            crit_errs.append("criteria[%d]: check는 %s 중 하나·키는 %s 안에서" % (i, sorted(CHECK_KINDS), sorted(CRIT_KEYS)))
+    if crit_errs:
+        print("GATE ERROR [rubric-add %s:%s] %d건:" % (skill, cp, len(crit_errs)))
+        for e in crit_errs:
+            print("  · %s" % e)
+        sys.exit(3)
+    have_crit = [json.dumps(c, sort_keys=True) for c in rubric[cp].get("criteria") or []]
+    dup_crit = [c for c in new_crit if json.dumps(c, sort_keys=True) in have_crit]
+    if dup_crit:
+        print("GATE ERROR [rubric-add %s:%s] 같은 디스크 기준이 이미 있다 — %d건" % (skill, cp, len(dup_crit)))
+        sys.exit(3)
+    have = {o.get("id") for o in rubric[cp].get("observations") or [] if isinstance(o, dict)}
+    errs = []
+    for o in new:
+        oid = o.get("id") if isinstance(o, dict) else None
+        if not oid:
+            errs.append("id 없는 항목")
+            continue
+        if oid in have:
+            errs.append("'%s'는 이미 있다(덧붙이기 전용 — 바꾸려면 rubric-drop 후 다시)" % oid)
+        vs = o.get("variants") or []
+        musts = {str(v.get("must", "")).strip().upper() for v in vs if isinstance(v, dict)}
+        if len(vs) < 2 or not {"Y", "N"} <= musts:
+            errs.append("'%s': 극성 회전 — Y 정답 표현과 N 정답 표현 두 variants가 필요하다" % oid)
+    ids = [o.get("id") for o in new if isinstance(o, dict)]
+    dup = sorted({i for i in ids if ids.count(i) > 1})
+    if dup:
+        errs.append("spec 안에서 id 중복 %s" % dup)
+    if errs:
+        print("GATE ERROR [rubric-add %s:%s] %d건:" % (skill, cp, len(errs)))
+        for e in errs:
+            print("  · %s" % e)
+        sys.exit(3)
+    if new:
+        rubric[cp].setdefault("observations", []).extend(new)
+    if new_crit:
+        rubric[cp].setdefault("criteria", []).extend(new_crit)
+    if mode:
+        rubric[cp]["mode"] = mode
+    _rubric_write(skill, cp, rubric, dry)
+    print("RUBRIC-ADD [%s:%s] %s %d개 %s%s%s" % (skill, cp, "덧붙일 예정(dry)" if dry else "덧붙임",
+                                              len(new), ids,
+                                              (" · 디스크 기준 %d개(%s)" % (len(new_crit), ", ".join(
+                                                  c.get("check", "") for c in new_crit))) if new_crit else "",
+                                              (" · mode=%s" % mode) if mode else ""))
+    sys.exit(0)
+
+
+def cmd_rubric_drop(skill, cp, kv_args):
+    """봉인 cp에서 지정한 id의 항목을 뺀다(남은 항목은 보여 주지 않는다). 없는 id면 거부.
+
+    `crit=<부분 문자열,…>`(2026-10-13): 디스크 기준도 뺀다 — 기준의 JSON에 그 문자열이 들어 있는 것을 뺀다. 출력은 문자열마다
+    뺀 개수뿐이다(기준 내용은 보여 주지 않는다). 하나라도 0개면 아무것도 빼지 않고 거부(잘못 짚은 것이다).
+    """
+    args = parse_kv(kv_args)
+    want = [x.strip() for x in args.get("ids", "").split(",") if x.strip()]
+    crit_want = [x.strip() for x in args.get("crit", "").split(",") if x.strip()]
+    dry = str(args.get("dry", "")).strip() not in ("", "0")
+    if not want and not crit_want:
+        print("GATE ERROR: rubric-drop <skill> <cp> ids=<a,b,…> [crit=<부분 문자열,…>]")
+        sys.exit(3)
+    rubric = load_rubric(skill)
+    if rubric is None or cp not in rubric:
+        print("GATE ERROR: 루브릭·체크포인트 없음 — %s:%s" % (skill, cp))
+        sys.exit(3)
+    if crit_want:
+        crits = rubric[cp].get("criteria") or []
+        js = [json.dumps(c, ensure_ascii=False) for c in crits]
+        counts = {w: sum(1 for j in js if w in j) for w in crit_want}
+        zero = [w for w, n in counts.items() if n == 0]
+        if zero:
+            print("GATE ERROR [rubric-drop %s:%s] 맞는 디스크 기준이 없다 %s — 아무것도 빼지 않았다" % (skill, cp, zero))
+            sys.exit(3)
+        rubric[cp]["criteria"] = [c for c, j in zip(crits, js) if not any(w in j for w in crit_want)]
+        if not want:
+            _rubric_write(skill, cp, rubric, dry)
+            print("RUBRIC-DROP [%s:%s] 디스크 기준 %s %s" % (skill, cp, "뺄 예정(dry)" if dry else "뺌",
+                                                         " · ".join("%s %d개" % (w, n) for w, n in counts.items())))
+            sys.exit(0)
+    obs = rubric[cp].get("observations") or []
+    have = {o.get("id") for o in obs if isinstance(o, dict)}
+    missing = [i for i in want if i not in have]
+    if missing:
+        print("GATE ERROR [rubric-drop %s:%s] 없는 id %s — 아무것도 빼지 않았다" % (skill, cp, missing))
+        sys.exit(3)
+    rubric[cp]["observations"] = [o for o in obs if not (isinstance(o, dict) and o.get("id") in want)]
+    _rubric_write(skill, cp, rubric, dry)
+    print("RUBRIC-DROP [%s:%s] %s %d개 %s" % (skill, cp, "뺄 예정(dry)" if dry else "뺌", len(want), want))
+    sys.exit(0)
+
+
 def main():
     a = sys.argv[1:]
     if len(a) < 2:
@@ -1602,10 +2065,24 @@ def main():
         cmd_enqueue(skill, a[2], a[3:])
     elif cmd == "audit-judge":
         cmd_audit_judge(a[1:])
+    elif cmd == "audit-packet-preview":
+        if len(a) < 3:
+            print("GATE ERROR: audit-packet-preview <skill> <cp> deliverable=<abspath> [dir=…]")
+            sys.exit(3)
+        cmd_audit_packet_preview(skill, a[2], a[3:])
     elif cmd == "resolve":
         cmd_resolve(skill, a[2:])
     elif cmd == "audit-status":
         cmd_audit_status(skill, a[2:])
+    elif cmd == "findings":
+        cmd_findings(skill, a[2:])
+    elif cmd == "promoted":
+        cmd_promoted(skill, a[2:])
+    elif cmd in ("rubric-add", "rubric-drop"):
+        if len(a) < 3:
+            print("GATE ERROR: %s <skill> <cp> …" % cmd)
+            sys.exit(3)
+        (cmd_rubric_add if cmd == "rubric-add" else cmd_rubric_drop)(skill, a[2], a[3:])
     else:
         print("GATE ERROR: unknown cmd '%s'" % cmd)
         sys.exit(3)

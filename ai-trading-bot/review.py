@@ -25,7 +25,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from kis_client import KisClient, KisError
+from kis_client import KisClient, KisError, same_account
 
 HERE = Path(__file__).parent
 JOURNAL = HERE / "journal"
@@ -65,6 +65,8 @@ def trade_rows(market: str, session: str):
     stamp = session[2:].replace("-", "")
     p = JOURNAL / f"trades_{stamp}_{market.lower()}.json"
     if not p.exists():
+        if session >= "2026-10-14":
+            return None       # 전환일(현지 거래일 스탬프) 뒤에는 스탬프 = 세션 날짜 — 다음 날 파일은 다른 세션이다
         # ★ 미국 run은 KST 자정을 넘겨 다음 날짜 파일에 기록될 수 있다(9/15 run → `trades_260916_us.json`).
         #   다음 날 파일의 `signal_ref`/`approved_ref`가 이 세션 스탬프를 가리키면 그 파일이 이 세션 것이다.
         from datetime import datetime as _dt, timedelta as _td
@@ -96,7 +98,7 @@ def equity_rows(market: str) -> list:
             r = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if r.get("market") == market:
+        if r.get("market") == market and same_account(r):     # 지금 계좌 계열만(2026-10-15)
             rows.append(r)
     keep = {}
     for r in rows:                       # 같은 날 여러 기록이면 마지막만

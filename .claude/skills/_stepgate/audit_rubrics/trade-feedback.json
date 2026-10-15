@@ -1,0 +1,47 @@
+{
+  "propose": {
+    "deliverable_glob": "analysis/피드백_*.md",
+    "global_directives": [
+      "위반을 주장하려면 보고서의 해당 줄을 그대로 인용하라 — 인용 못 하면 그 렌즈는 PASS",
+      "판정은 보고서 안의 근거만으로 — 시장 결과를 새로 찾아 채점하지 마라"
+    ],
+    "lenses": [
+      {
+        "id": "case_not_type",
+        "severity": "high",
+        "cite_or_pass": true,
+        "ask": "제안이 사례(그 종목을 샀어야 했다)를 규칙으로 박았는가 — 고유명사를 다른 것으로 바꾸면 성립하지 않는 원인·변경 문장을 인용하라"
+      },
+      {
+        "id": "outcome_only_fix",
+        "severity": "high",
+        "cite_or_pass": true,
+        "ask": "결과(그 뒤 올랐다)만으로 결함 판정을 내린 행이 있는가 — 고점 전 단서 인용 없이 '결함'으로 적은 행을 인용하라(고점 전 기록이 아예 없는 커버리지 결함은 그 사실이 적혀 있으면 위반이 아니다)"
+      },
+      {
+        "id": "no_measurable_effect",
+        "severity": "medium",
+        "cite_or_pass": true,
+        "ask": "기대 효과가 지표·기준값·목표값으로 적히지 않았거나 검증일이 없는 제안이 있는가 — 그 제안 행을 인용하라"
+      },
+      {
+        "id": "counterexample_skipped",
+        "severity": "medium",
+        "cite_or_pass": true,
+        "ask": "반례 점검(그 규칙이 있었다면 손해를 봤을 종목)이 빠졌거나 형식만 있는 제안이 있는가 — 그 행을 인용하라"
+      },
+      {
+        "id": "safety_auto",
+        "severity": "high",
+        "cite_or_pass": true,
+        "ask": "안전장치(손절·집중·실전·자금)나 숫자 상수를 바꾸는 제안이 자동 적용으로 표시됐는가 — 그 행을 인용하라"
+      },
+      {
+        "id": "loss_price_only_verdict",
+        "severity": "high",
+        "cite_or_pass": true,
+        "ask": "§2-b에서 울린 시계(무효 조건 집행·기한 경과·전망 miss·손절·추적 다리 발화+동인) 없이 가격 하락·평가 손실만으로 '오판'을 준 행이 있는가 — 그 행을 인용하라. 손실을 손실 매매만 더해 집계한 줄(순실현이 아닌 것)도 인용하라"
+      }
+    ]
+  }
+}

@@ -134,10 +134,15 @@ def review(market: str, material: Path, stamp: str = None) -> int:
         print("\n  ★ 커버리지 이력을 읽지 못했으므로 **기록하지 않는다** — "
               "지금 쓰면 전 종목의 누적 미등장이 1로 리셋된다.", file=sys.stderr)
     elif stamp:
+        # 날짜 칸은 이 run의 **세션 날짜**(2026-10-14 · 현지 거래일) — 새벽에 돌린 미국 run도 그 세션 날짜로 남는다.
+        # 실제 기록 시각은 updated_kst에 따로 둔다.
+        import sessions as _ss
+        sess = _ss.session_iso(stamp, market)
+        now_kst = datetime.now(KST).isoformat(timespec="seconds")
         for key, hits, absent in rows:
             cov[key] = {"absent_runs": absent, "last_seen": (cov.get(key, {}).get("last_seen")
-                        if not hits else f"20{stamp[:2]}-{stamp[2:4]}-{stamp[4:6]}"),
-                        "updated": datetime.now(KST).isoformat()}
+                        if not hits else sess),
+                        "updated": sess, "updated_kst": now_kst}
         COVERAGE.parent.mkdir(parents=True, exist_ok=True)
         COVERAGE.write_text(json.dumps(cov, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"\n  커버리지 이력 기록: {COVERAGE.name}")

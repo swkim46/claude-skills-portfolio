@@ -3,8 +3,18 @@
  "_profile": "판단이 비율을 정한다 (2026-09-22) — 주식 비율·예약·크기는 상수가 아니라 시그널의 allocation(원장으로 이어받는 판단)과 제안의 size_why가 정하고, 판단한 비율에 못 미치면 risk_guard가 증분을 키워 채운다. 여기 남은 숫자는 전부 명분이 있는 것이다: 무결성(KILL·실전 래치·유니버스·long-only·MISMATCH·해시/30분) · 집행 역학(fill/전송) · 폭 강제(최소 건수·축 — 2026-09-16 사용자 결정) · 목표 여유(2026-09-21 사용자 결정) · 레버리지 상품 규칙. null = 그 검사 꺼짐.",
  "schema_version": "1.0",
  "halt_all": false,
- "_note_real": "★ 실전 계좌 래치. .env에 실전 키가 들어 있어도 이 값이 true가 아니면 kis_client가 실전 서버를 열지 않는다. 모의 검증을 통과하고 실계좌로 넘어가기로 결정했을 때만 사람이 직접 true로 바꿀 것. ★ 2026-09-23: 일일 주문 상한을 지웠다(사용자) — 모의 전제의 결정이다. 그래서 `real_trading_enabled`를 true로 바꾸면 `risk_guard`·`execute`가 **상한이 없는 한 run을 거부한다**(`real_latch_needs_cap`). 실전에서는 `daily_max_order_pct_of_equity`를 먼저 정할 것.",
+ "_note_account_mode": "★ 계좌 모드 하나로 모든 스크립트가 같은 계좌를 본다(2026-10-12 실계좌 전환 계획). paper = 모의계좌 · real_readonly = 실계좌를 읽기만(잔고·시세·체결조회 — 주문·정정·취소는 kis_client가 거부) · real = 실계좌 주문. real은 아래 real_trading_enabled도 true여야 열린다(두 값을 사람이 같이 바꾼다). 되돌리기: paper로 돌리면 모의로 돌아간다.",
+ "account_mode": "paper",
+ "_note_real": "★ 실전 계좌 래치. account_mode가 real이고 이 값이 true일 때만 kis_client가 실계좌 주문을 연다 — 사람이 직접 바꾼다. 2026-10-12 사용자 결정: 일일 상한 대신 **한 종목 한 번 주문 100만 원**(아래 order_cap)이 실전의 필수 상한이다 — order_cap이 없으면 risk_guard·execute가 실전 run을 거부한다(real_latch_needs_cap).",
  "real_trading_enabled": false,
+ "_note_order_cap": "2026-10-12 사용자 결정 — 매수 주문 1건(한 종목·한 번)의 금액 상한. 미국은 그날 환율로 원화 환산. 1주 값이 상한을 넘는 종목은 금액 상한 대신 한 번에 max_shares_when_price_over_cap주까지. 매도(손절·추적·회전)는 깎지 않는다 — 위험을 줄이는 주문이다. apply_in_paper=false면 모의 계좌에는 걸지 않는다(모의 자금 규모가 달라 전략이 왜곡된다). risk_guard가 승인 단계에서 깎고 execute가 전송 직전에 다시 막는다. 자금을 늘릴 때 이 값을 다시 정한다.",
+ "order_cap": {
+  "max_krw_per_order": 1000000,
+  "max_shares_when_price_over_cap": 2,
+  "apply_in_paper": false
+ },
+ "_note_real_shadow": "2026-10-12 사용자: \"실전 전환 직전까지 모의 매매를 계속하고 싶다\" — 조회 전용 주간 대신 그림자 점검. 모의 모드에서 이 값이 true면 journal.py --daily가 그 run의 모의 시그널을 실계좌 잔고·실계좌 규칙으로 risk_guard에 다시 넣어 data/run_evidence/real_shadow_<st>_<mkt>.md에 남긴다(real_probe.shadow · 주문·원장 쓰기 없음). 실전 전환 전 관문의 증거다.",
+ "real_shadow_check": true,
  "_note_leveraged": "★ 레버리지·인버스 ETF 규칙(2026-09-14 사용자 결정으로 허용). 막지 않고 **수익을 지키는 쪽으로 제한**한다: ① 일일 리셋 때문에 몇 주 들고 있으면 기초지수와 어긋나 횡보장에서 녹는다 → 논지 호흡 상한 `leveraged_max_horizon_days`(theses.py add가 거부) ② 3배면 같은 비중이 3배 베팅이다 → 종목당 상한을 배수로 나눈다(12%/3 = 4%) ③ 축 집중은 배수를 곱해 세고 인버스는 음수로 센다(SOXL 4% = 반도체 축 12%). null이면 그 규칙 꺼짐.",
  "leveraged_max_horizon_days": 10,
  "leveraged_cap_divide_by_factor": true,
@@ -21,6 +31,11 @@
   "max_weight_delta_per_day_pct": null,
   "forbidden_name_patterns": []
  },
+ "_note_fc_track1": "★ 주문 근거 검증(갈래 ①). 2026-10-13 낮 처음 판은 감사 PASS까지 주문을 기다렸으나(최대 7회), 같은 날 국내 run에서 감사 두 번이 배분 설명의 숫자만 짚는 사이 5시간이 지나 시그널이 302분 묵어 전부 거부됐다. 17:30 사용자: \"감사 완료하고 매매하는 건 너무 과하다 — 매매 관련 팩트체크는 배경보다 빡빡하게 감사하되 매매하고 나서 감사를 마무리하는 이전 구조로 · 7차는 길고 5차까지 · 매매 의사결정을 바꿔야 하는 감사 결과가 나오면 소급 적용.\" 그래서: 주문 전에는 판정표 기준으로만 결정(fc_track1.py decide --mode pre) → risk_guard(fc_track1_required: true)가 track1 없음·drop·UNVERIFIED_T1·판정표 MATCH(T1/T2) 근거 0인 매수를 거부 → 집행 → 감사(최대 fc_track1_max_rounds회 · FAIL마다 재채점) → decide --mode post가 재채점된 표로 체결된 매수의 근거가 무너졌으면 journal/audit_reversals.jsonl에 되돌림 매도 → 장중이면 같은 run(stops.py --send), 닫혔으면 다음 그 시장 run의 risk_guard가 자동으로 판다. false면 예전처럼 시그널의 근거 판정을 그대로 믿는다.",
+ "fc_track1_required": true,
+ "fc_track1_max_rounds": 5,
+ "_note_note_sources": "노트 필수 요소의 출처 칸(제안 basis_refs · 배분 regime_refs · 시나리오·거부 후보·보유 sources · [AI] 문장 끝 [S번호] + 노트 끝 출처 표 — 2026-10-13 사용자: \"요소들에 대해 출처도 제대로 남아야 한다\"). false = note_lint.py가 경고만 · true = 위반(note·dispatch 게이트가 막는다) · 'YYYY-MM-DD' = 그날(KST)부터 위반. \"2026-10-14\" = 10-13 밤 run은 형식 첫날이라 경고만, 10-14 국내 run부터 자동으로 위반(사람이 바꾸는 단계 없음).",
+ "note_sources_required": "2026-10-14",
  "signal_max_age_minutes": 180,
  "approved_max_age_minutes": 30,
  "_note_fill": "★ 접수는 체결이 아니다 — run은 주문이 체결·부분체결·취소·만료·거부 중 하나로 확정될 때까지 닫히지 않는다(2026-09-16 사용자 지시 · 9/15 VST가 접수·미체결 상태로 게이트를 통과했던 것이 계기). fill.py: 접수 뒤 fill_chase_after_sec가 지나도 안 닿으면 승인가 ±fill_chase_max_pct 안에서 현재가 쪽으로 정정(매수는 올리고 매도는 내린다 · 수량은 승인 금액을 넘지 않게 내린다 · 최대 fill_chase_max회), 접수 후 fill_wait_minutes가 지나면 잔량 취소. 재전송은 절대 없다 — 살아 있는 주문을 다시 보내면 두 번 산다. null이면 기본값(20분·20초·90초·3회·0.5%).",
@@ -36,8 +51,21 @@
  "send_refresh_max_pct": 2.0,
  "position_sizing": {
   "_note": "크기는 표가 아니라 제안의 size_why가 정한다(2026-09-22). 여기 남은 것은 유효성 검사뿐이다.",
-  "min_target_gap_pct": 3.0,
-  "_note_min_target_gap": "BUY 제안의 1차 목표(price >= N — 제안 exits와 논지 exit_triggers 중 최솟값)가 현재가 대비 이 %보다 가까우면 유효성 거부(미달 건수에 안 셈). 2026-09-21 테스: 09-18에 +7% 자리로 건 x3 147,800이 사기도 전에 +0.7%가 됐는데 그대로 제안됐다 — 이미 오른 가격을 쫓는 제안(§0-b)이고 사자마자 절반이 팔리는 회전은 비중도 못 올린다. 논지는 armed 유지, 다음 run이 새 과거 고정 기준으로 목표를 다시 건다(theses.py set-trigger). 0이면 끔."
+  "min_target_gap_pct": 10.0,
+  "_note_min_target_gap": "★ 2026-10-03 사용자 결정 — 3.0 → 10.0. \"1~2% 벌 거면 벌지 마. 최소 10%는 하한이지 목표가 아니다 — 50%·100%·500% 벌 수 있으면 벌어라.\" BUY 제안의 1차 목표(price >= N — 제안 exits와 논지 exit_triggers 중 최솟값)가 현재가 대비 이 %보다 가까우면 유효성 거부(미달 건수에 안 셈). 1차 고정 목표가 없으면(추적 매도만 건 논지) 제안의 expected_upside_pct로 같은 바닥을 판정한다. 위로는 상한이 없다. (2026-09-21 원래 계기: 테스 x3가 사기도 전에 +0.7%가 됐는데 그대로 제안됐다.) 0이면 끔.",
+  "min_target_gap_pct_by_market": {
+   "KR": 10.3,
+   "US": 11.5
+  },
+  "_note_min_target_gap_by_market": "2026-10-12 실계좌 전환 — 바닥 10%를 **세후 순수익**으로 맞춘 시장별 값(analysis/세제_실계좌_261012_v1_0.md: 국내 왕복 0.228% → 10.25% · 미국 왕복 1.295% → 11.44%). account_mode가 paper가 아니면 이 값을 쓰고, paper면 min_target_gap_pct(10.0)를 쓴다. 위로는 상한이 없다.",
+  "min_profit_target_pct": 10.0,
+  "_note_min_profit_target": "2026-10-03 사용자 — 수익 쪽 고정 목표 다리(price >= N)는 기준가(진입 기준가·보유 중이면 평균가)×(1+이 %) 이상이고 basis에 저항 근거가 있으며 보유의 1/3 이하일 때만 허용한다(theses.py가 검증). 고정 목표는 기본이 아니다 — 오르는 종목은 추적 다리(trail_band)로 들고 간다. 바닥이지 목표가 아니다.",
+  "small_entry_needs_plan_pct": 2.0,
+  "new_entry_vs_avg_holding": true,
+  "_note_new_entry_vs_avg": "FB-261010-5(2026-10-11 사용자 승인) — 새 종목(미보유)의 첫 증분이 이 시장 보유 종목의 평균 크기(보유 평가금액 합 ÷ 종목 수, 포트폴리오 분모)보다 작으면 small_why{kind: stop_close|binary_event|one_share|liquidity, why}가 있어야 통과. 아니면 평균 이상으로 키우거나(현금 부족분은 회전 매도) 사지 않는다. 숫자 상수가 아니라 지금 보유에서 나오는 기준이다. 계기: 261010 적용 뒤 새 진입 13건 평균 1.22% · 미국 22종목 중 12종목 2% 미만. false면 끔.",
+  "_note_small_entry": "FB-261003-4(2026-10-03 승인) — BUY 증분이 이 %보다 작으면 increase_when{when, to_pct}(무엇이 확인되면 얼마로 늘리나)가 있어야 통과. 첫 피드백: 1~2% 시험 매수로 +31% 종목을 탔는데 계좌 기여가 거의 없었다. 크기 자체는 여전히 size_why가 정한다.",
+  "fixed_target_max_size_pct": 33.4,
+  "_note_fixed_target_max_size": "2026-10-03 — 수익 쪽 고정 목표 다리가 팔 수 있는 보유 비중의 상한(약 1/3). 나머지는 추적 다리로 들고 간다(10%는 하한·상한 없음). theses.py가 읽는다."
  },
  "_note_rounding": "목표 금액이 1주 값에 못 미치면 0주가 되어 제안이 통째로 사라진다. 목표가 1주 값의 이 비율 이상이면 1주로 올린다 — 2026-09-09 실측: 사이징 6가지 경우 중 3가지가 0주였다.",
  "round_up_to_one_share_at": 0.6,

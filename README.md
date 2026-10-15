@@ -71,10 +71,13 @@
 
 ## 운영 현황
 
-*2026년 9월 27일 기준*
+*2026년 10월 15일 기준*
 
 - **학습 노트:** 2026년 8월 28일부터 평일마다 운영하고 있습니다. 작성 규칙은 직접 작성한 학습 기록 177개 항목과 뉴스레터 원문 57통을 대조해 정리했습니다.
-- **모의투자:** 2026년 9월 8일 첫 모의매매를 진행했습니다. 실행은 사람이 시작하고, 이후 검사와 주문 판단은 자동으로 이루어집니다. 예약·무인 실행으로 전 과정을 완료한 기록은 아직 없으며, 주문 처리 오류의 원인을 점검하고 있습니다.
+- **모의투자:** 2026년 9월 8일 첫 모의매매 이후 국내와 미국 시장을 대상으로 운영하고 있습니다. 10월부터는 예약 작업이 정해진 시각에 실행을 시작하고, 수집·검사·주문 판단·체결 확인까지 사람의 개입 없이 완료합니다.
+- **주간 자가 피드백:** 매주 토요일에 사지 않았는데 크게 오른 종목과 손실이 난 투자 근거를 전수 조사해 원인을 분석하고, 근거가 틀린 규칙만 수정을 제안한 뒤 다음 주 지표로 검증합니다.
+- **주문 근거 검증:** 매수 근거의 출처 검증을 주문 전 판정과 주문 후 감사의 두 갈래로 나눴습니다. 주문 전에는 판정표 기준으로만 결정하고, 주문 후 감사에서 근거가 무너진 매수는 되돌림 매도로 처리합니다.
+- **실계좌 전환 준비:** 모의투자 시그널을 실계좌 잔고와 규칙으로 다시 검사하는 그림자 점검과 실행마다 작성하는 실전 점검표로 전환을 준비하고 있습니다.
 - **검증 범위:** 뉴스에서 도출한 시나리오가 적절한 종목 선정과 매매로 이어지는지, 그 결과 수익성이 있는지 검증하고 있습니다. 실제 계좌 정보와 성과 수치는 공개하지 않습니다.
 
 ## 설계 문서와 코드
@@ -83,12 +86,13 @@
 |---|---|
 | [world-study](.claude/skills/world-study/SKILL.md) | 뉴스레터 선별, 학습 노트 작성, 내용 검토 |
 | [trade-run](.claude/skills/trade-run/SKILL.md) | 뉴스 분석, 투자 시나리오 수립, 모의매매 |
+| [trade-feedback](.claude/skills/trade-feedback/SKILL.md) | 주간 자가 피드백. 놓친 급등과 손실 난 투자 근거를 전수 조사해 규칙 수정을 제안하고 다음 주 지표로 검증 |
 | [fact-check](.claude/skills/fact-check/SKILL.md) | 출처와 주장 대조 |
 | [life-research](.claude/skills/life-research/SKILL.md) | 추가 조사와 근거 확보 |
 | [단계별 검사 코드](.claude/skills/_stepgate/) | 단계별 조건과 산출 파일 확인 |
 | [gate-audit](.claude/skills/gate-audit/SKILL.md) | 검사 과정과 판정 결과 점검 |
 
-실행 방법과 파일 구성은 [모의투자 시스템 기술 문서](ai-trading-bot/README.md)와 [뉴스레터 처리 도구 기술 문서](gmail-newsletter-analyzer/README.md)에 정리했습니다. `python3 ai-trading-bot/test_risk_guard.py`로 주문 규칙 테스트를, `bash examples/run_trace.sh`로 가상 사례의 코드 실행 부분을 재현할 수 있습니다.
+실행 방법과 파일 구성은 [모의투자 시스템 기술 문서](ai-trading-bot/README.md)와 [뉴스레터 처리 도구 기술 문서](gmail-newsletter-analyzer/README.md)에 정리했습니다. `python3 ai-trading-bot/run_tests.py`로 전체 테스트를(주문 규칙만 확인하려면 `python3 ai-trading-bot/test_risk_guard.py`), `bash examples/run_trace.sh`로 가상 사례의 코드 실행 부분을 재현할 수 있습니다.
 
 ## 공개 범위
 

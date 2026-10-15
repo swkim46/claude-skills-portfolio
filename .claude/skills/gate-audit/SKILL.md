@@ -31,7 +31,8 @@ description: >-
 1. **패킷 수령** — `SG audit-judge <reqid>` 로 산출물 경로 + 전 lens(audit_rubrics/<skill>.json) + global_directives를 받는다.
 2. **산출물 실물 검수** — 산출물을 *실제로 열고*(xlsx면 openpyxl·docx면 텍스트), lens별로 판정. **규칙: 위반 라인/셀좌표/캡션을 *그대로 인용* 못 하면 그 lens는 PASS**(관대한 PASS·추측 FAIL 둘 다 금지). 너는 산출물을 *떨어뜨리려는* 적대적 검수자다.
 3. **needs_fetch lens** — 출처 링크가 그 수치 보이는 페이지로 가는지 *실제 WebFetch*로 착지 확인.
-4. **기록** — `SG audit-judge <reqid> --record subverdict=PASS|FAIL findings=<위반 요약·인용> evidence=<핵심 인용>`. high lens가 하나라도 위반이면 FAIL.
+3-bis. **★ 전수 보고 — 첫 위반에서 멈추지 마라.** FAIL이 정해져도 남은 lens를 끝까지 보고, **모든 위반을 결함 유형별로 묶어 한 번에** 적어라. 같은 유형이 다른 행에도 있으면 그 행들까지 나열한다. 회차마다 일부만 보고하면 작업자는 지적된 행만 고치고, 같은 유형이 다음 회차에 다른 행에서 다시 나온다. *실사례: fact-check 판정표 한 건이 회차마다 2~4건씩만 지적받아 22회 FAIL했다(약 10시간).*
+4. **기록** — `SG audit-judge <reqid> --record subverdict=PASS|FAIL findings=<위반 요약·인용> evidence=<핵심 인용> lenses=<위반 lens id,…>`. high lens가 하나라도 위반이면 FAIL. **FAIL이면 `lenses`가 필수다** — 엔진이 `_stepgate/promotion_ledger.jsonl`에 lens별로 쌓아, 여러 run에서 반복된 유형을 게이트로 올리는 근거가 된다(2026-10-07). `findings`에는 위 유형별 전수 목록을 넣고(길면 스크래치패드 파일에 전문을 쓰고 경로를 함께), `evidence`는 산출물에서 그대로 복사한 20자 이상 문구 하나다.
 5. audit_rubric이 없으면(아직 미작성) **기본 빡빡 검수**: 그 스킬 SKILL.md 가이드 전반을 산출물과 *그대로 인용* 대조(인용 못 하면 PASS).
 
 작업 스킬은 발행 직전 `SG resolve <skill> deliverable=<…>`로 네 기록이 전부 PASS인지 확인한다(T3). 네 FAIL은 그 산출물을 *새 vN_M로 고치게* 만든다 — 그래서 **빡빡할수록 좋다**(시간 압박 없음).

@@ -98,15 +98,53 @@ SECTIONS = [
 ]
 
 
-def stamp_today() -> str:
+def stamp_today(market: str = "") -> str:
+    """이번 run의 스탬프 — **거래하는 세션의 현지 날짜**(2026-10-14 · `sessions.run_stamp` — 진행 중 run이면 그 스탬프).
+    시장을 모르면 한국 날짜(예전 동작 — 시장 없는 보조 명령용)."""
+    if market:
+        import sessions as _ss
+        return _ss.run_stamp(market)
     return datetime.now(KST).strftime("%y%m%d")
 
 
+def _keep_pointer(market: str, st: str) -> None:
+    """2·3단이 다른 스탬프로 불렸으면 현재 run 포인터를 그 스탬프로 맞춘다(기록 안의 날짜가 이 run을 따르게)."""
+    import sessions as _ss
+    if _ss.read_current(market).get("stamp") != st:
+        _ss.write_current(market, st)
+
+
+def session_iso(st: str, market: str) -> str:
+    """스탬프 → 그 run의 세션 날짜(YYYY-MM-DD). 전환일 전 스탬프는 옛 규칙(시작 시각으로)."""
+    import sessions as _ss
+    return _ss.stamp_to_session(st, market, _ss.first_touch(st, market)).isoformat()
+
+
+TRANSIENT = ("tokenP", "Read timed out", "ReadTimeout", "timed out", "OPSQ0003", "Connection reset",
+             "RemoteDisconnected", "Temporary failure")
+
+
 def run(cmd: list[str], title: str) -> str:
-    """서브프로세스 출력을 그대로 돌려준다 — 캡처 파일에는 **가공 없이** 담는다."""
+    """서브프로세스 출력을 그대로 돌려준다 — 캡처 파일에는 **가공 없이** 담는다.
+
+    ★ 2026-10-01: KIS 일시 오류(토큰 발급 읽기 타임아웃 · OPSQ0003 라우팅)로 1차 호출이 죽으면 run이 손으로
+    다시 돌렸다(260929 US capture·carry 두 번). 일시 오류 문구가 보이면 짧게 두 번까지 다시 부른다 — 결과는 같은
+    명령의 결과이고, 재시도한 사실은 출력에 남긴다.
+    """
+    import time as _time
     print(f"  · {title} …", file=sys.stderr)
-    p = subprocess.run([sys.executable, *cmd], cwd=PROJ, capture_output=True, text=True)
+    tries = []
+    for k, wait in enumerate((0, 5, 15)):
+        if wait:
+            _time.sleep(wait)
+        p = subprocess.run([sys.executable, *cmd], cwd=PROJ, capture_output=True, text=True)
+        out_all = (p.stdout or "") + (p.stderr or "")
+        if p.returncode == 0 or not any(t in out_all for t in TRANSIENT):
+            break
+        tries.append(f"[{k + 1}차 실패 — 일시 오류로 보고 {(5, 15, 0)[k]}초 뒤 재시도]")
     body = (p.stdout or "") + (("\n[stderr]\n" + p.stderr) if p.stderr.strip() else "")
+    if tries:
+        body = "\n".join(tries) + "\n" + body
     if p.returncode != 0:
         body += f"\n[종료코드 {p.returncode} — 실패한 명령이다. '결과 없음'으로 읽지 말 것.]"
     return f"### {title}\n\n```\n{body.rstrip()}\n```\n"
@@ -127,10 +165,11 @@ def build_board(market: str, quick: bool, record: bool = False) -> tuple[str, st
     import market_map as mm
     from kis_client import KisClient
 
-    c = KisClient(svr="paper")
+    c = KisClient.for_mode()
     rows, bench_name, bench = mm._fetch_board(c, market, quick)
     state = mm._sector_state(mm._read(mm.MAP, {"axes": []}))
-    today = datetime.now(KST).strftime("%Y-%m-%d")
+    import sessions as _ss
+    today = _ss.run_date(market).isoformat()          # 세션 날짜(현지 거래일 · 2026-10-14) — 섹터 이력 date
 
     buf = io.StringIO()
     with redirect_stdout(buf):
@@ -253,12 +292,12 @@ def news_window_block(market: str, days: int, st: str) -> str:
     왜: `--days`가 직전 run과의 간극보다 작으면 그 사이 발행분이 **조용히 빠진다** —
     빠진 줄은 어디에도 안 남고, 노트는 "그 축은 재료에 없었다"로 적는다.
     """
-    prev = last_session(market)
+    prev = last_session(market, st)
     gap = None
     if prev:
         try:
             d0 = datetime.strptime(prev, "%Y-%m-%d").date()
-            gap = (datetime.now(KST).date() - d0).days
+            gap = (datetime.strptime(session_iso(st, market), "%Y-%m-%d").date() - d0).days
         except ValueError:
             gap = None
     mat = PROJ / "data" / f"material_{st}_{market}.md"
@@ -425,7 +464,7 @@ def regime_inputs(market: str, board_txt: str = "") -> str:
         try:
             from kis_client import KisClient
             from datetime import timedelta as _td
-            cli = KisClient()
+            cli = KisClient.for_mode()
             if market.lower() == "kr":
                 end = datetime.now(KST).strftime("%Y%m%d")
                 start = (datetime.now(KST) - _td(days=120)).strftime("%Y%m%d")
@@ -465,13 +504,119 @@ def regime_inputs(market: str, board_txt: str = "") -> str:
     return "\n".join(lines)
 
 
+def unfinished_prev_stamp(market: str, now=None):
+    """자정을 넘겨 이어 가는 run이면 전날 stamp를 돌려준다(없으면 None).
+
+    ★ 2026-09-30: 23:56에 멈춘 US run을 01:17에 재개하며 `capture`를 `--stamp` 없이 돌려 260930 산출 5개가
+    잘못 생겼다. 전날 작업기록이 있고 `execute`·`no_trade` 스탬프가 없으면 그 run이 아직 안 끝난 것이다.
+    """
+    now = now or datetime.now(KST)
+    if now.hour >= 8:                       # 아침 이후의 새 run은 오늘 stamp(국내 run·다음 날 미국 run)
+        return None
+    prev = (now - timedelta(days=1)).strftime("%y%m%d")
+    wl = JOURNAL / f"worklog_{prev}_{market}.md"
+    if not wl.exists():
+        return None
+    t = wl.read_text(encoding="utf-8")
+    if "✓ 작업기록-execute" in t or "✓ 작업기록-no_trade" in t:
+        return None
+    return prev
+
+
+def watch_loop_block(market: str) -> str:
+    """★ FB-261003-8 — run 사이 장중 감시 루프(stops.py, mode=loop)가 살아 있는가. 마지막 점검 시각과 그 뒤 지난 시간.
+
+    세션 전용 예약이 만료되면 루프가 조용히 멈춘다(09-26~10-02 기록 없음). 멈춘 동안 손절·목표는 run 시각에만 판정됐다."""
+    rows = []
+    try:
+        for ln in (JOURNAL / "stops_log.jsonl").read_text(encoding="utf-8").splitlines():
+            try:
+                r = json.loads(ln)
+            except json.JSONDecodeError:
+                continue
+            if r.get("mode") == "loop" and str(r.get("market") or "").upper() == market.upper():
+                rows.append(r)
+    except OSError:
+        pass
+    now = datetime.now(KST)
+    if not rows:
+        line = (f"감시 루프 마지막 점검 **기록 없음** — run 사이 손절·목표가 run 시각에만 판정된다. "
+                f"예약 작업 `auto-stops`는 2026-10-11 사용자가 꺼 두었다 — 다시 켜지 않는다(보고에 '장중 감시 꺼짐' 한 줄)")
+    else:
+        last = rows[-1]
+        try:
+            gap_h = (now - datetime.fromisoformat(last["ts"])).total_seconds() / 3600
+        except (KeyError, ValueError):
+            gap_h = None
+        line = (f"감시 루프 마지막 점검 {str(last.get('ts'))[:16]} · 그 뒤 {gap_h:.1f}시간"
+                + (" — **장중 1시간 넘게 끊겼으면 공백이다**(stops.py --intraday가 그 사이 터치를 잡는다 · "
+                   "예약 `auto-stops`는 2026-10-11 사용자가 꺼 두었다 — 다시 켜지 않는다)" if gap_h and gap_h > 1 else "")
+                if gap_h is not None else f"감시 루프 마지막 점검 {last.get('ts')}")
+    return "### 장중 감시 루프 (stops.py · mode=loop 하트비트)\n\n- " + line + "\n"
+
+
+def tests_block() -> str:
+    """★ 2026-10-11 — 마지막 테스트 완주 기록(`run_tests.py --last`). 테스트가 중간에 멈춰 뒤 케이스가 일주일 동안 안 돌았는데
+    아무도 몰랐다(10-03~10-10). 매 run 캡처에 박아 보고까지 올라가게 한다 — ★(멈춤·실패·7일 넘은 기록)면 보고에 그대로 적는다."""
+    try:
+        sys.path.insert(0, str(PROJ))
+        import run_tests as _rt
+        line = _rt.last_line()
+    except Exception as e:                        # noqa: BLE001
+        line = f"★ [테스트] 기록을 못 읽었다 — {type(e).__name__}: {e}"
+    return "### 테스트 (run_tests.py --last — 마지막 완주 기록)\n\n- " + line + "\n"
+
+
 def cmd_capture(a) -> int:
-    st = a.stamp or stamp_today()
+    import sessions as _ss
+    st = a.stamp or _ss.run_stamp(a.market)
+    fresh = _ss.session_stamp(a.market)
+    if not a.stamp and st != fresh:
+        print(f"※ 끝나지 않은 run(worklog_{st}_{a.market}.md · 포인터 journal/current_run.json)을 이어 간다 — stamp {st}"
+              f"(새 run이면 --stamp {fresh}를 명시)", file=sys.stderr)
+    # ★ 현재 run 포인터(2026-10-14) — 기록 안의 날짜(논지·지도·일정·섹터 이력·자산 곡선)가 이 run의 세션 날짜를 쓰게.
+    #   ingest보다 먼저 쓴다(ingest가 일정 `added`를 적는다).
+    _cur = _ss.write_current(a.market, st)
+    print(f"스탬프 {st} = {a.market.upper()} 세션 {_cur['session_date']} (현지 거래일)", file=sys.stderr)
+    # ★ 실행 시각 점검(2026-10-15) — 정규 슬롯은 국내 09:30 · 미국 개장 5분 뒤(서머타임 22:35 · 11-02부터 23:35).
+    #   개장 20분 전보다 일찍 시작하면 예약 시각이 잘못 잡힌 것이다(주문이 개장 직후 변동 구간에 떨어지고 그날 고가·저가가 없다).
+    from kis_client import market_session as _msess
+    _now = datetime.now(KST)
+    _ms = _msess(a.market.upper(), _now)
+    try:
+        _slot = _ss.slot_for(a.market, datetime.fromisoformat(_cur["session_date"]).date())
+    except (KeyError, ValueError, TypeError):
+        _slot = None
+    if not _ms["is_open"] and _now < _ms["open"] - timedelta(minutes=20) and _now.date() == _ms["open"].date():
+        print(f"★ 실행 시각 — 개장({_ms['open']:%H:%M}) {int((_ms['open'] - _now).total_seconds() // 60)}분 전에 시작했다. "
+              f"정규 슬롯은 {_slot:%H:%M}이다 — 예약 시각을 확인하라(서머타임이 끝나면 미국은 23:35)" if _slot else
+              f"★ 실행 시각 — 개장 20분 전보다 이르다", file=sys.stderr)
     EVID.mkdir(parents=True, exist_ok=True)
     ANALYSIS.mkdir(parents=True, exist_ok=True)
 
     blocks = [run(["ingest.py", "--market", a.market, "--with-news",
                    "--days", str(a.days), "--stamp", st], "재료 수집 (ingest.py)")]
+    # ★ 실계좌 전환(2026-10-12): 국내 run은 미국 주간거래(KST 10:00~) 시각과 겹친다(09:30 캡처면 창 전 → close에서) — 미국 보유의 손절·추적 다리를 주간 세션 시세로
+    #   판정하고, 실계좌(real)면 그 자리에서 판다(조회 전용·모의면 판정만). 정규장 밤 run까지 12시간 들고 있지 않게 한다.
+    from kis_client import account_mode as _acct_mode
+    _mode = _acct_mode()
+    from kis_client import us_daytime_session as _uds
+    if a.market == "kr" and _mode != "paper" and _uds()["is_open"]:
+        blocks.append(run(["stops.py", "--market", "us", "--daytime", "--stamp", st]
+                          + (["--send"] if _mode == "real" else []),
+                          "미국 주간거래 손절 점검 (stops.py --daytime — 손절·추적 다리만 · 매도 전용)"))
+    elif a.market == "kr" and _mode != "paper":
+        # 09:30 국내 run은 주간거래(10:00~) 전이다 — run 마지막 `stage.py close`가 돈다(2026-10-15)
+        blocks.append("### 미국 주간거래 손절 점검\n\n주간거래 창 밖(10:00 전) — run 마지막 `python3 stage.py close`에서 돈다\n")
+    # 실계좌 조회 전용 점검(2026-10-15 · 실전 점검표 ⑦) — 전환 주간(그림자 점검이 켜진 동안)과 실계좌 모드에서 run마다 한 번.
+    #   잔고·통합증거금 구매력 칸·체결조회 TR이 run 시각에 정상인지 본다(주문 없음 · 토큰은 모의 캐시와 분리).
+    try:
+        _lim = json.loads((PROJ / "config" / "limits.json").read_text(encoding="utf-8")) or {}
+    except (OSError, json.JSONDecodeError):
+        _lim = {}
+    if _lim.get("real_shadow_check") or _mode != "paper":
+        blocks.append(run(["real_probe.py", "--stamp", st, "--no-paper"],
+                          "실계좌 조회 전용 점검 (real_probe.py — 주문 없음 · 실전 점검표 ⑦)"))
     # ★ **이미 가진 것**을 캡처에 박는다. 단계를 쪼개면서 "어제 그 파일을 받았다"를
     #   기억하던 경로가 사라졌는데 대체 경로를 안 만들었다 — 이 목록이 그 경로다.
     #   *실사례(2026-09-10): 3단이 "KRX 정기변경 명단 미확보 → 조사불가"로 닫았는데
@@ -480,9 +625,12 @@ def cmd_capture(a) -> int:
     blocks.append(run(["corpus.py", "index", "--brief"], "로컬 코퍼스 색인 (corpus.py — 이미 가진 자료 · 전체는 corpus.py index, 내용은 search)"))
     # ★ 밀린 세션을 캡처에 박는다. 안 보이면 '안 한 것'과 '없었던 것'이 구분되지 않고,
     #   반쪽으로 죽은 run의 회고가 아무 데도 이어지지 않는다(미국 9/8·9/9가 그랬다).
-    blocks.append(run(["sessions.py", "due"], "밀린 일과 (sessions.py — 반쪽·미실행·시각 이탈)"))
+    blocks.append(run(["sessions.py", "due", "--market", a.market, "--stamp", st],
+                      "밀린 일과 (sessions.py — 반쪽·미실행·시각 이탈)"))
     # 집행 가능한 시각인가 · 수집 창이 간극을 덮는가 — 둘 다 캡처에 못 박는다.
     blocks.append(market_window_block(a.market))
+    blocks.append(watch_loop_block(a.market))
+    blocks.append(tests_block())
     blocks.append(news_window_block(a.market, a.days, st))
     board_txt, board_md, roster = build_board(a.market, a.quick, record=not a.no_record)
     blocks.append("### 섹터 보드 (market_map.board — 전수)\n\n```\n" + board_txt.rstrip() + "\n```\n")
@@ -494,11 +642,17 @@ def cmd_capture(a) -> int:
     #   벤치마크 5·20·60일 수익률과 20/60일선 대비 위치 · 보드 상승/하락 섹터 수. 모델은 이 숫자를 인용해 국면을 적는다.
     blocks.append("### 국면 재료 (regime_inputs — allocation.regime이 인용하는 숫자)\n\n```\n"
                   + regime_inputs(a.market, board_txt) + "\n```\n")
+    # ★ 요인별 노출(FB-261012-4) — 축을 나눠도 요인은 하나일 수 있다. 최대 요인이 꺾이는 가지를 §7에 두게 한다.
+    blocks.append(run(["market_map.py", "exposure", "--by", "driver", "--market", a.market,
+                       "--out", str((EVID / f"exposure_{st}_{a.market}.md").relative_to(PROJ))],
+                      "요인별 노출 (market_map.py exposure — 양 시장 합산 · 최대 요인 '꺾이면' 행은 §7)"))
 
     evid = EVID / f"tools_{st}_{a.market}.md"
     write_preserving(
         evid,
         f"# 도구 출력 캡처 — {st} · {a.market.upper()}\n\n"
+        f"> [계좌] {_mode} — " + {"paper": "모의계좌", "real_readonly": "실계좌 조회 전용(주문 dry-run까지)",
+                                  "real": "실계좌 주문"}.get(_mode, _mode) + "\n>\n"
         f"> **이 run 숫자의 유일한 출처.** 장중에는 부를 때마다 값이 달라져 노트 안에서\n"
         f"> 숫자끼리 어긋난다. 이후 단계는 브로커를 다시 부르지 않고 이 파일을 읽는다.\n"
         f"> 캡처 시각 {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')} KST\n\n"
@@ -540,7 +694,7 @@ def cmd_capture(a) -> int:
 
     print(f"\n캡처 {rel(evid)}  ·  노트 뼈대 {rel(note)}")
     print(f"로스터 {roster}행 · 유니버스 {uni_n}종목 · 작업기록 {rel(wl)}")
-    today = datetime.now(KST).strftime("%Y-%m-%d")
+    today = session_iso(st, a.market)                 # 게이트 인자 today = 이 run의 세션 날짜(현지 거래일 · 2026-10-14)
     print(f"게이트 인자: roster={roster} universe={uni_n} today={today} "
           f"deliverable={evid} note={note} worklog={wl}")
     print(f"  4단에서 쓸 검증 로그 경로: {EVID / f'verify_{st}_{a.market}.txt'}")
@@ -551,7 +705,7 @@ def cmd_capture(a) -> int:
 
 # ─────────────────────────────────────────────────────────── carry
 
-def last_session(market: str) -> str:
+def last_session(market: str, st: str = "") -> str:
     """회고 대상 = 그 시장의 직전 세션.
 
     **시그널이 있는 날짜만 고른다** — `review.py`가 채점하는 대상이 시그널(그날의 결정)이라,
@@ -560,12 +714,12 @@ def last_session(market: str) -> str:
     건너뛰는 것보다, 결과 판정을 보류하고 근거를 채점하는 편이 낫다.
     """
     stamps = sorted({p.stem.split("_")[1] for p in (PROJ / "signals").glob(f"signal_*_{market}.json")})
+    today = st or stamp_today(market)
     if not stamps:
-        return f"20{stamp_today()[:2]}-{stamp_today()[2:4]}-{stamp_today()[4:6]}"
-    today = stamp_today()
+        return session_iso(today, market)
     past = [s for s in stamps if s < today]
     src = past[-1] if past else stamps[-1]
-    return f"20{src[:2]}-{src[2:4]}-{src[4:6]}"
+    return session_iso(src, market)             # 스탬프가 아니라 그 run의 세션 날짜(전환일 전 미국 스탬프는 하루 뒤였다)
 
 
 def prev_outputs(pv: dict) -> str:
@@ -633,8 +787,68 @@ def _json(p: Path):
         return {}
 
 
+PRICE_REJECT_WORDS = ("목표 여유 없음", "상승 여지 바닥 미달", "추격", "급등", "이미 반영", "목표가 평균 상회", "이미 오른")
+
+
+def reeval_list(market: str, st: str) -> list:
+    """★ FB-261003-1 — 직전 같은 시장 run이 **가격을 이유로** 거른 종목. [(ticker, 출처, 사유)].
+
+    '오늘 급등해서 안 산다'는 그날 가격에만 맞는 판단인데, 한 번 거르면 다시 평가하는 일정이 없었다
+    (09-30 '목표가 평균 상회'로 거른 장비주가 그 뒤 +51%). 출처는 둘: 시그널 `rejected_candidates`(kind=price)와
+    approved `rejected`의 가격 사유."""
+    out, seen = [], set()
+    sig_f = latest_stamped(PROJ / "signals", "signal", market, ".json", exclude_stamp=st)
+    if sig_f:
+        try:
+            d = json.loads(sig_f.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            d = {}
+        for r in d.get("rejected_candidates") or []:
+            if str(r.get("kind") or "") == "price" and r.get("ticker") and r["ticker"] not in seen:
+                seen.add(r["ticker"]); out.append((r["ticker"], sig_f.name, str(r.get("why") or "")[:90]))
+    ap_f = latest_stamped(PROJ / "signals", "approved", market, ".json", exclude_stamp=st)
+    if ap_f:
+        try:
+            d = json.loads(ap_f.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            d = {}
+        for r in d.get("rejected") or []:
+            why = str(r.get("why") or "")
+            if r.get("ticker") and r["ticker"] not in seen and any(w in why for w in PRICE_REJECT_WORDS):
+                seen.add(r["ticker"]); out.append((r["ticker"], ap_f.name, why[:90]))
+    return out
+
+
+def queue_one_day(market: str, st: str) -> list:
+    """★ FB-261010-6(2026-10-11 사용자 승인) — 유니버스 대기열에서 **하루만 제안된** 후보. [(ticker, 이름, 제안일, 축, 기다린 날)].
+
+    편입은 서로 다른 이틀 제안이 있어야 한다(냉각 — 뉴스레터 인젝션 방어). 그런데 하루만 제안되고 다시 언급되지 않으면
+    그 후보는 대기열에 묻혀 아무도 다시 보지 않았다(09-23 하루 제안된 수혜주 둘이 2주 넘게 멈춘 사이 +21~33%).
+    그래서 매 run이 이 목록을 보고 '오늘 재료 근거로 재제안' 또는 '[내림] 이유'를 적는다. 자동 재제안은 하지 않는다."""
+    try:
+        q = json.loads((JOURNAL / "universe_pending.json").read_text(encoding="utf-8")) or {}
+    except (OSError, json.JSONDecodeError):
+        return []
+    out = []
+    today = datetime.strptime("20" + st, "%Y%m%d")
+    for key, v in q.items():
+        mk, _, tk = str(key).partition(":")
+        if mk.upper() != market.upper() or not tk:
+            continue
+        dates = sorted(set(v.get("dates") or []))
+        if len(dates) != 1:
+            continue
+        try:
+            waited = (today - datetime.strptime(dates[0], "%Y-%m-%d")).days
+        except ValueError:
+            waited = -1
+        out.append((tk, str(v.get("name") or ""), dates[0], str(v.get("axis") or ""), waited))
+    return sorted(out, key=lambda r: -r[4])
+
+
 def cmd_carry(a) -> int:
-    st = a.stamp or stamp_today()
+    st = a.stamp or stamp_today(a.market)
+    _keep_pointer(a.market, st)
     JOURNAL.mkdir(parents=True, exist_ok=True)
     snap = PROJ / "data" / f"snapshot_{st}_{a.market}.json"
     if not snap.exists():
@@ -683,6 +897,11 @@ def cmd_carry(a) -> int:
                          "반대편 회고는 그 시장 run이 돌 때 이어받는다.\n"
                          if same_market else "직전 run이 없어 매핑할 것이 없다.\n")
                       + "```\n")
+    # ★ 교차 시장 입력(2026-10-12 사용자: "국내장과 미국장은 독립적이지 않다") — 반대 시장이 이 시장 직전 run 이후 **판단을 바꾼 것**
+    #   (전망 갱신·반증 고리·이쪽 대응이 빈 시나리오·손절 발화·요인별 방향). `bridge`는 가격만 넘기므로 같은 시장 직전이어도 돈다.
+    blocks.append(run(["market_map.py", "xmarket", "--market", a.market, "--stamp", st,
+                       "--out", str((EVID / f"xmarket_{st}_{a.market}.md").relative_to(PROJ))],
+                      "교차 시장 입력 (xmarket — 저쪽이 바꾼 전망·반증·대응 빈 시나리오 → 노트 §1-B ④)"))
     blocks += [
         run(["market_map.py", "cycle", "--market", a.market],
             "순환 슬롯 (cycle) — 지난 관찰의 사후 · 이월 · 다음 후보"),
@@ -690,6 +909,9 @@ def cmd_carry(a) -> int:
         #   미국 조건이 국내 대응을 지시하는 일이 실제로 있다("KR Samsung ladder e1 fires").
         run(["scenarios.py", "list", "--open", "--brief"],
             "열린 시나리오 (전 시장 — 조건은 시장에 속하지 않는다 · 이력은 `scenarios.py list --id`)"),
+        # ★ 오래 열린 시나리오(FB-261012-1) — 예정일이 지나도 실현·반증되지 않은 가지 = 지연·무소식 가지가 없었다.
+        run(["scenarios.py", "list", "--stale"],
+            "오래 열린 시나리오 (scenarios.py list --stale — 지연 가지를 세우거나 `judge --expire`로 닫는다)"),
         run(["scenarios.py", "audit", "--days", "14"],
             "회피 감사 (scenarios.py audit — 실현됐는데 대응했나)"),
         # ★ 실현됐는데 대응이 안 끝난 것 — "미국 조건 → 국내 대응"의 기계 경로다.
@@ -713,6 +935,34 @@ def cmd_carry(a) -> int:
                   for i, r in enumerate(rows))) if rows else \
              f"출처 `{prev_sig[-1].name}` · scenarios 0건 (직전 run이 무엇을 기다리는지 안 적었다)"
 
+    rv = reeval_list(a.market, st)
+    rv_md = ("| 종목 | 출처 | 거른 사유 | 오늘 판정(논지 id 또는 [통과] 사유) |\n|---|---|---|---|\n"
+             + "\n".join(f"| {tk} | `{src}` | {why.replace('|', '·')} | |" for tk, src, why in rv)) if rv else \
+        "(직전 run이 가격을 이유로 거른 종목 없음)"
+    q1 = queue_one_day(a.market, st)
+    q1_md = ("| 종목 | 제안일 | 연결 축 | 기다린 날 | 오늘 판정(재제안 근거 또는 [내림] 이유) |\n|---|---|---|---|---|\n"
+             + "\n".join(f"| {tk} {nm} | {d} | {ax or '—'} | {w}일 | |" for tk, nm, d, ax, w in q1)) if q1 else \
+        "(하루만 제안된 대기 후보 없음)"
+    # 감사 소급(2026-10-13) — 직전 run의 주문 뒤 감사가 매수 근거를 뒤집어 아직 못 판 것. 이 run의 risk_guard가 자동으로 판다.
+    try:
+        import reversals as _rv
+        rev_md = _rv.carry_block(a.market, JOURNAL)
+        import fc_track1 as _t1                   # 직전 run이 닫힌 뒤 도착한 주문 근거 감사(2026-10-14 · 배경 감사 미수신의 안전망)
+        rev_md += _t1.carry_note(a.market, st)
+    except Exception as e:                        # noqa: BLE001
+        rev_md = f"## 감사 소급\n\n★ 원장을 읽지 못했다 — {type(e).__name__}: {e}\n"
+    # 지지 이탈(2026-10-14 · 차트스쿨 01 B) — 지지 구간 기준 보유의 직전 세션 종가가 구간 아래로 끝났으면 오늘 무효 조건을 재판정한다.
+    try:
+        import support_break as _sb
+        sup_md = _sb.carry_block(a.market, snap)
+    except Exception as e:                        # noqa: BLE001
+        sup_md = f"## 지지 이탈\n\n★ 판정하지 못했다 — {type(e).__name__}: {e} · 노트 §10 한계에 적는다\n"
+    # 재투자 대기(2026-10-15) — 직전 run의 매도 전용 pass가 판 돈이 재투자되지 않고 남은 것. 이 run의 gap에 자연히 들어가지만
+    #   왜 남았는지(미룬 사유)를 §1-A에 적고 이번 run에서 채운다.
+    try:
+        ref_md = refill_block(a.market, st)
+    except Exception as e:                        # noqa: BLE001
+        ref_md = f"## 재투자 대기\n\n★ 읽지 못했다 — {type(e).__name__}: {e}\n"
     out = JOURNAL / f"carry_{st}_{a.market}.md"
     write_preserving(
         out,
@@ -722,6 +972,17 @@ def cmd_carry(a) -> int:
         f"## 직전 시그널 `scenarios` — 전건 판정\n\n{sc}\n\n"
         f"**판정하지 않고 넘긴 조건이 있으면 이 단계는 실패다.** 실현됐는데 대응하지 않았으면\n"
         f"그건 판단이 아니라 연기다.\n\n"
+        f"## 재평가 목록 — 직전 run이 가격을 이유로 거른 종목\n\n{rv_md}\n\n"
+        f"**급등 당일 매수 금지는 그 세션에만 적용한다.** 이 목록의 종목은 오늘 노트 §6에 논지 id 또는 `[통과] <이유>`로\n"
+        f"다시 판정한다 — '이미 올랐다'로 또 거르려면 기저율(자기 호흡 칸)이 기준선보다 나쁘다는 숫자를 적는다.\n"
+        f"`crosscheck.py`가 목록의 이름이 노트에 들어갔는지 센다.\n\n"
+        f"## 대기 후보(하루만 제안됨) — 다시 추천하거나 내린다\n\n{q1_md}\n\n"
+        f"편입은 서로 다른 이틀 제안이 있어야 한다(냉각 — 인젝션 방어). 하루만 제안된 후보는 다시 언급하지 않으면 영영 묻힌다.\n"
+        f"후보마다 노트 §8에 둘 중 하나를 적는다: **오늘 재료에 근거가 있으면** 시그널 `watchlist_candidates`로 재제안(근거 한 줄) ·\n"
+        f"아니면 `[내림] <이유>`. 근거 없는 습관적 재제안은 금지 — 냉각이 무력해진다. `crosscheck.py`가 센다.\n\n"
+        f"{rev_md}\n"
+        f"{sup_md}\n"
+        f"{ref_md}\n"
         f"## 미체결분 행선지\n\n"
         f"직전 run에서 접수만 되고 안 채워진 주문은 장 마감에 취소된다.\n"
         f"논지 트리거로 옮겼는지 / 대기열로 넘겼는지 적는다. 없었으면 '없음'이라고 적는다.\n\n"
@@ -735,7 +996,9 @@ def cmd_carry(a) -> int:
           f"무엇을 다시 수집했는지 적는다. 아니면 '해당 없음'.)\n\n- 해당 없음\n",
         "이어받기 파일")
     wl = JOURNAL / f"worklog_{st}_{a.market}.md"
-    if wl.exists() and "작업기록-carry" not in wl.read_text(encoding="utf-8"):
+    # ★ 2026-10-01: 빈 뼈대에 ✓ 스탬프까지 찍어 붙였다 — 내용 없는 블록이 '완료' 표기를 가졌다.
+    #   뼈대는 표기 없이 붙이고, 채운 뒤 `stage.py stamp --worklog <wl> --stage carry`로 찍는다(SKILL.md 규칙).
+    if wl.exists() and "## 2단 · 이어받기" not in wl.read_text(encoding="utf-8"):
         with wl.open("a", encoding="utf-8") as fh:
             fh.write(f"\n---\n\n## 2단 · 이어받기\n\n"
                      f"- 회고 대상: {(prev_mkt or '?').upper()} {sess}\n"
@@ -743,7 +1006,8 @@ def cmd_carry(a) -> int:
                      f"### 조사한 것\n\n- \n\n"
                      f"### 판단한 것과 근거\n\n- \n\n"
                      f"### 기각한 것과 이유\n\n- \n\n"
-                     f"### 3단으로 넘기는 것\n\n- \n\n{stamp('작업기록-carry')}\n")
+                     f"### 3단으로 넘기는 것\n\n- \n\n"
+                     f"<!-- 다 채운 뒤: python3 stage.py stamp --worklog {rel(wl)} --stage carry -->\n")
 
     note = ANALYSIS / f"분석노트_{st}_{a.market}_v{a.rev}_0.md"
     print(f"\n이어받기 {rel(out)}  (회고 세션 {(prev_mkt or '?').upper()} {sess})")
@@ -786,13 +1050,14 @@ def cmd_map(a) -> int:
     산출 `analysis/전망_<stamp>_<mkt>.md`: 열린 전망 현황 + 이번 run이 채울 표(1차/2차/3차 수혜)
     + 요약 생성줄. 3단이 `forecast add`·`priced`로 채운 뒤 `map` 게이트에 이 파일을 낸다.
     """
-    st = a.stamp or stamp_today()
+    st = a.stamp or stamp_today(a.market)
+    _keep_pointer(a.market, st)
     ANALYSIS.mkdir(parents=True, exist_ok=True)
     sys.path.insert(0, str(PROJ))
     import market_map as mm
     m = mm._read(mm.MAP, {"axes": []})
     axes = m.get("axes") or []
-    today = datetime.now(KST).strftime("%Y-%m-%d")
+    today = session_iso(st, a.market)                 # 축 updated는 run 포인터의 세션 날짜로 적힌다(market_map)
     updated = [x for x in axes if x.get("direction") and (x.get("updated") or "") == today]
     blank = [x for x in axes if not x.get("direction")]
     unpriced = [(x["id"], b) for x in axes if x.get("direction")
@@ -823,6 +1088,17 @@ def cmd_map(a) -> int:
                        f"{b.get('market', '')} | {'안' if b.get('in_universe') else '밖'} | {pr} | "
                        f"{(b.get('why') or '')[:60]} |")
         out.append("")
+    # ★ 같은 요인의 두 시장 전망(2026-10-12) — 세우기 전에 반대 시장이 같은 요인을 어떻게 보는지 먼저 본다.
+    xr = mm.xmarket(a.market, st)
+    out += ["## 같은 요인의 두 시장 전망 — 세우기 전에 본다", "",
+            "> 전망의 단위는 시장이 아니라 요인이다. 반대 방향이면 `conflicts_with`로 잇거나 `split_why`, 수혜 표가 한 시장뿐이면 "
+            "반대 시장 수혜·피해를 넣거나 `no_cross_market_why` — `forecast add`가 기계로 거부한다.", "",
+            "| 요인 | 축 | 방향 | 확신도 | 시장 | 상태 |", "|---|---|---|---|---|---|"]
+    for d_, rows_ in sorted(xr["drivers"].items(), key=lambda kv: -len(kv[1])):
+        for x_ in rows_:
+            out.append(f"| {d_} | {x_['axis']} | {x_['direction']} | {x_['confidence']} | {'·'.join(x_['markets']) or '?'} | "
+                       f"{('★ 미연결: ' + ', '.join(x_['unlinked'])) if x_['unlinked'] else ''} |")
+    out += [""]
     out += ["## 전망 미기입 축", ""]
     for x in blank:
         out.append(f"- `{x['id']}` {x.get('name', '')[:50]} — 방향·기간·수혜 순서를 채우거나, "
@@ -832,7 +1108,8 @@ def cmd_map(a) -> int:
             "없으면 '없음 + 이유'.", "",
             "```json", "[{\"id\": \"<axis_id>\", \"name\": \"…\", \"thesis\": \"…\", "
             "\"direction\": \"+\", \"expected\": \"KOSPI 대비 +10%p\", \"horizon_weeks\": 8, "
-            "\"confidence\": 0.6,", "  \"beneficiaries\": [{\"ticker\": \"…\", \"name\": \"…\", "
+            "\"confidence\": 0.6, \"driver\": \"<요인>\", \"no_cross_market_why\": \"(반대 시장 종목이 없을 때만)\", "
+            "\"split_why\": \"(같은 요인 반대 방향 전망과 메커니즘이 다를 때만)\",", "  \"beneficiaries\": [{\"ticker\": \"…\", \"name\": \"…\", "
             "\"order\": 1, \"why\": \"뉴스가 말한 1차\"}, {\"ticker\": \"…\", \"order\": 2, "
             "\"why\": \"2차 — 아직 값에 안 들어간 이유\"}]}]", "```", "",
             "세운 뒤: `python3 market_map.py forecast add --file <json>` → "
@@ -868,7 +1145,7 @@ def cmd_map(a) -> int:
 def pick_market(now=None) -> tuple:
     """어느 시장을 준비할지 — **지금 열린 시장**, 둘 다 닫혔으면 다음에 열리는 시장. 반환 (market, open, why).
 
-    ★ 시각 제한을 두지 않는다. 루틴 지침이 "10:35·22:35 ±90분 밖이면 건너뜀"이라 한낮에 깨워도
+    ★ 시각 제한을 두지 않는다. 옛 루틴 지침이 "10:35·22:35 ±90분 밖이면 건너뜀"이라 한낮에 깨워도
     장이 열려 있는데 안 돌았다(2026-09-18 사용자). 판정은 `kis_client.market_session` 하나로 한다.
     """
     from kis_client import market_session, KST as _KST
@@ -960,6 +1237,101 @@ def cmd_stamp(a) -> int:
     return 0
 
 
+def refill_block(market: str, st: str) -> str:
+    """이어받기 `## 재투자 대기` 절 — 지난 스탬프의 `journal/refill_<st>_<mkt>.json` 중 `open`·`deferred`(이 run 것 제외).
+    그린 파일은 `carried`로 바꾼다(같은 대기를 두 run이 이어받지 않게)."""
+    rows = []
+    for p in sorted(JOURNAL.glob(f"refill_*_{market}.json")):
+        stp = p.stem.split("_")[1]
+        if stp >= st:
+            continue
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if d.get("status") not in ("open", "deferred"):
+            continue
+        proceeds = sum(float(e.get("proceeds") or 0) for e in d.get("events") or [])
+        sold = ", ".join(f"{x.get('ticker')} {x.get('qty')}주" for e in d.get("events") or [] for x in e.get("sells") or [])
+        rows.append((stp, d.get("status"), sold, proceeds, str(d.get("deferred_why") or "—")))
+        d["status"] = "carried"
+        d["carried_by"] = st
+        p.write_text(json.dumps(d, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    head = "## 재투자 대기\n\n"
+    if not rows:
+        return head + "(직전 run들이 판 돈 가운데 재투자되지 않고 남은 것 없음)\n"
+    return (head + "직전 run의 매도 전용 pass(손절·추적·감사 소급)가 판 돈이 재투자되지 않았다 — 이 run의 gap에 들어가 있다. "
+            "§1-A에 왜 남았는지(미룬 사유)를 한 줄로 적고, 5단 제안으로 채운다.\n\n"
+            "| 스탬프 | 상태 | 판 것 | 대금 | 미룬 사유 |\n|---|---|---|---|---|\n"
+            + "\n".join(f"| {a} | {b} | {c} | {d_:,.2f} | {e} |" for a, b, c, d_, e in rows) + "\n")
+
+
+def refill_gate(market: str, st: str) -> tuple:
+    """(종료코드, 마크다운) — 이 run의 재투자 기록이 `open`이면 3(재투자 pass를 돌렸거나 미룬 사유를 적어야 닫힌다)."""
+    rp = JOURNAL / f"refill_{st}_{market}.json"
+    if not rp.exists():
+        return 0, ""
+    try:
+        d = json.loads(rp.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        d = {"status": "open"}
+    if d.get("status") == "open":
+        return 3, ("### ★ 재투자 미처리\n\n이 run 안에서 매도가 나간 뒤 판 돈이 재투자되지 않았다 — "
+                   "`stage6_execute.md` 〈매도 뒤 재투자〉대로 채우거나, 못 채우면 "
+                   f"`python3 stage.py refill-defer --market {market} --stamp {st} --why \"<사유>\"`로 미룬 사유를 적어라\n")
+    return 0, (f"### 매도 뒤 재투자\n\n상태 {d.get('status')}"
+               + (f" · 사유 {d.get('deferred_why')}" if d.get("deferred_why") else "") + "\n")
+
+
+def cmd_close(a) -> int:
+    """6단 마지막 고리(2026-10-15) — 계좌 현황 바로 앞에 돈다. ① 캡처가 미룬 미국 주간거래 손절 점검(국내 run · 실계좌 계열)
+    ② 매도 뒤 재투자 대기(`journal/refill_<st>_<mkt>.json`이 `open`이면 닫지 않는다 — 재투자 pass를 돌렸거나 미룬 사유를 적었어야 한다)
+    ③ 실전 점검표(`real_check.py`). 종료코드 3 = 재투자 미처리."""
+    import sessions as _ss
+    from kis_client import account_mode as _acct_mode, us_daytime_session as _uds
+    st = a.stamp or _ss.run_stamp(a.market)
+    blocks, rc = [], 0
+    mode = _acct_mode()
+    if a.market == "kr" and mode != "paper":
+        if _uds()["is_open"]:
+            blocks.append(run(["stops.py", "--market", "us", "--daytime", "--stamp", st] + (["--send"] if mode == "real" else []),
+                              "미국 주간거래 손절 점검 (stops.py --daytime · close)"))
+        else:
+            blocks.append("### 미국 주간거래 손절 점검\n\n주간거래 창 밖 — 정규장 run이 판정한다\n")
+    rc, rblk = refill_gate(a.market, st)
+    if rblk:
+        blocks.append(rblk)
+    rcp = PROJ / "data" / "run_evidence" / f"real_check_{st}_{a.market}.md"
+    if rc == 3:
+        # 재투자 미처리면 점검표를 쓰지 않고 지난 것도 치운다 — execute·no_trade 게이트가 점검표 파일의 존재를 보므로
+        # 판 돈을 그대로 둔 채 run을 닫을 수 없다(2026-10-15).
+        if rcp.exists():
+            rcp.unlink()
+        blocks.append("### 실전 점검표\n\n재투자 미처리라 쓰지 않았다 — 채우거나 `refill-defer`로 미룬 뒤 `stage.py close`를 다시 돌린다\n")
+    else:
+        blocks.append(run(["real_check.py", "--stamp", st, "--market", a.market], "실전 점검표 (real_check.py)"))
+    print("\n".join(blocks))
+    return rc
+
+
+def cmd_refill_defer(a) -> int:
+    """매도 뒤 재투자를 이 run에서 못 채운 사유를 적는다 → `deferred`(다음 run 이어받기 `## 재투자 대기`가 받는다)."""
+    import sessions as _ss
+    st = a.stamp or _ss.run_stamp(a.market)
+    rp = JOURNAL / f"refill_{st}_{a.market}.json"
+    if not rp.exists():
+        print(f"재투자 기록이 없다: {rp.name}", file=sys.stderr)
+        return 2
+    if len(a.why.strip()) < 10:
+        print("미룬 사유를 10자 이상으로 적어라(시그널 나이·장 마감·후보 없음 등 무엇 때문인지)", file=sys.stderr)
+        return 2
+    d = json.loads(rp.read_text(encoding="utf-8"))
+    d.update(status="deferred", deferred_why=a.why.strip(), deferred_at=datetime.now(KST).isoformat(timespec="seconds"))
+    rp.write_text(json.dumps(d, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(f"재투자 미룸 — {rp.name} · {a.why.strip()}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -990,9 +1362,16 @@ def main() -> int:
     mp.add_argument("--stamp", default="", metavar="YYMMDD")
     mp.add_argument("--refresh", action="store_true",
                     help="forecast add 뒤 생성줄만 다시 센다(파일은 그대로)")
+    cl = sub.add_parser("close", help="6단 마지막 — 미룬 주간거래 손절 점검 · 재투자 대기 확인 · 실전 점검표(계좌 현황 바로 앞)")
+    cl.add_argument("--market", choices=["kr", "us"], required=True)
+    cl.add_argument("--stamp", default="", metavar="YYMMDD")
+    rd = sub.add_parser("refill-defer", help="매도 뒤 재투자를 이 run에서 못 채운 사유를 적는다(다음 run이 이어받는다)")
+    rd.add_argument("--market", choices=["kr", "us"], required=True)
+    rd.add_argument("--stamp", default="", metavar="YYMMDD")
+    rd.add_argument("--why", required=True)
     a = ap.parse_args()
     return {"capture": cmd_capture, "carry": cmd_carry, "map": cmd_map, "stamp": cmd_stamp,
-            "market": cmd_market}[a.cmd](a)
+            "market": cmd_market, "close": cmd_close, "refill-defer": cmd_refill_defer}[a.cmd](a)
 
 
 if __name__ == "__main__":

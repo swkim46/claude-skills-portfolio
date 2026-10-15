@@ -34,13 +34,15 @@
           "claim": "한빛전선, 해상풍력 2단계 해저 HVDC 케이블 공급 계약 체결(가상 공시)",
           "source_url": "https://example.invalid/dart/900001-20261009",
           "tier": "T2",
-          "verdict": "MATCH"
+          "verdict": "MATCH",
+          "track1": "PASS"
         },
         {
           "claim": "전력망 확충 특별법 시행령 개정안 입법예고 — 국내 조달 의무 비율 2027년 40%, 2028년 60%(가상 공고)",
           "source_url": "https://example.invalid/moleg/notice-20261009",
           "tier": "T1",
-          "verdict": "MATCH"
+          "verdict": "MATCH",
+          "track1": "PASS"
         }
       ],
       "exits": [
@@ -53,7 +55,12 @@
         }
       ],
       "size_why": "기대 +18%(1차 목표 29,300) · 깨지는 조건: 조달 비율 40% 이하 후퇴 또는 2단계 발주 지연 · 손절 -9%(22,600) · gap 없음(투자비중 62% ≥ 목표 60%)이라 첫 칸 3%만 — 나머지는 되돌림 50% 사다리",
-      "concentration_why": ""
+      "concentration_why": "",
+      "expected_upside_pct": 18.0,
+      "small_why": {
+        "kind": "binary_event",
+        "why": "입법예고 결과(국내 조달 의무 비율 확정)가 나오기 전까지 첫 칸만 — 확정 뒤 되돌림 50%에 두 번째 칸"
+      }
     },
     {
       "ticker": "900002",
@@ -69,7 +76,8 @@
           "claim": "동양구리 3분기 가공 물량 전년 대비 증가(가상 IR)",
           "source_url": "https://example.invalid/ir/900002",
           "tier": "T2",
-          "verdict": "MATCH"
+          "verdict": "MATCH",
+          "track1": "PASS"
         }
       ],
       "exits": [
@@ -82,7 +90,8 @@
         }
       ],
       "size_why": "기대 +2%(1차 목표 12,300) · 깨지는 조건: 구리 가격 하락 전환 · 손절 -6% · 3차 수혜라 4%",
-      "concentration_why": ""
+      "concentration_why": "",
+      "expected_upside_pct": 2.0
     },
     {
       "ticker": "900004",
@@ -111,7 +120,8 @@
         }
       ],
       "size_why": "권유 문장 외 근거 없음",
-      "concentration_why": ""
+      "concentration_why": "",
+      "expected_upside_pct": 15.0
     }
   ],
   "watchlist_candidates": [
@@ -128,5 +138,14 @@
         }
       ]
     }
-  ]
+  ],
+  "refill_candidates": [],
+  "refill_none_why": "시연 — 이번 실행에 매도가 없어 재투자할 대금이 없다",
+  "rejected_candidates": [],
+  "track1": {
+    "audit": "PASS",
+    "rounds": 1,
+    "drop": [],
+    "_comment": "시연용 — 실제 운영에서는 fc_track1.py decide가 판정표에서 옮겨 적는다"
+  }
 }

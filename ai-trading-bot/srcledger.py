@@ -52,6 +52,7 @@ RX_WRITTEN = re.compile(r"<!--\s*written\s+" + _SEC +
 
 
 SHARED = HERE / "journal" / "sources.json"
+QUOTE_MIN = 20                     # 원문 인용 최소 길이 — 숫자 하나·제목 한 줄로 '인용'을 갈음하지 않게
 
 
 def _norm_fact(s: str) -> str:
@@ -115,7 +116,7 @@ def upsert_fact(row: dict, stamp: str, market: str) -> tuple:
         if tag not in r.setdefault("runs", []):
             r["runs"].append(tag)
         # 비어 있던 칸만 채운다 — 기존 시점을 덮지 않는다.
-        for k in ("as_of", "source", "url", "tier"):
+        for k in ("as_of", "source", "url", "tier", "quote"):
             if not r.get(k) or r.get(k) == "미확인":
                 if row.get(k):
                     r[k] = row[k]
@@ -201,6 +202,7 @@ def cmd_add(a) -> int:
             sub = _types.SimpleNamespace(stamp=a.stamp, market=a.market, fact=row["fact"],
                                          as_of=row.get("as_of") or row.get("as-of") or "",
                                          source=row.get("source") or "", url=row.get("url") or "",
+                                         quote=row.get("quote") or "",
                                          tier=_tier(row.get("tier")) if row.get("tier") is not None else None,
                                          minor=bool(row.get("minor")), batch="")
             rc = max(rc, cmd_add(sub))
@@ -214,21 +216,40 @@ def cmd_add(a) -> int:
         "retrieved": now.strftime("%Y-%m-%d %H:%M"),   # 자동 — 지금 가져왔다
         "source": (a.source or "").strip(),
         "url": (a.url or "").strip(),
+        "quote": (getattr(a, "quote", "") or "").strip(),
         "tier": a.tier,
         "load_bearing": not a.minor,
     }
+    # ★ [AI] 줄은 인용과 함께 태어난다(2026-10-15 — 감사 74회 FAIL의 공통 뿌리: 노트에 [AI]를 먼저 쓰고 출처를 나중에 찾았다).
+    #   새 T1·T2 load-bearing 사실은 원문 인용(출처 문장 그대로 20자 이상)과 URL 없이는 등록하지 않는다. 이미 원장에 있는 사실을
+    #   다시 인용할 때 인용이 비어 있으면 경고만 한다(옛 사실 — 이번에 인용을 주면 채운다).
+    if row["tier"] in (1, 2) and row["load_bearing"]:
+        prev = next((r for r in load_shared()["sources"] if _norm_fact(r.get("fact")) == _norm_fact(row["fact"])), None)
+        miss = [w for w, ok in (("원문 인용(출처 문장 그대로 20자 이상)", len(row["quote"]) >= QUOTE_MIN
+                                 or (prev and len(str(prev.get("quote") or "")) >= QUOTE_MIN)),
+                                ("URL", bool(row["url"]) or bool(prev and prev.get("url")))) if not ok]
+        if miss and not prev:
+            print(f"  ✗ 등록 거부 — T{row['tier']} 사실은 {' · '.join(miss)}이 있어야 한다: {row['fact'][:70]}\n"
+                  f"    (리서치·심층 결과에서 그 사실이 나온 원문 문장을 --quote로 · 못 받았으면 노트에 [AI]가 아니라 [확인 안 됨])",
+                  file=sys.stderr)
+            return 2
+        if miss:
+            print(f"  ※ 옛 사실 재인용 — {' · '.join(miss)} 없음: {row['fact'][:60]} (이번에 --quote를 주면 채운다)", file=sys.stderr)
     if not row["as_of"]:
         # ★ 막지는 않는다(모르는 것을 아는 척 적게 만들면 더 나쁘다). 대신 남긴다.
         row["as_of"] = "미확인"
         print("  ※ as-of를 안 줬다 → '미확인'으로 기록했다. **load-bearing 사실이면 "
               "게이트가 막는다** — 출처의 기준일·발표일을 찾아 다시 넣어라.", file=sys.stderr)
     saved, is_new = upsert_fact(row, a.stamp, a.market)
-    n = len(load(a.stamp, a.market)["rows"])
+    rows_now = load(a.stamp, a.market)["rows"]
+    n = len(rows_now)
+    # 노트 [AI] 문장 끝에 다는 출처 번호 — §12 render의 S 칸과 같은 순서(2026-10-13)
+    sn = next((i for i, r in enumerate(rows_now, 1) if r.get("id") == saved.get("id")), n)
     if is_new:
-        print(f"기록: {saved['id']} {saved['fact'][:56]} · as-of {saved['as_of']} "
+        print(f"기록: {saved['id']} [S{sn}] {saved['fact'][:56]} · as-of {saved['as_of']} "
               f"· retrieved {saved['retrieved']} (이 run {n}행)")
     else:
-        print(f"재사용: {saved['id']} {saved['fact'][:56]} — 이미 원장에 있다. "
+        print(f"재사용: {saved['id']} [S{sn}] {saved['fact'][:56]} — 이미 원장에 있다. "
               f"as-of {saved['as_of']} · retrieved {saved['retrieved']}(원래 시점 유지) "
               f"· 인용 run {len(saved.get('runs') or [])}개")
         print("  ※ **다시 조사하지 않아도 된다.** 세 시점 중 새로 찍히는 건 written뿐이다.")
@@ -250,16 +271,21 @@ def cmd_render(a) -> int:
         print("*(이번 run에 기록된 외부 출처 없음 — 캡처 파일의 시세만 사용했다면 그렇게 적는다)*",
               file=buf)
     else:
-        print("| 사실 | as-of | retrieved | written | 출처 |", file=buf)
-        print("|---|---|---|---|---|", file=buf)
-        for r in d["rows"]:
+        # S 칸 = 노트 [AI] 문장 끝 [S번호]가 가리키는 행(2026-10-13 — 노트 끝 출처 표를 따로 만들지 않는다)
+        print("| S | 사실 | 원문 인용 | as-of | retrieved | written | 출처 |", file=buf)
+        print("|---|---|---|---|---|---|---|", file=buf)
+        for i, r in enumerate(d["rows"], 1):
             src = r.get("source") or "—"
             if r.get("url"):
                 src = f"[{src}]({r['url']})"
             if r.get("tier"):
                 src += f" ({'data' if r['tier'] == 'data' else 'T' + str(r['tier'])})"
             flag = "" if r.get("load_bearing", True) else " *(참고)*"
-            print(f"| {r['fact']}{flag} | {r.get('as_of') or '미확인'} "
+            if r.get("id"):
+                src += f" · {r['id']}"
+            q = str(r.get("quote") or "").replace("|", "\\|").replace("\n", " ")
+            q = (f'"{q[:160]}…"' if len(q) > 160 else f'"{q}"') if q else "—"
+            print(f"| S{i} | {r['fact']}{flag} | {q} | {r.get('as_of') or '미확인'} "
                   f"| {r.get('retrieved') or '미기록'} | {written} | {src} |", file=buf)
     # 두 줄로 — `✓` 줄은 게이트가 글자 그대로 찾는 계약이라 안을 고치면 안 된다.
     print(f"\n<!-- ✓ §12 -->\n<!-- written §12 {written} -->", file=buf)
@@ -332,7 +358,10 @@ def cmd_check(a) -> int:
     n_fail = sum(1 for _, ok, _ in checks if not ok)
     buf = io.StringIO()
     print(f"# 세 시점 대조 — {a.stamp} · {a.market.upper()}\n", file=buf)
-    print(f"> 대상 `{np_.name}` · 실행 {datetime.now(KST):%Y-%m-%d %H:%M:%S} KST\n", file=buf)
+    # '실행' 날짜는 이 run의 세션 날짜(2026-10-14 · 현지 거래일 — note 게이트가 그 날짜를 대조한다) · 실제 시각은 '기록'
+    import sessions as _ss
+    print(f"> 대상 `{np_.name}` · 실행 {_ss.session_iso(a.stamp, a.market)} 세션 · "
+          f"기록 {datetime.now(KST):%Y-%m-%d %H:%M:%S} KST\n", file=buf)
     print(f"[세시점] 검사 {len(checks)}건 · 실패 {n_fail}건\n", file=buf)
     print("| 검사 | 결과 | 근거 |\n|---|---|---|", file=buf)
     for name, ok, why in checks:
@@ -412,6 +441,7 @@ def main() -> int:
                            help="출처가 말하는 기준일·발표일 (수동 — 이것만 자동이 아니다)")
             s.add_argument("--source", default="")
             s.add_argument("--url", default="")
+            s.add_argument("--quote", default="", help="원문 인용 — 출처 문장 그대로 20자 이상(T1·T2 새 사실은 필수 · 2026-10-15)")
             s.add_argument("--tier", type=_tier, choices=[1, 2, 3, "data"],
                            help="1 공식·1차 / 2 언론·집계 / 3 UGC·요약 / data = 브로커 API 시세·기저율·수준값(논지 근거가 아니라 데이터)")
             s.add_argument("--minor", action="store_true",

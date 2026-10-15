@@ -68,12 +68,26 @@ TR = {
         "ov_psamount": "TTTS3007R",
         "ov_buy_us": "TTTT1002U",
         "ov_sell_us": "TTTT1006U",
-        "dom_ccld": "TTTC8001R",
+        # ★ 실전 체결조회는 공식 예제(inquire_daily_ccld.py, 3개월 이내)의 TTTC0081R + EXCG_ID_DVSN_CD=ALL —
+        #   SOR 주문은 KRX·NXT로 갈라질 수 있어 거래소 구분 'ALL'로 묻는다. 2026-10-12 실계좌 조회 전용 호출로
+        #   TTTC0081R·TTTC8001R 둘 다 rt_cd 0(KIOK0560 내역 없음)을 확인했다.
+        "dom_ccld": "TTTC0081R",
         "dom_rvsecncl": "TTTC0013U",
         "ov_ccld": "TTTS3035R",
         "ov_rvsecncl_us": "TTTT1004U",
+        # 미국 주간거래(KST 10:00–18:00 · 서머타임 10:00–17:00 — 한투 거래시간 안내). 지정가만. 모의 TR 없음.
+        # 2026-10-12 사용자 결정: **손절·추적 매도 전용** — 매수 TR은 기록만 하고 코드가 부르지 않는다.
+        "ov_daytime_buy_us": "TTTS6036U",
+        "ov_daytime_sell_us": "TTTS6037U",
+        "ov_daytime_rvsecncl_us": "TTTS6038U",
     },
 }
+
+# 주간거래 시세용 거래소 코드(price_detail.py 공식 목록 BAY/BAQ/BAA). 2026-10-12 실측: 20:48 KST에 BAQ AAPL은
+# 주간 세션 마지막가 337.85(거래량 43,503), NAS AAPL은 프리마켓가 337.32 — 세션마다 값이 다르다.
+DAYTIME_QUOTE_EXCD = {"NASD": "BAQ", "NYSE": "BAY", "AMEX": "BAA"}
+
+ACCOUNT_MODES = ("paper", "real_readonly", "real")
 
 # 해외 예수금 후보 필드. 공식 샘플에 응답 필드명이 문서화되어 있지 않아
 # (examples_llm/overseas_stock/inquire_present_balance/는 파라미터만 기술) 후보를
@@ -181,6 +195,22 @@ def snap_kr_price(price: float, side: str) -> int:
     return max(snapped, tick)
 
 
+def buy_qty_within(cap_qty: int, room: float, px: float) -> int:
+    """매수 수량 = 금액 여유 ÷ 가격의 내림(상한 `cap_qty`) — **단 내림이 0주면 1주**.
+
+    한도는 금액이라 가격이 오르면 주 수를 줄인다. 그런데 승인 수량이 남았는데 내림이 0주를 만들면
+    **승인이 통째로 사라진다** — 몇 센트 오른 대가가 주문 전체다. 호출자(전송 직전 갱신 · 정정 · 재발주)가
+    가격을 이미 허용 이탈(`send_refresh_max_pct` · `fill_chase_max_pct` · `fill_reorder_max_pct`) 안으로 묶으므로
+    1주의 금액 초과는 그 % + 틱 이내다. 승인 **수량**은 넘지 않는다(승인 대비 대조 `reconcile`은 수량 기준).
+    *실사례(2026-10-08·10-09 US): 1주 승인 GEV·ASML·CAT이 집행 시점 시세가 승인가보다 몇 센트 높아 0주로 미전송됐다.
+    ASML은 재발행 세 번이 모두 같은 이유로 막혔고, 반센트 승인가(1,791.005)는 시세가 같아도 0주였다.*
+    """
+    if cap_qty <= 0 or px <= 0:
+        return 0
+    n = int((room + 1e-6) // px)                      # 부동소수 오차로 정확히 맞는 금액이 한 주 모자라지 않게
+    return max(1, min(cap_qty, n))
+
+
 def order_excd(excd: str) -> str:
     """주문용 거래소 코드로 정규화한다. 시세용(NAS/NYS/AMS)이 오면 주문용으로 바꾼다."""
     e = (excd or "NASD").upper()
@@ -283,6 +313,49 @@ def market_session(market: str, now: datetime = None) -> dict:
                    + (" · 휴장(holidays.json)" if hol else "")}
 
 
+def us_daytime_session(now: datetime = None) -> dict:
+    """미국 **주간거래** 창(KST). 반환 {open, close, is_open, session_date, holiday, why}.
+
+    한투 거래시간 안내(TF03ca050001, 2026-10-12 확인): "주간거래(장전거래) : 10:00 ~ 18:00 (Summer Time 10:00 ~ 17:00)".
+    그날 KST 오전에 열리는 주간 세션은 **같은 날짜의 미국 정규장**(그날 밤 22:30/23:30 KST 개장)에 앞선 세션이다 —
+    그래서 휴장은 KST 날짜를 미국 휴장일로 대조한다. 2026-10-12 사용자 결정: 이 창은 손절·추적 매도에만 쓴다.
+    """
+    now = now or datetime.now(KST)
+    d = now.date()
+    dst = _us_dst(d)
+    o = datetime(d.year, d.month, d.day, 10, 0, tzinfo=KST)
+    c = datetime(d.year, d.month, d.day, 17 if dst else 18, 0, tzinfo=KST)
+    hol = is_holiday("US", d)
+    is_open = d.weekday() < 5 and not hol and o <= now <= c
+    return {"market": "US", "session": "daytime", "open": o, "close": c, "is_open": is_open,
+            "session_date": d, "holiday": hol,
+            "why": f"미국 주간거래 KST {o:%H:%M}–{c:%H:%M} ({'서머타임' if dst else '표준시'})"
+                   + (" · 휴장(holidays.json)" if hol else "")}
+
+
+def account_mode(cfg: dict = None) -> str:
+    """`config/limits.json`의 `account_mode` — paper · real_readonly · real. 없거나 모르는 값이면 'paper'(fail-safe)."""
+    if cfg is None:
+        try:
+            cfg = json.loads((CONFIG_DIR / "limits.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return "paper"
+    m = str(cfg.get("account_mode") or "paper").strip()
+    return m if m in ACCOUNT_MODES else "paper"
+
+
+def acct_family(mode: str = None) -> str:
+    """계좌 계열 'paper' 또는 'real'(real · real_readonly). `mode`를 안 주면 지금 설정의 계좌 모드(2026-10-15 실계좌 전환)."""
+    m = account_mode() if mode is None else mode
+    return "paper" if str(m or "paper") == "paper" else "real"
+
+
+def same_account(row: dict, family: str = None) -> bool:
+    """기록 행(자산 곡선·스냅샷)이 지금 계좌 계열의 것인가 — 표시 없는 옛 행은 모의다.
+    실계좌 전환 뒤 모의 기록이 실계좌 숫자(전일 대비·누적·비용·반대편 자산)에 섞이지 않게 읽는 쪽이 이것으로 거른다."""
+    return acct_family(str((row or {}).get("account_mode") or "paper")) == (family or acct_family())
+
+
 class KisError(RuntimeError):
     """API가 성공(rt_cd=0) 이외를 돌려줬거나 HTTP가 실패한 경우."""
 
@@ -318,10 +391,14 @@ def load_env() -> dict:
 
 
 class KisClient:
-    def __init__(self, svr: str = "paper", allow_real: bool = False):
+    def __init__(self, svr: str = "paper", allow_real: bool = False, read_only: bool = False):
         if svr not in BASE_URL:
             raise ValueError(f"svr must be 'paper' or 'real', got {svr!r}")
-        if svr == "real":
+        # ★ 조회 전용(2026-10-12 실계좌 전환): 실계좌를 **읽기만** 하는 클라이언트는 래치 없이 연다 — 주문·정정·취소
+        #   메서드가 전부 KisError로 거부하므로 돈이 나갈 경로가 없다. 조회 전용 주간(account_mode real_readonly)과
+        #   실전 중의 수집·잔고 조회(주문 안 하는 스크립트)가 이 길로 간다.
+        self.read_only = bool(read_only)
+        if svr == "real" and not self.read_only:
             # 래치 2개를 모두 넘어야 실전이 열린다.
             # ① 코드 경로가 명시적으로 allow_real=True를 넘길 것(--real 플래그)
             # ② config/limits.json의 real_trading_enabled가 true일 것(사람이 파일을 고칠 것)
@@ -336,6 +413,11 @@ class KisClient:
                 raise KisError(
                     "config/limits.json의 real_trading_enabled가 false다 — 실전 차단.\n"
                     "실계좌로 넘어갈 준비가 됐다고 판단했을 때 사람이 직접 true로 바꿀 것."
+                )
+            if account_mode() != "real":
+                raise KisError(
+                    f"config/limits.json의 account_mode가 {account_mode()!r}다 — 실계좌 주문은 'real'에서만 연다. "
+                    "조회만 할 거면 read_only=True(또는 KisClient.for_mode())로 열 것."
                 )
         self.svr = svr
         self.base = BASE_URL[svr]
@@ -359,6 +441,37 @@ class KisClient:
         self._last_call = 0.0
         self._token = None
 
+    @classmethod
+    def for_mode(cls, orders: bool = False, cfg: dict = None) -> "KisClient":
+        """`account_mode`가 정하는 계좌로 연다 — **모든 진입점이 이걸 쓴다**(스크립트마다 모의·실전이 섞이지 않게).
+
+        - paper → 모의계좌(주문 가능)
+        - real_readonly → 실계좌 조회 전용(`orders`와 무관 — 주문 메서드는 거부)
+        - real → `orders=True`면 실계좌 주문(래치 `real_trading_enabled`도 true여야 한다), 아니면 조회 전용
+        """
+        mode = account_mode(cfg)
+        if mode == "paper":
+            return cls(svr="paper")
+        if mode == "real" and orders:
+            return cls(svr="real", allow_real=True)
+        return cls(svr="real", allow_real=True, read_only=True)
+
+    @property
+    def mode(self) -> str:
+        """이 클라이언트가 실제로 연 계좌 — paper · real_readonly · real."""
+        if self.svr == "paper":
+            return "paper"
+        return "real_readonly" if self.read_only else "real"
+
+    @property
+    def kr_excg(self) -> str:
+        """국내 주문 거래소 구분 — 실계좌는 SOR(KRX·NXT 자동 배분 · 2026-10-12 사용자 결정), 모의는 KRX."""
+        return "SOR" if self.svr == "real" else "KRX"
+
+    def _guard_orders(self, what: str) -> None:
+        if self.read_only:
+            raise KisError(f"조회 전용 모드 — 주문 차단({what}). account_mode={account_mode()!r}")
+
     # ------------------------------------------------------------- transport
 
     def _throttle(self):
@@ -374,12 +487,20 @@ class KisClient:
 
         주의: 재시도는 **조회에만** 안전하다. 주문은 재시도하면 이중 체결 위험이 있어
         POST는 재시도하지 않는다(아래 allow_retry 참조).
+        ★ 예외 하나(FB-261003-11, 2026-10-03 승인): POST가 **초당 한도(EGW00201)로 접수조차 안 됐으면**(주문번호 없음)
+        물러섰다가 다시 보낸다. 접수 전 거부라 중복 주문이 아니다 — 14일간 이렇게 실패한 주문 7건이 전부 output 공백이었다.
         """
         url = self.base + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
         data = json.dumps(body).encode("utf-8") if body is not None else None
         allow_retry = method.upper() == "GET"
+        is_post = method.upper() == "POST"
+        post_rl = 0
+
+        def _no_order_no(r) -> bool:
+            out = r.get("output") if isinstance(r, dict) else None
+            return not (isinstance(out, dict) and str(out.get("ODNO") or "").strip())
 
         last_err = None
         max_tries = max(RATE_LIMIT_RETRIES, TRANSIENT_RETRIES) + 1
@@ -389,6 +510,12 @@ class KisClient:
             try:
                 with urllib.request.urlopen(req, timeout=timeout, context=self._ctx) as r:
                     res = json.loads(r.read().decode("utf-8"))
+                if (is_post and res.get("msg_cd") == RATE_LIMIT_CODE and _no_order_no(res)
+                        and post_rl < RATE_LIMIT_RETRIES):
+                    post_rl += 1
+                    time.sleep(RATE_LIMIT_BACKOFF_SEC * post_rl)
+                    last_err = KisError(f"{RATE_LIMIT_CODE}(접수 전) on POST {path} — 재전송 {post_rl}/{RATE_LIMIT_RETRIES}")
+                    continue
                 if (res.get("msg_cd") in TRANSIENT_CODES
                         and allow_retry and attempt < TRANSIENT_RETRIES):
                     time.sleep(TRANSIENT_BACKOFF_SEC * (attempt + 1))
@@ -400,6 +527,11 @@ class KisClient:
                 # KIS는 레이트리밋·게이트웨이 오류를 HTTP 500 + 본문 코드로 돌려준다. 코드가 없는
                 # 5xx도 조회면 일시 장애로 보고 물러선다 — 4xx(인증·파라미터)는 다시 불러도 같다.
                 transient = any(c in detail for c in TRANSIENT_CODES) or 500 <= e.code < 600
+                if is_post and RATE_LIMIT_CODE in detail and post_rl < RATE_LIMIT_RETRIES:
+                    post_rl += 1                  # HTTP 오류 응답 = 접수되지 않았다 → 재전송해도 중복이 아니다
+                    time.sleep(RATE_LIMIT_BACKOFF_SEC * post_rl)
+                    last_err = KisError(f"HTTP {e.code} {RATE_LIMIT_CODE}(접수 전) on POST {path} — 재전송 {post_rl}/{RATE_LIMIT_RETRIES}")
+                    continue
                 if transient and allow_retry and attempt < TRANSIENT_RETRIES:
                     time.sleep(TRANSIENT_BACKOFF_SEC * (attempt + 1))
                     last_err = KisError(f"HTTP {e.code} on {method} {path}: {detail}")
@@ -427,12 +559,28 @@ class KisClient:
 
     # ----------------------------------------------------------------- token
 
-    def _load_cached_token(self):
+    @staticmethod
+    def _read_token_file() -> dict:
+        """토큰 캐시 파일 → {svr: entry}. 옛 형식(한 칸짜리 {svr, access_token, …})도 읽는다.
+
+        ★ 서버별로 칸을 나눈 이유(2026-10-12 실계좌 전환): 실전 중에도 시세 전용 스크립트는 모의 키로 돌고
+        잔고·주문은 실전 키로 돈다. 한 칸이면 둘이 번갈아 서로의 토큰을 지워 매번 재발급한다 — 발급은 빈도 제한이 있다.
+        """
         if not TOKEN_CACHE.exists():
-            return None
+            return {}
         try:
-            cache = json.loads(TOKEN_CACHE.read_text(encoding="utf-8"))
+            raw = json.loads(TOKEN_CACHE.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        if "access_token" in raw and raw.get("svr"):
+            return {raw["svr"]: raw}
+        return {k: v for k, v in raw.items() if isinstance(v, dict)}
+
+    def _load_cached_token(self):
+        cache = self._read_token_file().get(self.svr) or {}
+        if not cache:
             return None
         if cache.get("svr") != self.svr or cache.get("app_key_tail") != self.app_key[-6:]:
             return None
@@ -464,13 +612,15 @@ class KisClient:
         if not tok:
             raise KisError(f"토큰 발급 실패: {res}")
         expires_in = int(res.get("expires_in", 86400))
-        CONFIG_DIR.mkdir(exist_ok=True)
-        TOKEN_CACHE.write_text(json.dumps({
+        TOKEN_CACHE.parent.mkdir(exist_ok=True)
+        cache = self._read_token_file()
+        cache[self.svr] = {
             "svr": self.svr,
             "app_key_tail": self.app_key[-6:],
             "access_token": tok,
             "expires_at": (datetime.now(KST) + timedelta(seconds=expires_in)).isoformat(),
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        }
+        TOKEN_CACHE.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
         try:
             TOKEN_CACHE.chmod(0o600)
         except OSError:
@@ -521,6 +671,8 @@ class KisClient:
             "price": float(o.get("stck_prpr") or 0),
             "change_pct": float(o.get("prdy_ctrt") or 0),
             "volume": int(o.get("acml_vol") or 0),
+            # 전일 종가 = 기준가(stck_sdpr = stck_prpr − prdy_vrss · 2026-10-14 실응답 확인) — 지지 구간 종가 이탈(support_break)
+            "prev_close": float(o.get("stck_sdpr") or 0) or None,
         }
 
     def domestic_balance(self) -> dict:
@@ -554,10 +706,26 @@ class KisClient:
             })
         summary = (res.get("output2") or [{}])[0]
         cash, cash_field = kr_cash_from_summary(summary)
+        deposit_only, cash_shared, margin_note = None, False, ""
+        if self.svr == "real":
+            # ★ 실계좌는 통합증거금 — 원화 한 주머니를 국내·미국이 같이 쓴다(2026-10-12 신청·적용 확인).
+            #   밤에 미국을 사면 자동환전일 전까지 예수금(`prvs_rcdl_excc_amt`)은 그대로이고 **주문가능만** 준다 —
+            #   예수금을 현금으로 쓰면 다음 날 국내 run이 같은 돈을 또 쓰려다 증권사에 거부된다. 그래서 주문가능을 쓴다.
+            try:
+                kr_pool = kr_cash_from_margin(self.intgr_margin())
+            except KisError as e:
+                kr_pool, margin_note = None, f"통합증거금 조회 실패 — {str(e)[:80]}"
+            if kr_pool is not None:
+                deposit_only = cash
+                cash, cash_field = kr_pool["cash"], kr_pool["field"]
+                cash_shared = kr_pool["shared"]
         return {
             "currency": "KRW",
             "cash": cash,
-            "cash_field": cash_field,
+            "cash_field": cash_field + (f" · {margin_note}" if margin_note else ""),
+            # 실계좌: 예수금(참고) · 현금이 미국과 공유되는가(포트폴리오 합산에서 한 번만 센다)
+            "deposit_only": deposit_only,
+            "cash_shared": cash_shared,
             "deposit_total": float(summary.get("dnca_tot_amt") or 0),
             "eval_total": float(summary.get("tot_evlu_amt") or 0),
             # 당일 제비용과 체결금액. 브로커가 직접 계산해 주는 값이라 우리가 요율을
@@ -682,8 +850,13 @@ class KisClient:
         return out
 
     def domestic_order(self, ticker: str, side: str, qty: int,
-                       price: int = 0, market_order: bool = False) -> dict:
-        """국내 현금 매수/매도. market_order=True면 ORD_UNPR은 무시된다(시장가)."""
+                       price: int = 0, market_order: bool = False, excg: str = None) -> dict:
+        """국내 현금 매수/매도. market_order=True면 ORD_UNPR은 무시된다(시장가).
+
+        `excg`: 거래소 구분(KRX · NXT · SOR). 없으면 `kr_excg`(실계좌 SOR · 모의 KRX). execute가 SOR 거부를
+        받으면 같은 주문을 `excg="KRX"`로 한 번 다시 보낸다(거부 = 접수 안 됨이라 중복이 아니다).
+        """
+        self._guard_orders(f"국내 {side} {ticker}")
         if side not in ("BUY", "SELL"):
             raise ValueError(f"side must be BUY or SELL, got {side!r}")
         if qty <= 0:
@@ -709,7 +882,7 @@ class KisClient:
                 "ORD_DVSN": ORD_DVSN_MARKET if market_order else ORD_DVSN_LIMIT,
                 "ORD_QTY": str(int(qty)),
                 "ORD_UNPR": "0" if market_order else str(int(price)),
-                "EXCG_ID_DVSN_CD": "KRX",
+                "EXCG_ID_DVSN_CD": excg or self.kr_excg,
                 "SLL_TYPE": "01" if side == "SELL" else "",
                 "CNDT_PRIC": "",
             },
@@ -719,7 +892,7 @@ class KisClient:
         # raw는 응답 **전체**를 담는다. output만 남기면 주문번호를 못 읽었을 때
         # 무슨 일이 있었는지 사후에 복원할 수 없다(B3).
         return {"order_no": o.get("ODNO", ""), "order_time": o.get("ORD_TMD", ""),
-                "orgno": o.get("KRX_FWDG_ORD_ORGNO", ""), "raw": res}
+                "orgno": o.get("KRX_FWDG_ORD_ORGNO", ""), "excg": excg or self.kr_excg, "raw": res}
 
     def domestic_order_status(self, order_no: str, ticker: str = "", date: str = "") -> dict:
         """국내 주문 1건의 체결 상태. 반환 {order_no, ord_qty, filled_qty, remain_qty, avg_price,
@@ -734,17 +907,19 @@ class KisClient:
         #   "조회할 내역이 없습니다"). 체결 확정은 그날 안에 하므로 문제는 없지만, 지난 주문을
         #   여기로 다시 확인할 수는 없다 — found=False가 '없었다'는 뜻이 아니다.
         day = date or datetime.now(KST).strftime("%Y%m%d")
+        params = {
+            "CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd,
+            "INQR_STRT_DT": day, "INQR_END_DT": day,
+            "SLL_BUY_DVSN_CD": "00", "INQR_DVSN": "00", "PDNO": ticker or "",
+            "CCLD_DVSN": "00", "ORD_GNO_BRNO": "", "ODNO": "",
+            "INQR_DVSN_3": "00", "INQR_DVSN_1": "",
+            "CTX_AREA_FK100": "", "CTX_AREA_NK100": "",
+        }
+        if self.svr == "real":
+            params["EXCG_ID_DVSN_CD"] = "ALL"        # SOR 주문은 KRX·NXT로 갈라질 수 있다 — 전체로 묻는다
         res = self._request(
             "GET", "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
-            headers=self._headers(self.tr["dom_ccld"]),
-            params={
-                "CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd,
-                "INQR_STRT_DT": day, "INQR_END_DT": day,
-                "SLL_BUY_DVSN_CD": "00", "INQR_DVSN": "00", "PDNO": ticker or "",
-                "CCLD_DVSN": "00", "ORD_GNO_BRNO": "", "ODNO": "",
-                "INQR_DVSN_3": "00", "INQR_DVSN_1": "",
-                "CTX_AREA_FK100": "", "CTX_AREA_NK100": "",
-            },
+            headers=self._headers(self.tr["dom_ccld"]), params=params,
         )
         self._check(res, f"국내 주문체결조회({order_no})")
         rows = res.get("output1") or []
@@ -770,12 +945,13 @@ class KisClient:
                 "orgno": "", "raw": {"rows": len(rows)}}
 
     def domestic_modify(self, order_no: str, orgno: str, qty: int, price: int = 0,
-                        cancel: bool = False) -> dict:
+                        cancel: bool = False, excg: str = None) -> dict:
         """국내 정정(price로) 또는 취소. 반환 {order_no(새 번호), raw}. **재시도 없음**(POST).
 
         정정·취소는 새 주문번호를 받는다 — 호출자가 체인으로 이어 붙여 체결을 합산해야 한다.
         `QTY_ALL_ORD_YN=Y`라 잔량 전부에 적용된다(부분 정정은 쓰지 않는다 — 주문이 둘로 갈라진다).
         """
+        self._guard_orders(f"국내 {'취소' if cancel else '정정'} {order_no}")
         if qty <= 0:
             raise ValueError(f"qty must be positive, got {qty}")
         if not cancel:
@@ -791,7 +967,7 @@ class KisClient:
                 "ORD_DVSN": ORD_DVSN_LIMIT,
                 "RVSE_CNCL_DVSN_CD": CNCL if cancel else RVSE,
                 "ORD_QTY": str(int(qty)), "ORD_UNPR": "0" if cancel else str(int(price)),
-                "QTY_ALL_ORD_YN": "Y", "EXCG_ID_DVSN_CD": "KRX",
+                "QTY_ALL_ORD_YN": "Y", "EXCG_ID_DVSN_CD": excg or self.kr_excg,
             },
         )
         self._check(res, f"국내 {'취소' if cancel else '정정'}({order_no})")
@@ -815,6 +991,7 @@ class KisClient:
             "price": float(o.get("last") or 0),
             "change_pct": float(o.get("rate") or 0),
             "currency": o.get("curr", "USD"),
+            "prev_close": float(o.get("base") or 0) or None,     # 전일 종가(base = last − diff · 2026-10-14 실응답 확인)
         }
 
     def overseas_balance(self, excd: str = "NASD", currency: str = "USD") -> dict:
@@ -848,10 +1025,14 @@ class KisClient:
         # 이 TR의 output2에는 예수금이 없다(평가손익 요약이다). 현금은
         # overseas_present_balance()로 따로 읽는다 — cash를 여기서 추측해 채우면
         # 현금하한·서킷브레이커가 잘못된 값 위에서 돈다.
+        # ★ eval_total은 **종목 평가금액(USD) 합**이다(현금 제외). `tot_evlu_pfls_amt`는 총평가손익(원화)이라
+        #   평가총액 자리에 두면 아쉬움 감사의 미국 비중이 수십~수백 분의 1로 계산됐다(2026-10-10 · FB-261010-2).
+        #   그 값은 pnl_total_krw로 따로 둔다.
         return {
             "currency": currency,
             "cash": None,
-            "eval_total": float(summary.get("tot_evlu_pfls_amt") or 0),
+            "eval_total": round(sum(p["eval_amt"] for p in positions), 4),
+            "pnl_total_krw": float(summary.get("tot_evlu_pfls_amt") or 0),
             "positions": positions,
         }
 
@@ -919,12 +1100,7 @@ class KisClient:
         )
         self._check(res, f"해외 주문가능금액({ticker})")
         o = res.get("output", {}) or {}
-        return {
-            "currency": o.get("tr_crcy_cd", "USD"),
-            "orderable_cash": float(o.get("ord_psbl_frcr_amt") or 0),
-            "max_qty": int(float(o.get("max_ord_psbl_qty") or 0)),
-            "exchange_rate": float(o.get("exrt") or 0),
-        }
+        return orderable_from_psamount(o, self.svr)
 
     def overseas_order(self, ticker: str, side: str, qty: int,
                        limit_price: float, excd: str = "NASD") -> dict:
@@ -934,6 +1110,7 @@ class KisClient:
         시장가 폴백을 두지 않는 이유: 폴백이 있으면 모의에서 조용히 실패하고
         실전에서만 동작이 갈리는데, 그게 정확히 우리가 피하려는 종류의 사고다.
         """
+        self._guard_orders(f"해외 {side} {ticker}")
         if side not in ("BUY", "SELL"):
             raise ValueError(f"side must be BUY or SELL, got {side!r}")
         if excd not in US_EXCHANGES:
@@ -1019,6 +1196,7 @@ class KisClient:
     def overseas_modify(self, order_no: str, ticker: str, excd: str, qty: int,
                         price: float = 0.0, cancel: bool = False) -> dict:
         """해외(미국) 정정 또는 취소. 반환 {order_no(새 번호), raw}. **재시도 없음**(POST)."""
+        self._guard_orders(f"해외 {'취소' if cancel else '정정'} {order_no}")
         if qty <= 0:
             raise ValueError(f"qty must be positive, got {qty}")
         if not cancel and (not price or price <= 0):
@@ -1039,6 +1217,126 @@ class KisClient:
         self._check(res, f"해외 {'취소' if cancel else '정정'}({order_no})")
         o = res.get("output", {}) or {}
         return {"order_no": o.get("ODNO", ""), "order_time": o.get("ORD_TMD", ""), "raw": res}
+
+    def overseas_daytime_order(self, ticker: str, side: str, qty: int, limit_price: float,
+                               excd: str = "NASD") -> dict:
+        """미국 **주간거래** 주문(KST 10:00–18:00 · 서머타임 17:00). **매도만** — 2026-10-12 사용자 결정(손절·추적 전용).
+
+        공식 daytime_order.py: `/uapi/overseas-stock/v1/trading/daytime-order` · 매도 TTTS6037U · "주간거래는 지정가만 가능".
+        모의 TR이 없어 모의에서는 시험할 수 없다 — 실계좌 첫 사용 전 조회 전용 주간에 응답 필드를 확인한다.
+        """
+        self._guard_orders(f"주간거래 {side} {ticker}")
+        if side != "SELL":
+            raise ValueError("주간거래는 매도 전용이다(2026-10-12 사용자 결정 — 신규 매수는 정규장에서만)")
+        if self.svr != "real" or not self.tr.get("ov_daytime_sell_us"):
+            raise KisError("주간거래 주문은 실계좌 전용이다(모의 TR 없음)")
+        excd = order_excd(excd)
+        if excd not in US_EXCHANGES:
+            raise ValueError(f"지원 거래소는 {US_EXCHANGES}, got {excd!r}")
+        if qty <= 0:
+            raise ValueError(f"qty must be positive, got {qty}")
+        if not limit_price or limit_price <= 0:
+            raise ValueError("주간거래는 지정가만 받는다 — limit_price 필수")
+        res = self._request(
+            "POST", "/uapi/overseas-stock/v1/trading/daytime-order",
+            headers=self._headers(self.tr["ov_daytime_sell_us"]),
+            body={
+                "CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd,
+                "OVRS_EXCG_CD": excd, "PDNO": ticker,
+                "ORD_QTY": str(int(qty)), "OVRS_ORD_UNPR": f"{limit_price:.2f}",
+                "CTAC_TLNO": "", "MGCO_APTM_ODNO": "",
+                "ORD_SVR_DVSN_CD": "0", "ORD_DVSN": ORD_DVSN_LIMIT,
+            },
+        )
+        self._check(res, f"주간거래 주문({side} {ticker} x{qty})")
+        o = res.get("output", {}) or {}
+        return {"order_no": o.get("ODNO", ""), "order_time": o.get("ORD_TMD", ""),
+                "orgno": o.get("KRX_FWDG_ORD_ORGNO", ""), "session": "daytime", "raw": res}
+
+    def overseas_daytime_modify(self, order_no: str, ticker: str, excd: str, qty: int,
+                                price: float = 0.0, cancel: bool = False) -> dict:
+        """주간거래 정정·취소 — 공식 daytime_order_rvsecncl.py(TTTS6038U). **재시도 없음**(POST)."""
+        self._guard_orders(f"주간거래 {'취소' if cancel else '정정'} {order_no}")
+        if self.svr != "real" or not self.tr.get("ov_daytime_rvsecncl_us"):
+            raise KisError("주간거래 정정·취소는 실계좌 전용이다(모의 TR 없음)")
+        if qty <= 0:
+            raise ValueError(f"qty must be positive, got {qty}")
+        if not cancel and (not price or price <= 0):
+            raise ValueError("정정에는 price가 필요하다")
+        res = self._request(
+            "POST", "/uapi/overseas-stock/v1/trading/daytime-order-rvsecncl",
+            headers=self._headers(self.tr["ov_daytime_rvsecncl_us"]),
+            body={
+                "CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd,
+                "OVRS_EXCG_CD": order_excd(excd), "PDNO": ticker, "ORGN_ODNO": str(order_no),
+                "RVSE_CNCL_DVSN_CD": CNCL if cancel else RVSE, "ORD_QTY": str(int(qty)),
+                "OVRS_ORD_UNPR": "0" if cancel else f"{price:.2f}",
+                "CTAC_TLNO": "", "MGCO_APTM_ODNO": "", "ORD_SVR_DVSN_CD": "0",
+            },
+        )
+        self._check(res, f"주간거래 {'취소' if cancel else '정정'}({order_no})")
+        o = res.get("output", {}) or {}
+        return {"order_no": o.get("ODNO", ""), "order_time": o.get("ORD_TMD", ""), "raw": res}
+
+    def intgr_margin(self) -> dict:
+        """통합증거금 현황(공식 intgr_margin.py · TTTC0869R · 원화 기준). 반환 output 원본 dict.
+
+        2026-10-12 실계좌 실측: 신청 전 `ovrs_stck_itgr_mgna_dvsn_name` 공란·`usd_itgr_ord_psbl_amt` 0 →
+        신청 후 "통합증거금신청"·9,401,030.64(원화 기준) · `stck_itgr_cash100_ord_psbl_amt` 9,950,248.76.
+        """
+        res = self._request(
+            "GET", "/uapi/domestic-stock/v1/trading/intgr-margin",
+            headers=self._headers("TTTC0869R"),
+            params={"CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd,
+                    "CMA_EVLU_AMT_ICLD_YN": "N", "WCRC_FRCR_DVSN_CD": "02",
+                    "FWEX_CTRT_FRCR_DVSN_CD": "02"},
+        )
+        self._check(res, "통합증거금 조회")
+        o = res.get("output") or {}
+        return (o[0] if o else {}) if isinstance(o, list) else o
+
+
+def orderable_from_psamount(o: dict, svr: str = "paper") -> dict:
+    """해외 주문가능금액 응답 → {currency, orderable_cash, max_qty, exchange_rate, field, shared}.
+
+    ★ 통합증거금 실계좌는 필드가 다르다(2026-10-12 실측): `ord_psbl_frcr_amt`·`max_ord_psbl_qty`는 **0**이고
+    원화를 포함한 구매력은 `frcr_ord_psbl_amt1`(7,026.18 USD = 9,401,030원 ÷ 1,338)·`ovrs_max_ord_psbl_qty`(28)에 있다.
+    옛 필드만 읽으면 미국 현금이 0으로 잡혀 미국 매수가 전부 0주가 된다. 모의는 옛 필드에 값이 있다(2026-09-07 USD 100,000).
+    실계좌는 통합 필드를 먼저, 0이면 옛 필드 — 어느 것을 읽었는지 `field`로 돌려준다.
+    """
+    def f(k):
+        try:
+            return float(o.get(k) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    plain, itgr = f("ord_psbl_frcr_amt"), f("frcr_ord_psbl_amt1")
+    q_plain, q_itgr = int(f("max_ord_psbl_qty")), int(f("ovrs_max_ord_psbl_qty"))
+    if svr == "real" and itgr > 0:
+        cash, qty, field, shared = itgr, (q_itgr or q_plain), "frcr_ord_psbl_amt1 (통합증거금 — 원화 포함)", True
+    else:
+        cash, qty, field, shared = plain, q_plain, "ord_psbl_frcr_amt", False
+    return {"currency": o.get("tr_crcy_cd", "USD"), "orderable_cash": cash, "max_qty": qty,
+            "exchange_rate": f("exrt"), "field": field, "shared": shared}
+
+
+def kr_cash_from_margin(m: dict):
+    """통합증거금 응답 → 국내 매수에 쓸 현금. 반환 {cash, field, shared} 또는 None(못 읽음).
+
+    `stck_itgr_cash100_ord_psbl_amt` = 증거금 100%(현금) 기준 통합 주문가능 — 미국 매수로 묶인 원화가 빠진 값이다.
+    통합증거금이 아니면(구분명 공란) 일반 현금 주문가능 `stck_cash100_max_ord_psbl_amt`.
+    """
+    if not isinstance(m, dict) or not m:
+        return None
+    itgr = bool(str(m.get("ovrs_stck_itgr_mgna_dvsn_name") or "").strip())
+    for k in (("stck_itgr_cash100_ord_psbl_amt",) if itgr else ()) + ("stck_cash100_max_ord_psbl_amt", "stck_cash_ord_psbl_amt"):
+        v = m.get(k)
+        if v not in (None, ""):
+            try:
+                return {"cash": float(v), "field": f"{k} (통합증거금 주문가능{' — 미국과 공유' if itgr else ''})",
+                        "shared": itgr}
+            except (TypeError, ValueError):
+                continue
+    return None
 
 
 def drop_incomplete_session(rows: list, min_ratio: float = 0.2) -> tuple:
@@ -1098,14 +1396,15 @@ def us_buying_power(client: "KisClient", watchlist: dict) -> dict:
     ref = us[0] if us else {"ticker": "AAPL", "excd": "NASD"}
     excd = ref.get("excd", "NASD")
     out = {"cash": None, "cash_field": None, "exchange_rate": None,
-           "deposit_only": None, "error": None}
+           "deposit_only": None, "error": None, "cash_shared": False}
     try:
         quote_excd = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}.get(excd, "NAS")
         price = client.overseas_price(ref["ticker"], excd=quote_excd)["price"]
         ps = client.overseas_orderable(ref["ticker"], price, excd)
         out["cash"] = ps["orderable_cash"]
-        out["cash_field"] = "ord_psbl_frcr_amt (VTTS3007R)"
+        out["cash_field"] = f"{ps.get('field') or 'ord_psbl_frcr_amt'} ({client.tr['ov_psamount']})"
         out["exchange_rate"] = ps["exchange_rate"]
+        out["cash_shared"] = bool(ps.get("shared"))
     except KisError as e:
         out["error"] = str(e)
     try:                      # 참고용 예수금 — 구매력이 아니다. 진단에만 쓴다.
@@ -1113,6 +1412,37 @@ def us_buying_power(client: "KisClient", watchlist: dict) -> dict:
     except KisError:
         pass
     return out
+
+
+def balance_for(client: "KisClient", market: str, watchlist: dict, with_fx: bool = True, now: datetime = None) -> tuple:
+    """한 시장의 잔고 — **수집(ingest)·저널·매도 전용 pass(stops)가 같이 쓴다**. 반환 (balance, 오류 문구 또는 None).
+
+    ★ 2026-10-15 — 같은 블록이 세 곳에 복제돼 있었고 `stops.build_snapshot`은 미국 잔고를 raw `overseas_balance()`로만 읽어
+    현금·환율·현금 공유 칸이 없었다. 그래서 매도 전용 pass가 '판 뒤 gap'을 잴 수 없었다(10-14 미국 VST 추적 매도 뒤 재투자 불가).
+    - KR: 국내 잔고 + (with_fx면) 이 시점 환율 — 합산 분모의 환율은 이 run 값이어야 한다(2026-09-23)
+    - US: 해외 잔고 + 구매력(`us_buying_power` — 현금·환율·현금 공유). 구매력을 못 읽으면 cash=None(매수 보류)."""
+    market = (market or "KR").upper()
+    now = now or datetime.now(KST)
+    if market == "KR":
+        bal = client.domestic_balance()
+        err = None
+        if with_fx:
+            try:
+                bp = us_buying_power(client, watchlist)
+                if bp.get("exchange_rate"):
+                    bal["exchange_rate"] = bp["exchange_rate"]
+                    bal["exchange_rate_at"] = now.isoformat()
+            except (KisError, KeyError, TypeError) as e:
+                err = f"환율 조회 실패(반대편 스냅샷 값으로 물러선다): {type(e).__name__}"
+        return bal, err
+    bal = client.overseas_balance()
+    bp = us_buying_power(client, watchlist)
+    bal["cash"] = bp["cash"]
+    bal["cash_field"] = bp["cash_field"]
+    bal["exchange_rate"] = bp["exchange_rate"]
+    bal["deposit_only"] = bp["deposit_only"]
+    bal["cash_shared"] = bp.get("cash_shared", False)
+    return bal, (f"구매력 조회 실패: {bp['error']}" if bp["error"] else None)
 
 
 def _selftest():

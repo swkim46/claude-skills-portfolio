@@ -26,7 +26,7 @@ from pathlib import Path
 
 import peaks as peaks_store
 import risk_guard as rg
-from kis_client import KisClient, KisError, us_buying_power
+from kis_client import KisClient, KisError, us_buying_power, balance_for, acct_family, same_account
 
 HERE = Path(__file__).parent
 CONFIG_DIR = HERE / "config"
@@ -69,7 +69,10 @@ def today_cost_and_turnover(balance: dict, market: str, stamp: str = None) -> di
             "source": "broker (thdt_tlex_amt / thdt_buy_amt+thdt_sll_amt)",
         }
 
-    day = stamp or datetime.now(KST).strftime("%y%m%d")
+    if not stamp:
+        import sessions as _ss
+        stamp = _ss.run_stamp(market.lower())      # 현재 run의 스탬프(현지 거래일 · 2026-10-14)
+    day = stamp
     turnover = 0.0
     for p in sorted(JOURNAL_DIR.glob(f"trades_{day}_{market.lower()}*.json")):
         try:
@@ -238,7 +241,7 @@ def _scenario_metric(days: int) -> list:
         import io as _io
         buf = _io.StringIO()
         with contextlib.redirect_stdout(buf):
-            sc.cmd_audit(_a.Namespace(days=days, market=None, out=""))
+            sc.cmd_audit(_a.Namespace(days=days, market=None, out="", affects=None))
         line = next((l for l in buf.getvalue().splitlines() if l.startswith("[회피]")), "")
     except Exception as e:                                    # noqa: BLE001
         return [f"- **시나리오 실현↔대응** 계산 실패({type(e).__name__}) — 실패를 '0건'으로 "
@@ -250,22 +253,15 @@ def _scenario_metric(days: int) -> list:
 
 
 def daily(market: str, real: bool = False, stamp: str = None) -> int:
-    client = KisClient(svr="real" if real else "paper", allow_real=real)
+    client = KisClient.for_mode()            # 계좌 모드(2026-10-12) — 저널은 읽기만 한다
     watchlist = _read_json(WATCHLIST_PATH, {}) or {}
 
-    if market == "KR":
-        balance = client.domestic_balance()
-    else:
-        balance = client.overseas_balance()
-        # 해외 현금은 예수금이 아니라 **구매력**이다. ingest와 같은 헬퍼를 쓴다 —
-        # 예전엔 여기만 예수금(USD 0)을 읽어 equity=0이 되고, 그래서
-        # 아래 `equity > 0` 앵커 조건이 영영 거짓이었다.
-        bp = us_buying_power(client, watchlist)
-        balance["cash"] = bp["cash"]
-        balance["cash_field"] = bp["cash_field"]
-        balance["deposit_only"] = bp["deposit_only"]
-        if bp["error"]:
-            print(f"  구매력 조회 실패(앵커·수익률 계산 불가): {bp['error']}", file=sys.stderr)
+    # 해외 현금은 예수금이 아니라 **구매력**이다 — 수집과 같은 함수(`kis_client.balance_for`)를 쓴다(2026-10-15 통합).
+    # 예전엔 여기만 예수금(USD 0)을 읽어 equity=0이 되고, 그래서 아래 `equity > 0` 앵커 조건이 영영 거짓이었다.
+    balance, bal_err = balance_for(client, market, watchlist, with_fx=False)
+    if bal_err:
+        print(f"  {bal_err}(앵커·수익률 계산 불가)", file=sys.stderr)
+    bp = {"exchange_rate": balance.get("exchange_rate")}
     positions = balance.get("positions", [])
     cash = balance.get("cash")
     # ★ 현금을 못 읽었으면 **행을 쓰지 않는다.** `cash or 0`으로 계산하면 equity가 0이 되고
@@ -284,7 +280,10 @@ def daily(market: str, real: bool = False, stamp: str = None) -> int:
     #   성공 지표(③벤치마크 병기 기록의 완전성) 자체를 파괴하는 자리다. 그래서 여기서는
     #   '읽지 못함'과 '아직 없음'을 반드시 구분하고, 읽지 못했으면 **쓰지 않는다.**
     base, base_readable = _read_accum(BENCHMARK_PATH)
-    key = market
+    # ★ 기준점은 계좌 계열마다(2026-10-15 · 실계좌 전환) — 모의는 예전 키(KR·US) 그대로, 실계좌는 `KR:real`·`US:real`.
+    #   같은 키를 쓰면 실계좌 첫 행이 모의 시작 자산(약 1.5억)에 대어 누적 −90%로 찍힌다.
+    fam = acct_family(client.mode)
+    key = market if fam == "paper" else f"{market}:{fam}"
     if not base_readable:
         print("★ 벤치마크 기준점을 읽지 못했다 — **새 기준점을 박지 않는다.** "
               "옆으로 치워 보존했으니 복구한 뒤 다시 돌려라. 지금 박으면 누적수익이 "
@@ -305,10 +304,14 @@ def daily(market: str, real: bool = False, stamp: str = None) -> int:
     if b.get("start_benchmark_price") and bench.get("price"):
         shadow = b["start_equity"] * (bench["price"] / b["start_benchmark_price"])
 
-    session_date = (f"20{stamp[:2]}-{stamp[2:4]}-{stamp[4:6]}" if stamp
-                    else datetime.now(KST).strftime("%Y-%m-%d"))
+    # 행 날짜 = 이 run의 **세션 날짜**(2026-10-14 · 현지 거래일). 스탬프를 안 받으면 현재 run 포인터에서 —
+    # 미국 run이 자정을 넘겨도 그 세션 날짜로 한 줄이다(예전엔 KST 날짜라 새벽 기록이 다음 날 행이 됐다).
+    import sessions as _ss
+    stamp = stamp or _ss.run_stamp(market.lower())
+    session_date = _ss.session_iso(stamp, market.lower())
 
-    history = [r for r in latest_per_day(_load_equity()) if r.get("market") == market]
+    history = [r for r in latest_per_day(_load_equity()) if r.get("market") == market
+               and same_account(r, fam)]                  # 전일 대비·누적 비용·회전은 같은 계좌 계열 행으로만(2026-10-15)
     # 전일 대비를 재려면 '다른 날'의 행이어야 한다. 같은 날 두 번째 기록에서 직전 행을
     # 그냥 집으면 오늘을 오늘과 비교해 day_pnl_pct가 항상 0이 된다.
     prev = next((r for r in reversed(history) if r.get("date") != session_date), None)
@@ -331,6 +334,9 @@ def daily(market: str, real: bool = False, stamp: str = None) -> int:
         "currency": balance.get("currency", "KRW"),
         "equity": round(equity, 2),
         "cash": round(cash, 2) if cash is not None else None,
+        # 실계좌 통합증거금이면 이 현금은 반대편 시장과 **같은 돈**이다 — 합산하는 쪽이 한 번만 센다.
+        "cash_shared": bool(balance.get("cash_shared")),
+        "account_mode": client.mode,
         "n_positions": len(positions),
         "benchmark": bench,
         "shadow_benchmark_equity": round(shadow, 2) if shadow else None,
@@ -364,6 +370,34 @@ def daily(market: str, real: bool = False, stamp: str = None) -> int:
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     update_peaks(positions, market)
+
+    # ★ 실계좌(2026-10-12): 결제일이 지난 미국 체결에 그날 환율을 채운다 — 해외주식 양도소득세는 결제일 기준환율로 환산한다.
+    if client.svr == "real":
+        try:
+            import tax_ledger
+            rate = (bp.get("exchange_rate") if market == "US" else None) or None
+            n_fx = tax_ledger.fill_fx(rate, source="KIS exrt(journal --daily)" if rate else "")
+            if n_fx:
+                print(f"  결제일 환율 채움 {n_fx}건(tax_ledger)")
+        except Exception as e:                          # noqa: BLE001 — 세금 원장 실패가 저널 기록을 막지 않는다
+            print(f"  ★ 결제일 환율 채우기 실패({type(e).__name__}: {str(e)[:80]})", file=sys.stderr)
+
+    # ★ 그림자 점검(2026-10-12 사용자: 실전 전환 직전까지 모의 매매 유지) — 모의 run의 시그널을 실계좌 잔고·규칙으로 다시 재 본다.
+    #   주문·원장 쓰기 없음. 같은 시그널은 한 번만(결과 파일이 시그널보다 새로우면 건너뛴다). 실패해도 저널은 그대로 쓴다.
+    if client.svr == "paper":
+        try:
+            _lim = _read_json(HERE / "config" / "limits.json", {}) or {}
+            if _lim.get("real_shadow_check"):
+                _st = stamp or datetime.strptime(str(session_date), "%Y-%m-%d").strftime("%y%m%d")
+                _sig = HERE / "signals" / f"signal_{_st}_{market.lower()}.json"
+                _out = HERE / "data" / "run_evidence" / f"real_shadow_{_st}_{market.lower()}.md"
+                if _sig.exists() and not (_out.exists() and _out.stat().st_mtime > _sig.stat().st_mtime):
+                    import real_probe
+                    _r = real_probe.shadow(_st, market.lower())
+                    print(f"  그림자 점검(실계좌 잔고·규칙 · 주문 없음): 매수 {len(_r.get('buys') or [])}건 · "
+                          f"상한 초과 {len(_r.get('cap_over') or [])}건 → {_r.get('file') or _r.get('why')}")
+        except Exception as e:                          # noqa: BLE001 — 그림자 점검 실패가 저널을 막지 않는다
+            print(f"  ★ 그림자 점검 실패({type(e).__name__}: {str(e)[:80]})", file=sys.stderr)
 
     print(f"[{row['date']} {market}] equity {equity:,.0f} {row['currency']} "
           f"/ 현금 {'미확인' if cash is None else format(cash, ',.0f')} / {len(positions)}종목")
@@ -439,8 +473,17 @@ def _forecast_block(days: int) -> list:
     return out
 
 
+def _account_floor_line() -> str:
+    """★ 2026-10-03 사용자: "1~2% 벌 거면 벌지 마 — 최소 10%는 하한이지 목표가 아니다." 계좌 30일 수익률을 첫 줄에 바닥과 비교한다."""
+    try:
+        import feedback as _fb
+        return "**" + _fb.account_line(30).replace("**", "") + "**"
+    except Exception as e:                    # noqa: BLE001 — 리포트가 이것 때문에 죽으면 안 된다
+        return f"*(계좌 30일 수익률 계산 실패: {type(e).__name__})*"
+
+
 def weekly(days: int = 7) -> int:
-    rows = _load_equity()
+    rows = [r for r in _load_equity() if same_account(r)]    # 지금 계좌 계열만(2026-10-15 — 실계좌 주간에 모의 행이 섞이지 않게)
     if not rows:
         print("equity_curve.jsonl이 비어 있다 — 아직 리포트할 것이 없다.", file=sys.stderr)
         return 1
@@ -476,6 +519,8 @@ def weekly(days: int = 7) -> int:
         "",
         f"> 대상 기간: 최근 {days}일 (since {since}) · 모의투자",
         "",
+        _account_floor_line(),
+        "",
         "## 성과 (벤치마크 병기)",
         "",
         "| 시장 | equity | 누적 | 벤치마크 누적 | 초과 | MDD |",
@@ -497,6 +542,16 @@ def weekly(days: int = 7) -> int:
             f"| {'미확인' if exc is None else f'{exc:+.2f}%p'} "
             f"| {mdd:.2f}% |"
         )
+
+    try:
+        import costs as _costs
+        _d = _costs.drag(days)
+        if _d.get("pct") is not None:
+            lines += ["", f"- 비용 추정(최근 {days}일): 체결 {_d['fills']}건 · 회전 {_d['turnover_krw']:,}원 · "
+                          f"비용 {_d['cost_krw']:,}원 = 자산의 **{_d['pct']:.3f}%** — 위 수익률에서 이만큼이 수수료·세금·환전으로 빠진다"
+                          f"({_d['note']})"]
+    except Exception:                                   # noqa: BLE001 — 비용 줄 실패가 리포트를 막지 않는다
+        pass
 
     lines += [
         "",
@@ -554,8 +609,8 @@ def main() -> int:
     ap.add_argument("--days", type=int, default=7)
     ap.add_argument("--real", action="store_true")
     ap.add_argument("--stamp", metavar="YYMMDD",
-                    help="산출물 파일명에 쓸 세션 날짜. 미국장은 KST 자정을 넘겨 "
-                         "한 run이 두 날짜로 갈라지므로 호출자가 고정해 넘긴다.")
+                    help="이 run의 스탬프(거래하는 세션의 현지 날짜 · 2026-10-14). 없으면 현재 run 포인터 "
+                         "또는 sessions.session_stamp — 행 날짜는 그 세션 날짜다.")
     args = ap.parse_args()
 
     if args.weekly:

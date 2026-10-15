@@ -152,7 +152,7 @@ def main() -> int:
     if rows and not a.no_price:
         try:
             from kis_client import KisClient, KisError
-            c = KisClient(svr="paper")
+            c = KisClient.for_mode()
             for r in rows:
                 try:
                     prices[r["ticker"]] = float(c.domestic_price(r["ticker"]).get("price") or 0)
@@ -161,7 +161,10 @@ def main() -> int:
         except Exception as e:                    # noqa: BLE001
             print(f"  시세 조회 불가({type(e).__name__}) — 시총 없이 낸다", file=sys.stderr)
 
-    st = a.stamp or datetime.now(KST).strftime("%y%m%d")
+    if not a.stamp:
+        import sessions as _ss
+        a.stamp = _ss.run_stamp("kr")          # 국내 도구 — 현재 국내 run 스탬프(현지 거래일)
+    st = a.stamp
     n_err = sum(1 for r in cache.values() if r.get("error"))
     L = [f"# 자사주 소각 창 스크린 — {st}", "",
          f"> 근거: 상법 제341조의4(2026-03-06 시행) — 취득 1년 내 소각. 기존 자사주는 "

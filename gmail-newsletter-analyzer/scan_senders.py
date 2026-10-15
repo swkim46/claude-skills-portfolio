@@ -160,7 +160,7 @@ def relay_report(days: int, keyword: str = "axios") -> int:
             print(f"    ★ 스팸함 {len(r['spam_days'])}통: {spam}")
         print(f"    예: {' / '.join(r['subjects'])}")
     if problems:
-        print("\n→ 미등록이면 newsletters.json에 등록, 스팸함이면 Gmail 필터('스팸함으로 보내지 않음') 생성.")
+        print("\n→ 미등록이면 newsletters.json에 등록. 스팸함 발행분은 digest.py가 건져 재료에 넣는다.")
     else:
         print("\n→ 미등록·스팸함 없음.")
     return 1 if problems else 0

@@ -25,6 +25,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from kis_client import same_account
+
 HERE = Path(__file__).parent
 JOURNAL_DIR = HERE / "journal"
 CONFIG_DIR = HERE / "config"
@@ -57,7 +59,7 @@ def latest_rows() -> dict:
             r = json.loads(line)
         except Exception:        # noqa: BLE001
             continue
-        if r.get("equity", 0) and r.get("cash") is not None:
+        if r.get("equity", 0) and r.get("cash") is not None and same_account(r):   # 지금 계좌 계열만(2026-10-15)
             out[(r.get("market") or "").upper()] = r
     return out
 
@@ -85,7 +87,8 @@ def refresh(markets: list) -> dict:
         return {m: f"journal import 실패: {e}" for m in markets}
     for m in markets:
         try:
-            rc = journal.daily(m.upper())
+            import sessions as _ss
+            rc = journal.daily(m.upper(), stamp=_ss.run_stamp(m.lower()))   # 그 시장의 현재 run·세션 날짜 행
             if rc:
                 errs[m.upper()] = f"journal rc={rc}"
         except Exception as e:   # noqa: BLE001
@@ -129,6 +132,7 @@ def build(market: str, stamp: str, rows: dict, errs: dict) -> str:
     L = [f"■ 계좌 현황 — {now.strftime('%Y-%m-%d %H:%M')} KST (run {market.lower()}:{stamp})", ""]
     krw_total = krw_inv = 0.0
     parts_ok = True
+    shared = {}                                          # 시장 → (ts, 현금 원화) — 통합증거금 공유 현금 대조용
     for m, label, cur_fmt in (("US", "[미국 USD]", lambda v: f"{v:,.0f}"), ("KR", "[한국 KRW]", lambda v: f"{v:,.0f}")):
         r = rows.get(m)
         if not r:
@@ -165,10 +169,20 @@ def build(market: str, stamp: str, rows: dict, errs: dict) -> str:
         if m == "US":
             if fx:
                 krw_total += eq * fx; krw_inv += inv * fx
+                if r.get("cash_shared"):
+                    shared[m] = (str(r.get("ts") or ""), cash * fx)
             else:
                 parts_ok = False
         else:
             krw_total += eq; krw_inv += inv
+            if r.get("cash_shared"):
+                shared[m] = (str(r.get("ts") or ""), cash)
+    shared_note = ""
+    if len(shared) == 2:
+        # ★ 통합증거금 실계좌(2026-10-12): 두 시장 행의 현금은 같은 원화 주머니를 각 통화로 잰 것이다 — 더 새 행만 센다.
+        old_m = min(shared, key=lambda k: shared[k][0])
+        krw_total -= shared[old_m][1]
+        shared_note = f" · 현금 공유(통합증거금) — {old_m} 행 현금 {shared[old_m][1]:,.0f}원은 같은 돈이라 뺐다"
     if parts_ok and krw_total:
         inv_pct = krw_inv / krw_total * 100
         tail = ""
@@ -178,9 +192,16 @@ def build(market: str, stamp: str, rows: dict, errs: dict) -> str:
         else:
             tail = "  ← 판단 목표 없음(배분 원장 비어 있음 — 다음 run이 allocation을 세운다)"
         L.append(f"[합산(원화)]  자산 {krw_total:,.0f}원 · 주식:현금 = {inv_pct:.1f}% : {100 - inv_pct:.1f}%{tail}")
-        L.append(f"  환율 {fx:,.2f}" + (f" ({fx_at[5:]})" if fx_at else "") + " · 출처 journal/equity_curve.jsonl")
+        L.append(f"  환율 {fx:,.2f}" + (f" ({fx_at[5:]})" if fx_at else "") + " · 출처 journal/equity_curve.jsonl" + shared_note)
     else:
         L.append("[합산(원화)]  못 쟀다 — 한 시장의 행 또는 환율이 없다('없음'이 아니라 '못 쟀다') · 주식:현금 = ?")
+    try:
+        import costs as _costs
+        _d = _costs.drag(30, equity_krw=krw_total or None)
+        if _d.get("pct") is not None:
+            L.append(f"  비용 추정(30일) {_d['cost_krw']:,}원 = 자산의 {_d['pct']:.2f}% — 수수료·국내 매도세·환전(요율 추정)")
+    except Exception:                                   # noqa: BLE001 — 비용 줄 실패가 현황을 막지 않는다
+        pass
     return "\n".join(L)
 
 
@@ -191,6 +212,16 @@ def main() -> int:
     ap.add_argument("--refresh", action="store_true", help="찍기 전에 journal.py --daily를 양 시장 돌린다(브로커 호출)")
     ap.add_argument("--out", help="기본 data/run_evidence/account_status_<stamp>_<mkt>.md")
     a = ap.parse_args()
+    # ★ 실계좌는 점검표 뒤에만(2026-10-15) — 계좌 현황은 run의 마지막 블록이고, 그 앞에 `stage.py close`(재투자 대기·실전 점검표)가 돌아야 한다.
+    #   점검표가 없거나 이 run의 거래 기록보다 오래됐으면 찍지 않는다(모의는 그대로).
+    from kis_client import acct_family
+    if acct_family() == "real" and not a.out:
+        rc_p = EVID_DIR / f"real_check_{a.stamp}_{a.market}.md"
+        tr_p = JOURNAL_DIR / f"trades_{a.stamp}_{a.market}.json"
+        if not rc_p.exists() or (tr_p.exists() and tr_p.stat().st_mtime > rc_p.stat().st_mtime):
+            print(f"★ 실계좌 — 실전 점검표({rc_p.name})가 없거나 거래 기록보다 오래됐다. "
+                  f"`python3 stage.py close --market {a.market} --stamp {a.stamp}`를 먼저 돌려라", file=sys.stderr)
+            return 3
     errs = refresh(["US", "KR"]) if a.refresh else {}
     rows = latest_rows()
     text = build(a.market.upper(), a.stamp, rows, errs)

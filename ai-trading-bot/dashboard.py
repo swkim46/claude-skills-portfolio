@@ -99,20 +99,29 @@ def pct(v, digits=2) -> str:
 def collect() -> dict:
     # equity_curve는 append-only라 같은 날 행이 여러 개 있을 수 있다(하루 두 슬롯·재시도).
     # 그대로 그리면 추이에 같은 날 점이 겹치고 누적 수치가 부풀어 보인다 → 날짜별 마지막만.
-    equity = latest_per_day(_read_jsonl(JOURNAL_DIR / "equity_curve.jsonl"))
+    # ★ 지금 계좌 계열의 기록만(2026-10-15 · 실계좌 전환) — 모의 자산·거래가 실계좌 화면에 섞이지 않게. 표시 없는 옛 기록은 모의.
+    from kis_client import acct_family, same_account
+    fam = acct_family()
+    equity = latest_per_day([r for r in _read_jsonl(JOURNAL_DIR / "equity_curve.jsonl") if same_account(r, fam)])
     runs = _read_jsonl(JOURNAL_DIR / "run_log.jsonl")
     limits = _read(CONFIG_DIR / "limits.json", {}) or {}
     bench = _read(CONFIG_DIR / "benchmark.json", {}) or {}
+    if fam != "paper":                       # 실계좌 기준점 키는 `KR:real`·`US:real`(journal.daily)
+        bench = {k.split(":")[0]: v for k, v in bench.items() if k.endswith(":" + fam)}
 
     trades = []
     for p in sorted(JOURNAL_DIR.glob("trades_*.json")):
         d = _read(p, {}) or {}
+        if not same_account(d, fam):
+            continue
         for t in d.get("trades", []):
             trades.append({**t, "_file": p.name})
 
     approved = []
     for p in sorted(SIGNALS_DIR.glob("approved_*.json")):
         d = _read(p, {}) or {}
+        if not same_account(d, fam):
+            continue
         approved.append({"file": p.name, "market": d.get("market"),
                          "generated_at": d.get("generated_at"),
                          "orders": d.get("orders", []), "rejected": d.get("rejected", [])})
@@ -188,12 +197,16 @@ def outcome_view(outcome: str) -> tuple:
 def today_rows(d: dict) -> dict:
     """각 시장의 최신 run. 오늘 것이 없으면 마지막 것을 날짜와 함께 보여준다 —
     '기록 없음'보다 '9/5 이후 안 돌았음'이 훨씬 쓸모 있는 정보다(결측 자체가 신호)."""
-    today = d["generated_at"].strftime("%Y-%m-%d")
+    # 2026-10-14 — 날짜는 시장별 **세션 날짜**(현지 거래일)로 대조한다. 지금 준비 중인 세션이나 그 직전 세션의 run이면
+    # 제때 돈 것이다(국내 run은 밤에도 '오늘 세션', 미국 run은 한국 오전에도 '어젯밤 세션'). 그보다 오래됐으면 밀린 것.
+    import sessions as _ss
     out = {}
     for r in d["runs"]:
         m = r.get("market")
         if m:
-            out[m] = {**r, "_stale": r.get("session_date") != today}
+            cur = _ss.session_date(m, d["generated_at"])
+            fresh = {cur.isoformat(), _ss.prev_trading_day(m, cur).isoformat()}
+            out[m] = {**r, "_stale": r.get("session_date") not in fresh}
     return out
 
 

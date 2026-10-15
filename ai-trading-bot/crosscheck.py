@@ -451,6 +451,356 @@ def check_corpus(market: str, stamp: str, note: str) -> list:
     ]
 
 
+PDF_URL = re.compile(r"https?://[^\s)\]>`|\"']+?\.pdf(?:\?[^\s)\]>`|\"']*)?(?=[\s)\]>`|\"',.;]|$)", re.I)
+
+
+def _fetch_log() -> dict:
+    """`journal/fetch_log.jsonl` → url → [행]. `fetch.py`가 여는 링크마다 한 줄씩 남긴다."""
+    out = {}
+    try:
+        for ln in (HERE / "journal" / "fetch_log.jsonl").read_text(encoding="utf-8").splitlines():
+            try:
+                r = json.loads(ln)
+            except json.JSONDecodeError:
+                continue
+            out.setdefault(r.get("url", ""), []).append(r)
+    except OSError:
+        pass
+    return out
+
+
+def check_pdf_sources(market: str, stamp: str, note: str) -> list:
+    """**PDF 출처를 `fetch.py`로 열었는가.** 리서치·노트가 인용한 PDF 주소마다 `fetch_log`에 본문이 나온 기록이
+    있어야 한다. 기록이 없으면 WebFetch·내장 브라우저로 연 것이다 — 둘 다 사용자 화면에 다운로드 카드를 띄우고
+    본문은 못 읽는다(2026-09-24~10-02 16회 전부 실패). 못 열었으면 노트 §10에 '열지 못한 것'으로 적으면 통과한다."""
+    name = "PDF 출처 → fetch.py 열기 기록"
+    files = sorted({*(HERE / "analysis").glob(f"섹터_*_{stamp}_*.md"),
+                    *(HERE / "analysis").glob(f"*_{stamp}_{market}*.md")})
+    texts = [note] + [f.read_text(encoding="utf-8", errors="ignore") for f in files]
+    urls = sorted({u for t in texts for u in PDF_URL.findall(t)})
+    if not urls:
+        return [(name, True, "인용된 PDF 주소 0건")]
+    log = _fetch_log()
+    sec10 = section(note, "## §10", "## §11")
+    disclosed = lambda u: u in sec10 or any(u in ln for ln in note.splitlines() if re.search(r"열지 못한|못 연|못 열", ln))
+    bad, tried = [], []
+    for u in urls:
+        rows = log.get(u) or []
+        if any(r.get("kind") == "pdf" and (r.get("chars") or 0) > 0 for r in rows):
+            continue
+        if disclosed(u):
+            continue
+        (tried if rows else bad).append(u)
+    if not bad and not tried:
+        return [(name, True, f"PDF {len(urls)}건 전부 fetch.py 기록 있음(또는 §10에 '열지 못한 것'으로 공개)")]
+    why = []
+    if bad:
+        why.append(f"**열기 기록 없음 {len(bad)}건** — WebFetch·브라우저로 열었을 가능성(사용자 화면에 다운로드 카드): "
+                   + " · ".join(bad[:4]))
+    if tried:
+        why.append(f"**fetch.py로 열었으나 본문 0 {len(tried)}건** — §10에 '열지 못한 것'으로 적어라: " + " · ".join(tried[:4]))
+    return [(name, False, " / ".join(why))]
+
+
+THESIS_ID = re.compile(r"\b(?:kr|us)-[a-z0-9-]+-\d{6}\b")
+
+
+def _names(market: str) -> dict:
+    try:
+        wl = json.loads((HERE / "config" / "watchlist.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {r["ticker"]: r.get("name", "") for r in wl.get(market.upper()) or []}
+
+
+def _judged_lines(text: str, ticker: str, name: str) -> bool:
+    """그 종목이 나오는 줄에 논지 id 또는 `[통과]`가 같이 있는가 — 유니버스 표 행에 이름만 있는 것은 판정이 아니다."""
+    for ln in text.splitlines():
+        if ticker in ln or (len(name or "") >= 2 and name in ln):
+            if "[통과]" in ln or THESIS_ID.search(ln):
+                return True
+    return False
+
+
+def check_reeval(market: str, stamp: str, note: str) -> list:
+    """**재평가 목록(직전 run이 가격을 이유로 거른 종목)을 오늘 다시 판정했는가**(FB-261003-1).
+    급등 당일 매수 금지는 그 세션에만 적용한다 — 다음 run은 논지 id 또는 `[통과] <이유>`로 다시 판정해야 한다."""
+    name = "재평가 목록 → 노트 재판정"
+    try:
+        sys.path.insert(0, str(HERE))
+        import stage
+        rv = stage.reeval_list(market, stamp)
+    except Exception as e:                        # noqa: BLE001
+        return [(name, False, f"재평가 목록을 만들지 못했다 — {type(e).__name__}: {e}")]
+    if not rv:
+        return [(name, True, "직전 run이 가격 사유로 거른 종목 0건")]
+    nm = _names(market)
+    sec = (section(note, "## §6", "## §7") or "") + (section(note, "## §1-A", "## §1-B") or "")
+    miss = [tk for tk, _src, _why in rv if not _judged_lines(sec, tk, nm.get(tk, ""))]
+    return [(name, not miss, f"{len(rv)}건 전부 재판정(논지 id 또는 [통과])" if not miss else
+             f"**재판정 안 된 {len(miss)}건: {', '.join(miss)}** — §6에 논지 id 또는 `[통과] <이유>`를 적어라")]
+
+
+def check_support_break(market: str, stamp: str, note: str) -> list:
+    """**지지 이탈 종목을 오늘 재판정했는가**(2026-10-14 · 차트스쿨 01 B). 이어받기 `## 지지 이탈` 표의 종목마다
+    노트 §6에 `[지지 이탈]`이 든 그 종목 줄(무효 조건 재판정: 유지·축소·청산과 이유)이 있어야 한다."""
+    name = "지지 이탈 → §6 재판정"
+    cp = HERE / "journal" / f"carry_{stamp}_{market}.md"
+    try:
+        txt = cp.read_text(encoding="utf-8")
+    except OSError:
+        return [(name, False, f"이어받기 파일이 없다: {cp.name}")]
+    sec = section(txt, "## 지지 이탈", "\n## ")
+    if not sec:
+        return [(name, False, "이어받기에 `## 지지 이탈` 절이 없다 — stage.py carry를 다시 돌려라")]
+    rows = [ln for ln in sec.splitlines() if ln.startswith("| ") and not ln.startswith("| 논지") and not ln.startswith("|---")]
+    tks = [ln.split("|")[2].strip().split(" ")[0] for ln in rows if len(ln.split("|")) > 3]
+    if not tks:
+        return [(name, True, "지지 이탈 종목 0건")]
+    s6 = section(note, "## §6", "## §7") or ""
+    miss = [tk for tk in tks if not any("[지지 이탈]" in ln and tk in ln for ln in s6.splitlines())]
+    return [(name, not miss, f"{len(tks)}건 전부 §6에 [지지 이탈] 재판정" if not miss else
+             f"**재판정 줄이 없는 {len(miss)}건: {', '.join(miss)}** — §6에 `[지지 이탈] <종목> — <유지·축소·청산과 이유>`를 적어라")]
+
+
+def check_queue_one_day(market: str, stamp: str, note: str) -> list:
+    """**하루만 제안된 유니버스 대기 후보를 오늘 다시 추천했거나 내렸는가**(FB-261010-6 · 2026-10-11 사용자 승인).
+    다시 언급하지 않으면 냉각(서로 다른 이틀)을 영영 못 채워 묻힌다 — 261010: 하루 제안된 수혜주 둘이 2주 넘게 멈춘 사이 +21~33%.
+    판정 = 오늘 시그널 `watchlist_candidates`에 다시 올렸거나, 노트 §8의 그 이름 줄에 `[내림]`이 있다."""
+    name = "대기 후보(하루만 제안됨) → 재제안·[내림]"
+    try:
+        sys.path.insert(0, str(HERE))
+        import stage
+        q1 = stage.queue_one_day(market, stamp)
+    except Exception as e:                        # noqa: BLE001
+        return [(name, False, f"대기 후보 목록을 만들지 못했다 — {type(e).__name__}: {e}")]
+    if not q1:
+        return [(name, True, "하루만 제안된 대기 후보 0건")]
+    re_prop = set()
+    for f in sorted((HERE / "signals").glob(f"signal_{stamp}_{market}*.json")):
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        re_prop |= {str(c.get("ticker") or "") for c in d.get("watchlist_candidates") or []}
+    sec = section(note, "## §8", "## §9") or ""
+    miss = []
+    for tk, nm, _d, _ax, _w in q1:
+        if tk in re_prop:
+            continue
+        if any((tk in ln or (len(nm) >= 2 and nm in ln)) and "[내림]" in ln for ln in sec.splitlines()):
+            continue
+        miss.append(f"{tk} {nm}".strip())
+    return [(name, not miss, f"{len(q1)}건 전부 재제안 또는 [내림]" if not miss else
+             f"**판정 없는 {len(miss)}건: {', '.join(miss[:8])}" + (" …" if len(miss) > 8 else "") + "** — "
+             f"오늘 재료에 근거가 있으면 `watchlist_candidates`로 재제안, 아니면 §8에 `[내림] <이유>`")]
+
+
+def check_forecast_beneficiaries(market: str, stamp: str, note: str) -> list:
+    """**열린 전망의 2·3차 수혜 중 유니버스 종목마다 논지 또는 거른 이유가 있는가**(FB-261003-1).
+    첫 피드백: 전망이 2차 수혜로 이름을 적은 장비주들이 논지 없이 +30~50% 올랐다 — 적어 놓고 평가하지 않았다."""
+    name = "열린 전망 2·3차 수혜 → 논지·[통과]"
+    try:
+        m = json.loads((HERE / "journal" / "market_map.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return [(name, False, "market_map.json을 못 읽었다")]
+    nm = _names(market)
+    want = {}
+    for ax in m.get("axes") or []:
+        if not ax.get("direction") or (ax.get("status") or "open") != "open":
+            continue
+        for b in ax.get("beneficiaries") or []:
+            tk = str(b.get("ticker") or "")
+            if tk in nm and int(b.get("order") or 0) in (2, 3):
+                want.setdefault(tk, ax.get("id"))
+    if not want:
+        return [(name, True, "열린 전망의 유니버스 2·3차 수혜 0건")]
+    sec = section(note, "## §6", "## §7") or note
+    miss = [f"{tk}({ax})" for tk, ax in want.items() if not _judged_lines(sec, tk, nm.get(tk, ""))]
+    return [(name, not miss, f"{len(want)}건 전부 논지 id 또는 [통과]" if not miss else
+             f"**판정 없는 {len(miss)}건: {', '.join(miss[:8])}" + (" …" if len(miss) > 8 else "") + "** — "
+             f"§6에 논지 id 또는 `[통과] <이유>`를 적어라(전망에 적어 놓고 평가하지 않으면 놓친다)")]
+
+
+# ── FB-261012-2·3·4 — 시나리오를 짜는 방식의 구멍 셋을 노트에서 센다 ──────────────────────────
+
+DROP_BASIS = re.compile(r"retrace_|support_|low_\d|되돌림|지지|저점")
+
+
+def _fired_entries(market: str, stamp: str) -> list:
+    """오늘 1단 `theses.py check`가 **발화**로 찍은 매수 다리 — carry 파일(없으면 tools 파일)의 발화 블록에서.
+    반환 [(ticker, thesis_id, check, basis)]. 원장 `fired_at`은 체결 뒤에만 찍혀 발화했지만 못 산 다리를 놓친다."""
+    src = ""
+    for f in [*sorted(HERE.glob(f"journal/carry_{stamp}_{market}*.md")), HERE / "data" / "run_evidence" / f"tools_{stamp}_{market}.md"]:
+        if f.exists():
+            src = f.read_text(encoding="utf-8", errors="ignore")
+            if "★ 발화" in src:
+                break
+    m = re.search(r"★ 발화[^\n]*\n(.*?)(?:\n\s*\n|\Z)", src, re.S)
+    if not m:
+        return []
+    try:
+        th = {t["id"]: t for t in json.loads((HERE / "journal" / "theses.json").read_text(encoding="utf-8")).get("theses") or []}
+    except (OSError, json.JSONDecodeError):
+        th = {}
+    out = []
+    for tk, cond, tid in re.findall(r"\[매수\]\s+(\S+)[^\n]*?조건\s+([^\(\n]+?)\s+\(.*?\n.*?논지\s+(\S+)", m.group(1)):
+        t = th.get(tid) or {}
+        g = next((x for x in t.get("entry_triggers") or [] if str(x.get("check") or "").strip() == cond.strip()), {})
+        out.append((tk, tid, cond.strip(), str(g.get("basis") or "") + " " + str(g.get("when") or "")))
+    return out
+
+
+def check_drop_cause(market: str, stamp: str, note: str) -> list:
+    """**발화한 되돌림·지지 매수 다리마다 '왜 빠졌나'를 판정했는가**(FB-261012-2).
+    실사례(2026-10-06~12): '급등 전 가격까지 내려오면 산다'는 다리가 업종 전체가 새 정보(매출 전환 지연)를 반영하는
+    하락에서 연달아 발화했다 — 하락을 할인으로 읽었다. 판정 결과가 논지 동인이면 그것이 곧 무효(invalidation)다."""
+    name = "발화한 되돌림·지지 다리 → [하락 원인]"
+    rows = [r for r in _fired_entries(market, stamp) if DROP_BASIS.search(r[3])]
+    if not rows:
+        return [(name, True, "오늘 발화한 되돌림·지지 매수 다리 0건")]
+    nm = _names(market)
+    sec = section(note, "## §6", "## §7") or note
+    lines = [ln for ln in sec.splitlines() if "[하락 원인]" in ln]
+    miss = []
+    for tk, tid, cond, _b in rows:
+        nmk = nm.get(tk, "")
+        if not any(tk in ln or (len(nmk) >= 2 and nmk in ln) for ln in lines):
+            miss.append(f"{tk}({cond})")
+    return [(name, not miss, f"{len(rows)}건 전부 판정" if not miss else
+             f"**[하락 원인] 없는 {len(miss)}건: {', '.join(miss)}** — §6에 `[하락 원인] <종목> — 업종 동반 y/n · 회사 뉴스 "
+             f"있음/없음 · 원인 … · 논지 동인 해당/비해당 → 집행/무효`를 적어라(동인이면 그것이 무효 조건이다)")]
+
+
+def check_axis_conflicts(market: str, stamp: str, note: str) -> list:
+    """**두 시장 전망이 같은 메커니즘에 반대 부호면 그 충돌이 대응표에 있는가**(FB-261012-3).
+    대상은 보유 논지·오늘 BUY 종목이 `conflicts_with`가 달린 축의 **전망 수혜 표**에 있을 때다."""
+    name = "충돌 축(conflicts_with) → §7 충돌 가지"
+    try:
+        m = json.loads((HERE / "journal" / "market_map.json").read_text(encoding="utf-8"))
+        th = json.loads((HERE / "journal" / "theses.json").read_text(encoding="utf-8")).get("theses") or []
+    except (OSError, json.JSONDecodeError):
+        return [(name, False, "market_map·theses를 못 읽었다")]
+    mine = {str(t.get("ticker")) for t in th if t.get("status") == "held" and str(t.get("market") or "").lower() == market}
+    sp = HERE / "signals" / f"signal_{stamp}_{market}.json"
+    if sp.exists():
+        try:
+            for pr in json.loads(sp.read_text(encoding="utf-8")).get("proposals") or []:
+                if str(pr.get("action") or "").upper() == "BUY":
+                    mine.add(str(pr.get("ticker")))
+        except (OSError, json.JSONDecodeError):
+            pass
+    sec7 = section(note, "## §7", "## §8") or ""
+    need = []
+    for ax in m.get("axes") or []:
+        cw = ax.get("conflicts_with") or []
+        if not cw or (ax.get("status") or "open") != "open":
+            continue
+        hit = sorted(mine & {str(b.get("ticker")) for b in ax.get("beneficiaries") or []})
+        if hit:
+            for other in cw:
+                if other not in sec7:
+                    need.append(f"{ax['id']}↔{other}({', '.join(hit)})")
+    return [(name, not need, "충돌 축에 걸린 보유·매수 0건 또는 전부 §7에 있음" if not need else
+             f"**§7에 충돌 가지 없음 {len(need)}건: {'; '.join(need)}** — 상대 축 id를 넣은 행으로 '그쪽 전망이 맞으면 → 대응'을 적어라")]
+
+
+def check_driver_branch(market: str, stamp: str, note: str) -> list:
+    """**보유가 가장 많이 걸린 요인(driver)이 꺾이는 가지가 대응표에 있는가**(FB-261012-4) — 상한이 아니라 대응."""
+    name = "최대 요인(driver) → §7 '꺾이면' 행"
+    try:
+        sys.path.insert(0, str(HERE))
+        import market_map as mm
+        res = mm.exposure_by_driver(market.upper(), stamp)
+    except Exception as e:                        # noqa: BLE001
+        return [(name, False, f"요인 노출을 못 쟀다 — {type(e).__name__}: {e}")]
+    if not res.get("rows"):
+        return [(name, True, "요인에 걸린 보유 0건")]
+    top = res["rows"][0]
+    sec7 = section(note, "## §7", "## §8") or ""
+    ok = any(top["driver"] in ln and "꺾이면" in ln for ln in sec7.splitlines())
+    return [(name, ok, f"최대 요인 {top['driver']} {top['total_pct']:.1f}% — §7에 행 있음" if ok else
+             f"**최대 요인 `{top['driver']}` {top['total_pct']:.1f}%(양 시장)인데 §7에 '꺾이면' 행이 없다** — "
+             f"`{top['driver']}가 꺾이면 → <무엇을 줄이나·증액 중단·약한 논지부터>` 한 행을 적어라")]
+
+
+# ── 2026-10-12 사용자: "국내장과 미국장은 독립적이지 않다 — 무조건 상호 연관해서 전망과 시나리오를 짜라" ─────────
+
+def check_forecast_cross_market(market: str, stamp: str, note: str) -> list:
+    """**전망은 요인 단위** — ① 이번 run이 갱신한 축마다 노트 §2에 `교차:` 줄(반대 시장 전망 id·방향·일치/충돌/없음)
+    ② 지도의 열린 전망 전부가 교차 검증(반대 시장 수혜 또는 사유 · 요인 안 반대 방향은 연결 또는 사유)을 통과."""
+    name = "전망 교차(요인 단위) → §2 `교차:` · 한 시장 전망 0"
+    try:
+        sys.path.insert(0, str(HERE))
+        import market_map as mm
+        m = mm._read(mm.MAP, {"axes": []})
+    except Exception as e:                        # noqa: BLE001
+        return [(name, False, f"지도를 못 읽었다 — {type(e).__name__}: {e}")]
+    axes = m.get("axes") or []
+    bad = [f"{a['id']}({mm.forecast_validate(a, axes)[0][:40]}…)" for a in axes
+           if a.get("direction") and (a.get("status") or "open") == "open" and mm.forecast_validate(a, axes)]
+    upd = [it.get("id") for it in (json.loads((HERE / "data" / "run_evidence" / f"forecast_update_{stamp}_{market}.json")
+                                              .read_text(encoding="utf-8"))
+                                   if (HERE / "data" / "run_evidence" / f"forecast_update_{stamp}_{market}.json").exists() else [])
+           if isinstance(it, dict) and it.get("id")]
+    sec2 = section(note, "## §2", "## §3") or ""
+    blocks = re.split(r"\n(?=### )", sec2)
+    miss = [aid for aid in upd if not any(aid in b and "교차:" in b for b in blocks)]
+    ok = not bad and not miss
+    why = []
+    if miss:
+        why.append(f"**§2에 `교차:` 줄 없는 갱신 축 {len(miss)}건: {', '.join(miss)}** — 축 블록마다 `교차: <반대 시장 전망 id> "
+                   f"<방향> — 일치/충돌/없음 · 이쪽에 무슨 뜻`")
+    if bad:
+        why.append(f"**교차 검증 실패 전망 {len(bad)}건: {'; '.join(bad[:6])}** — 반대 시장 수혜 또는 `no_cross_market_why`, "
+                   f"반대 방향은 `conflicts_with` 또는 `split_why`")
+    return [(name, ok, f"갱신 축 {len(upd)}건 전부 §2 `교차:` · 열린 전망 교차 검증 통과" if ok else " / ".join(why))]
+
+
+_KR = re.compile(r"\[KR(?:\]|\s)")
+_US = re.compile(r"\[US(?:\]|\s)")
+
+
+def check_scenario_both_markets(market: str, stamp: str, note: str) -> list:
+    """**시나리오는 이벤트 단위** — §7 시나리오 행마다 `[KR] …`과 `[US] …` 대응이 둘 다 있거나, 없는 쪽에
+    `[KR 영향 없음 — 이유]`·`[US 영향 없음 — 이유]`가 있어야 한다."""
+    name = "§7 시나리오 행 → [KR]·[US] 대응(또는 영향 없음 사유)"
+    sec7 = section(note, "## §7", "## §8") or ""
+    rows = [ln for ln in sec7.splitlines() if re.match(r"\|\s*S\d+\s*\|", ln)]
+    if not rows:
+        return [(name, True, "§7 시나리오 행 0")]
+    miss = []
+    for ln in rows:
+        sid = re.match(r"\|\s*(S\d+)", ln).group(1)
+        lack = [mk for mk, rx in (("KR", _KR), ("US", _US)) if not rx.search(ln)]
+        if lack:
+            miss.append(f"{sid}(−{'·'.join(lack)})")
+    return [(name, not miss, f"{len(rows)}행 전부 두 시장" if not miss else
+             f"**한 시장 대응뿐인 행 {len(miss)}건: {', '.join(miss)}** — 대응 칸에 `[KR] …` `[US] …`, 영향이 없으면 "
+             f"`[US 영향 없음 — 이유]`(국내 이야기라서는 이유가 아니다 — 환율·외국인 수급·미국 동종 중 무엇을 봤나)")]
+
+
+def check_xmarket_responses(market: str, stamp: str, note: str) -> list:
+    """**반대 시장이 연 시나리오에 이쪽 대응이 있는가** — `market_map.py xmarket`의 '대응 빈 시나리오'마다
+    `scenarios.py respond`로 이 시장 대응을 더했거나, 노트 §7에 그 id와 `[<시장> 영향 없음 — 이유]`가 있어야 한다."""
+    mk = market.upper()
+    name = f"반대 시장 시나리오 → {mk} 대응(respond) 또는 [{mk} 영향 없음]"
+    try:
+        sys.path.insert(0, str(HERE))
+        import market_map as mm
+        r = mm.xmarket(market, stamp)
+    except Exception as e:                        # noqa: BLE001
+        return [(name, False, f"교차 시장 입력을 못 만들었다 — {type(e).__name__}: {e}")]
+    sec7 = section(note, "## §7", "## §8") or note
+    rx = re.compile(rf"\[{mk}\s*영향\s*없음")
+    miss = [x["id"] for x in r["scenarios_missing_here"]
+            if not any(x["id"] in ln and rx.search(ln) for ln in sec7.splitlines())]
+    n = len(r["scenarios_missing_here"])
+    return [(name, not miss, f"{n}건 전부 처리(since {r['since']})" if not miss else
+             f"**{mk} 대응 없는 반대 시장 시나리오 {len(miss)}건: {', '.join(miss[:10])}** — `scenarios.py respond --id <id> "
+             f"--market {market} --what \"…\"` 또는 §7에 `<id> [{mk} 영향 없음 — 이유]`")]
+
+
 def check_gaps(note: str) -> list:
     """`gaps`가 지목한 예정 이벤트가 노트 **§5 일정 표**에 행으로 들어갔는가.
 
@@ -499,6 +849,17 @@ def main() -> int:
     rows += check_research_expansion(a.market, a.stamp)
     rows += check_research_cited(a.market, a.stamp)
     rows += check_corpus(a.market, a.stamp, note)
+    rows += check_pdf_sources(a.market, a.stamp, note)
+    rows += check_reeval(a.market, a.stamp, note)
+    rows += check_support_break(a.market, a.stamp, note)
+    rows += check_forecast_beneficiaries(a.market, a.stamp, note)
+    rows += check_queue_one_day(a.market, a.stamp, note)
+    rows += check_drop_cause(a.market, a.stamp, note)
+    rows += check_axis_conflicts(a.market, a.stamp, note)
+    rows += check_driver_branch(a.market, a.stamp, note)
+    rows += check_forecast_cross_market(a.market, a.stamp, note)
+    rows += check_scenario_both_markets(a.market, a.stamp, note)
+    rows += check_xmarket_responses(a.market, a.stamp, note)
     rows += check_gaps(note)
     rows += check_markers(note)
     if a.trades:
@@ -510,7 +871,10 @@ def main() -> int:
     print(f"# 도구 ↔ 노트 대조 — {a.stamp} · {a.market.upper()}\n", file=buf)
     print(f"> 각서가 아니라 **파일 대조**다. 도구가 지목한 이름이 노트에 실제로 들어갔는지만 센다.",
           file=buf)
-    print(f"> 대상 노트 `{np_.name}` · 실행 {datetime.now(KST):%Y-%m-%d %H:%M:%S} KST\n", file=buf)
+    # '실행' 날짜는 이 run의 세션 날짜(2026-10-14 · 현지 거래일 — map 게이트가 그 날짜를 대조한다) · 실제 시각은 '기록'
+    import sessions as _ss
+    print(f"> 대상 노트 `{np_.name}` · 실행 {_ss.session_iso(a.stamp, a.market)} 세션 · "
+          f"기록 {datetime.now(KST):%Y-%m-%d %H:%M:%S} KST\n", file=buf)
     print(f"[대조] 검사 {len(rows)}건 · 실패 {n_fail}건\n", file=buf)
     print("| 검사 | 결과 | 근거 |\n|---|---|---|", file=buf)
     for name, ok, why in rows:

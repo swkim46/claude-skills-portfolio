@@ -17,6 +17,7 @@
 | `tidy_versions.py` | 날짜별 최신 버전만 남기고 이전 버전을 `이전버전/`으로 이동 |
 | `build_corpus.py` | 직접 작성한 노트와 해당 발행분을 연결해 작성 규칙 분석용 자료 생성 |
 | `newsletters.json` | 수집할 발신자, 활성 여부, 제외 사유 관리 |
+| `run_tests.py` | 자체 검사 세 가지를 한 번에 실행하고 완주 여부와 건수를 `test_logs/`에 기록 |
 
 ## 처리 순서
 
@@ -43,7 +44,7 @@
 2. 저장소 루트의 `.env.example`을 `.env`로 복사해 `GMAIL_ADDRESS`와 `GMAIL_APP_PASSWORD`를 채웁니다.
 3. `python3 scan_senders.py --days 30`으로 수집이 되는지 확인합니다.
 
-자체 검사는 `python3 check_note.py --selftest`와 `python3 cache_claims.py selftest`로 실행하며, API 키 없이 동작합니다.
+자체 검사는 `python3 run_tests.py`로 한 번에 실행합니다(`check_note.py --selftest`, `cache_claims.py selftest`, `fetch_article.py --selftest`). 완주 여부와 건수를 `test_logs/`에 기록하며, API 키 없이 동작합니다.
 
 ## 보안
 

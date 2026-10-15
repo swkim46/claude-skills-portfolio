@@ -37,7 +37,10 @@
         }
       ],
       "size_why": "이 증분을 왜 사는가 — 기대 수익 · 무엇이 깨면 틀리나 · 손절까지 거리 · gap에서 이 종목의 몫 (리서치 재료 확장 인용)",
-      "concentration_why": ""
+      "concentration_why": "",
+      "expected_upside_pct": 25.0,
+      "_note_expected_upside": "필수(2026-10-03) — 이 자리에서 노리는 상승폭. 상한 없음(근거가 50%·100%면 그 숫자). 10 미만이면 risk_guard가 거부(바닥 10%)",
+      "_note_increase_when": "증분이 2% 미만이면 필수 — {when: 무엇이 확인되면, to_pct: 얼마로 늘리나}"
     },
     {
       "ticker": "035420",
@@ -57,7 +60,10 @@
         }
       ],
       "size_why": "이 증분을 왜 사는가 — 기대 수익 · 무엇이 깨면 틀리나 · 손절까지 거리 · gap에서 이 종목의 몫 (리서치 재료 확장 인용)",
-      "concentration_why": ""
+      "concentration_why": "",
+      "expected_upside_pct": 25.0,
+      "_note_expected_upside": "필수(2026-10-03) — 이 자리에서 노리는 상승폭. 상한 없음(근거가 50%·100%면 그 숫자). 10 미만이면 risk_guard가 거부(바닥 10%)",
+      "_note_increase_when": "증분이 2% 미만이면 필수 — {when: 무엇이 확인되면, to_pct: 얼마로 늘리나}"
     }
   ],
   "watchlist_candidates": [
@@ -75,5 +81,20 @@
       ]
     }
   ],
-  "_comment": "trade-run 스킬이 산출해야 할 시그널 JSON의 형식 견본. generated_at은 매 run마다 현재 시각으로. 이 파일 자체는 run_id가 TEST여서 실행 대상이 아니다."
+  "refill_candidates": [],
+  "refill_none_why": "예시 — 매수 제안이 gap을 이미 다 채운다(판 돈은 제안 비율대로 다시 나눈다). 넣을 것이 있으면 BUY 제안과 같은 형식(ticker·name·action BUY·thesis·confidence·weight_target_pct·size_why·expected_upside_pct·evidence·basis_refs)으로 순서대로 적고 이 칸은 지운다 — fc_track1 extract 전에(stage5_decide.md · 2026-10-15)",
+  "_comment": "trade-run 스킬이 산출해야 할 시그널 JSON의 형식 견본. generated_at은 매 run마다 현재 시각으로. 이 파일 자체는 run_id가 TEST여서 실행 대상이 아니다.",
+  "rejected_candidates": [
+    {
+      "ticker": "036930",
+      "kind": "price",
+      "why": "오늘 +4.3% 급등 — 당일 추격 금지(다음 run 재평가 목록으로)"
+    },
+    {
+      "ticker": "000000",
+      "kind": "fundamental",
+      "why": "예: 실적 가이던스 하향 — 가격 사유가 아니면 재평가 목록에 안 오른다"
+    }
+  ],
+  "_note_rejected_candidates": "2026-10-03(FB-261003-1) — 오늘 거른 후보와 사유 종류. kind=price(급등·목표가 상회·이미 반영)인 것은 다음 run의 재평가 목록(stage.py carry)에 자동으로 오르고, 그 run이 §6에서 논지 id 또는 [통과]로 다시 판정한다(crosscheck가 센다)"
 }

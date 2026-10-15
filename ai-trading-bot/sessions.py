@@ -9,10 +9,16 @@
 - **반쪽 run** — 결정(5단)까지 못 간 세션. *실측 2026-09-07~10: 미국 2일*(9/8은 3단,
   9/9는 1단에서 죽었다 — 재료만 남았다).
 - **건너뛴 단계** — 도달은 6단인데 중간 산출물이 빈 경우. *죽은 run과 다른 사건이다.*
-- **시각 이탈** — 정규 슬롯(국내 09:35 · 미국 22:35 KST)에서 ±90분을 벗어난 실행.
+- **시각 이탈** — 정규 슬롯(국내 09:30 · 미국 개장 5분 뒤 = 서머타임 22:35 / 표준시 23:35 KST — `slot_for`)에서 ±90분을 벗어난 실행.
 - **밀린 세션** — 평일(휴장 아님)인데 그 시장 세션이 아예 없는 날.
 
-**스탬프 ≠ 거래소 기준일.** 산출물 파일명의 스탬프는 run이 시작된 KST 날짜다. 미국 run은 ET 금요일
+**★ 2026-10-14부터 스탬프 = 거래소 기준일(현지 날짜).** 사용자: "날짜 기록은 무조건 현지 날짜(국장이면 한국, 미장이면 미국)
+기준". 국내는 한국 날짜, 미국은 미국 동부 날짜, 장 마감 뒤(또는 주말·휴장)에 시작한 run은 **다음 거래일**(그 세션을 준비하는 run).
+계산은 `session_date()` 한 곳 — 모든 드라이버가 이것을 쓴다. 기록 안의 날짜(논지·지도·일정·자산 곡선)는 1단이 쓰는
+`journal/current_run.json` 포인터에서 온다(`run_date()`). 전환일(`LOCAL_STAMP_FROM`) 앞 스탬프는 아래 옛 규칙으로 읽는다
+(`stamp_to_session()`) — 과거 파일은 이름을 바꾸지 않았다(10-12·10-13 미국 두 run만 제 이름으로 옮김 · `rename_run.py`).
+
+**(전환일 전) 스탬프 ≠ 거래소 기준일.** 산출물 파일명의 스탬프는 run이 시작된 KST 날짜다. 미국 run은 ET 금요일
 세션을 KST 토요일 새벽에 돌 수 있어 스탬프가 주말이 된다(2026-09-19 = ET 09-18 세션). 그래서 행마다
 `stamp`(파일 식별자 — review.py는 이것으로 파일을 찾는다)와 `session_date`(거래소 기준일 — 슬롯·회고
 판정)를 따로 둔다. 예전에는 주말 날짜를 통째로 건너뛰어 그 run이 원장에서 사라졌고, "직전 run"이
@@ -33,6 +39,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -48,7 +55,7 @@ LEDGER = JOURNAL / "sessions.jsonl"
 KST = timezone(timedelta(hours=9))
 
 # 정규 슬롯(KST) — `SKILL.md` 〈하루 일과〉와 같은 값이어야 한다.
-SLOTS = {"kr": (9, 35), "us": (22, 35)}
+SLOTS = {"kr": (9, 30)}           # 미국은 고정 시각이 아니다 — 개장 5분 뒤(서머타임 22:35 · 11-02부터 23:35 KST) · `slot_for`
 SLOT_TOLERANCE_MIN = 90          # 이 밖이면 '시각 이탈'
 
 # 도달 단계 = 그 단계의 산출물이 디스크에 있는가. 순서대로 본다.
@@ -104,23 +111,156 @@ def first_touch(st: str, market: str) -> datetime:
     cands = []
     for _, finder in STAGES:
         for p in finder(st, market):
+            # 시장 표기가 없는 파일(섹터 리서치)은 같은 스탬프의 다른 시장 run 것일 수 있다 — 시작 시각에 넣지 않는다
+            # (2026-10-14: 국내·미국이 같은 스탬프를 쓰므로 국내 오전 섹터 파일이 미국 run의 시작으로 잡혔다)
+            if f"_{market}" not in p.name:
+                continue
             if p.exists():
                 cands.append(datetime.fromtimestamp(p.stat().st_mtime, KST))
     return min(cands) if cands else None
+
+
+def slot_for(market: str, d: date) -> datetime:
+    """그 세션 날짜의 정규 실행 시각(KST). ★ 2026-10-15 사용자 결정 — 국내 09:30(개장 30분 뒤 · 주문이 10:30~11:00에 나간다) ·
+    미국 **개장 5분 뒤**(서머타임 22:35 · 서머타임이 끝나면 23:35 — `market_session`이 동부 개장 시각을 KST로 준다).
+    예약 작업은 한국 시각 고정이라 11-02(월)부터 미국 예약을 23:35로 옮겨야 한다(사용자 달력)."""
+    if (market or "kr").lower() == "kr":
+        h, m = SLOTS["kr"]
+        return datetime(d.year, d.month, d.day, h, m, tzinfo=KST)
+    # 미국 세션일도 **같은 날짜**다(22:35 KST = 09:35 EDT) — 그 날 23:00 KST는 동부 같은 날 오전이라 그 세션의 개장을 준다
+    return market_session("US", datetime(d.year, d.month, d.day, 23, 0, tzinfo=KST))["open"] + timedelta(minutes=5)
 
 
 def slot_verdict(market: str, d: date, started: datetime) -> tuple:
     """(판정, 설명). 정규 슬롯과의 거리로 본다."""
     if started is None:
         return "미실행", "산출물이 없다"
-    h, m = SLOTS[market]
-    # 미국 세션일도 **같은 날짜**다: 22:35 KST = 09:35 EDT(시차 13h)로 날이 넘지 않는다.
-    # 날을 하나 빼면 모든 미국 세션이 하루치 이탈로 잘못 찍힌다.
-    target = datetime(d.year, d.month, d.day, h, m, tzinfo=KST)
+    target = slot_for(market, d)
     off = (started - target).total_seconds() / 60
     if abs(off) <= SLOT_TOLERANCE_MIN:
         return "준수", f"슬롯 {target:%m-%d %H:%M} 대비 {off:+.0f}분"
     return "이탈", f"슬롯 {target:%m-%d %H:%M} 대비 **{off:+.0f}분**"
+
+
+# ── 현지 거래일(2026-10-14) ─────────────────────────────────────────────────────
+LOCAL_STAMP_FROM = date(2026, 10, 14)       # 이 날짜 이상 스탬프는 '그 자체가 세션 날짜'
+# 1단 capture가 쓰는 현재 run 포인터. 테스트는 AITB_CURRENT_RUN으로 임시 경로를 준다(run_tests.py) —
+# 2026-10-14 첫 구현 때 테스트가 옛 스탬프(260916)로 실제 포인터를 덮어 기록 날짜가 9월로 찍힐 뻔했다.
+CURRENT_RUN = Path(os.environ["AITB_CURRENT_RUN"]) if os.environ.get("AITB_CURRENT_RUN") else JOURNAL / "current_run.json"
+POINTER_MAX_SKEW_D = 5                       # 지금 세션과 이보다 멀리 떨어진 스탬프로는 포인터를 쓰지 않는다
+CURRENT_MAX_AGE_H = 18                       # 이보다 오래된 포인터는 믿지 않는다(다음 run과 섞이지 않게)
+
+
+def session_date(market: str, now: datetime = None) -> date:
+    """이 시각에 run을 시작하면 **거래하는 세션의 현지 날짜**. 국내 = 한국 날짜 · 미국 = 동부 날짜.
+    그 세션이 이미 끝났거나(마감 뒤) 주말·휴장이면 **다음 거래일**. `kis_client.market_session`이 현지 날짜와
+    마감 시각(서머타임 포함)을 이미 주므로 여기서는 '다음 거래일로 넘길지'만 정한다."""
+    now = (now or datetime.now(KST)).astimezone(KST)
+    m = (market or "kr").upper()
+    s = market_session(m, now)
+    d = s["session_date"]
+    if d.weekday() >= 5 or is_holiday(m, d) or now > s["close"]:
+        d = next_trading_day(m, d)
+    return d
+
+
+def prev_trading_day(market: str, d: date) -> date:
+    """d 바로 앞 거래일(주말·휴장 건너뜀)."""
+    m = (market or "kr").upper()
+    p = d - timedelta(days=1)
+    while p.weekday() >= 5 or is_holiday(m, p):
+        p -= timedelta(days=1)
+    return p
+
+
+def session_stamp(market: str, now: datetime = None) -> str:
+    return stamp_of(session_date(market, now))
+
+
+def stamp_date(st: str) -> date:
+    return datetime.strptime("20" + str(st)[:6], "%Y%m%d").date()
+
+
+def stamp_to_session(st: str, market: str, started: datetime = None) -> date:
+    """스탬프 → 그 run의 거래소 기준일. 전환일 이후 스탬프는 그 자체가 세션 날짜, 그 전은 옛 규칙
+    (KST 시작 날짜 → `session_date_of` — 시작 시각이 있어야 정해진다)."""
+    d = stamp_date(st)
+    if d >= LOCAL_STAMP_FROM:
+        return d
+    return session_date_of(market.lower(), d, started)
+
+
+def session_iso(st: str, market: str) -> str:
+    """스탬프 → 그 run의 세션 날짜(YYYY-MM-DD). 기록 안에 적는 날짜는 이 값이다 — 전환일 전 스탬프는
+    그 run이 처음 손댄 파일 시각으로 옛 규칙을 적용한다."""
+    return stamp_to_session(st, market, first_touch(st, market)).isoformat()
+
+
+def _worklog_done(st: str, market: str) -> bool:
+    wl = JOURNAL / f"worklog_{st}_{market.lower()}.md"
+    if not wl.exists():
+        return True                          # 작업기록이 없으면 이어 갈 run도 없다
+    t = wl.read_text(encoding="utf-8", errors="ignore")
+    return "✓ 작업기록-execute" in t or "✓ 작업기록-no_trade" in t
+
+
+def read_current(market: str = "", now: datetime = None, max_age_h: float = CURRENT_MAX_AGE_H) -> dict:
+    """현재 run 포인터(없거나 오래됐거나 시장이 다르면 {})."""
+    try:
+        cur = json.loads(CURRENT_RUN.read_text(encoding="utf-8"))
+        started = datetime.fromisoformat(cur["started"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+    now = (now or datetime.now(KST)).astimezone(KST)
+    if (now - started).total_seconds() > max_age_h * 3600:
+        return {}
+    if market and str(cur.get("market", "")).lower() != market.lower():
+        return {}
+    return cur
+
+
+def write_current(market: str, st: str, now: datetime = None) -> dict:
+    """현재 run 포인터를 쓴다. 지난 run 재처리·테스트처럼 스탬프가 지금 세션과 며칠 넘게 떨어져 있으면 **쓰지 않는다**
+    (그 날짜가 18시간 동안 모든 기록 날짜로 퍼진다)."""
+    now = (now or datetime.now(KST)).astimezone(KST)
+    try:
+        skew = abs((stamp_date(st) - session_date(market, now)).days)
+    except ValueError:
+        skew = POINTER_MAX_SKEW_D + 1
+    if skew > POINTER_MAX_SKEW_D:
+        print(f"  (현재 run 포인터는 그대로 — 스탬프 {st}가 지금 세션과 {skew}일 떨어져 있다: 지난 run 재처리·테스트)",
+              file=sys.stderr)
+        return {}
+    cur = {"market": market.lower(), "stamp": st, "session_date": stamp_to_session(st, market, now).isoformat(),
+           "started": now.isoformat(timespec="seconds")}
+    CURRENT_RUN.parent.mkdir(parents=True, exist_ok=True)
+    CURRENT_RUN.write_text(json.dumps(cur, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    return cur
+
+
+def run_stamp(market: str, now: datetime = None) -> str:
+    """드라이버가 `--stamp` 없이 불렸을 때 쓸 스탬프 — **진행 중인 같은 시장 run이 있으면 그 스탬프를 잇는다**
+    (포인터가 18시간 안이고 그 run 작업기록에 execute·no_trade 표시가 없을 때). 아니면 `session_stamp`.
+    왜: 국내 run이 장 마감 뒤(15:30~)까지 이어지거나 미국 run이 동부 마감 뒤까지 이어지면 `session_stamp`는 다음 거래일을
+    가리킨다 — 같은 run의 산출물이 두 날짜로 갈라진다(2026-09-30 자정 재개 사고와 같은 모양)."""
+    cur = read_current(market, now)
+    if cur.get("stamp") and not _worklog_done(cur["stamp"], market):
+        return cur["stamp"]
+    return session_stamp(market, now)
+
+
+def run_date(market: str = "", now: datetime = None) -> date:
+    """기록 안에 적는 날짜(논지 created·지도 updated·일정 added·섹터 이력·자산 곡선) — 현재 run의 세션 날짜.
+    포인터가 없거나 오래됐으면 시장을 알면 그 시장의 세션 날짜, 모르면 한국 날짜(예전 동작)."""
+    cur = read_current(market, now)
+    if cur.get("session_date"):
+        try:
+            return date.fromisoformat(cur["session_date"])
+        except ValueError:
+            pass
+    if market:
+        return session_date(market, now)
+    return (now or datetime.now(KST)).astimezone(KST).date()
 
 
 def session_date_of(market: str, stamp_date: date, started: datetime) -> date:
@@ -143,18 +283,19 @@ def scan(days: int, today: date = None) -> list:
     없는 날은 평일·비휴장에만 점검표 행("0 없음")으로 남긴다."""
     today = today or datetime.now(KST).date()
     rows = []
-    for i in range(days - 1, -1, -1):
+    # 앞으로 4일까지 본다 — 현지 거래일 스탬프는 주말·마감 뒤 run에서 오늘보다 뒤일 수 있다(토 14:00 KST → 월요일 세션)
+    for i in range(days - 1, -5, -1):
         d = today - timedelta(days=i)
         st = stamp_of(d)
         for market in ("kr", "us"):
             stage, last, missing = reached(st, market)
             started = first_touch(st, market)
             if stage == "0 없음":
-                if d.weekday() >= 5 or is_holiday(market, d):
-                    continue            # 주말·휴장에는 세션이 없다 — 미실행이 아니다
+                if d > today or d.weekday() >= 5 or is_holiday(market, d):
+                    continue            # 주말·휴장에는 세션이 없다 — 미실행이 아니다(미래 날짜는 아직 안 온 것)
                 sd = d
             else:
-                sd = session_date_of(market, d, started)
+                sd = stamp_to_session(st, market, started)
             verdict, why = slot_verdict(market, sd, started)
             rows.append({
                 "session_date": sd.isoformat(),
@@ -335,13 +476,17 @@ def cmd_scan(a) -> int:
 def cmd_due(a) -> int:
     """1단 캡처에 박는 블록 — **오늘 이어받아야 할 것**만 짧게."""
     rows = scan(a.days)
-    today = datetime.now(KST).date().isoformat()
+    # '오늘'은 시장마다 다르다 — 그 시장의 현재 세션 날짜(현지 거래일). 이번 run 자신(--stamp)도 뺀다.
+    today = {m: session_date(m).isoformat() for m in ("kr", "us")}
+    me = (getattr(a, "market", "") or "", getattr(a, "stamp", "") or "")
+
+    def _cur(r):
+        return r["session_date"] == today[r["market"]] or (r["market"], r.get("stamp")) == me
     buf = io.StringIO()
     print("■ 밀린 일과 — 오늘 이어받을 것", file=buf)
-    half = [r for r in rows if r["reached"] != "0 없음" and not r["complete"]
-            and r["session_date"] != today]
-    none = [r for r in rows if r["reached"] == "0 없음" and r["session_date"] != today]
-    off = [r for r in rows if r["slot"] == "이탈" and r["session_date"] != today]
+    half = [r for r in rows if r["reached"] != "0 없음" and not r["complete"] and not _cur(r)]
+    none = [r for r in rows if r["reached"] == "0 없음" and not _cur(r)]
+    off = [r for r in rows if r["slot"] == "이탈" and not _cur(r)]
     if not (half or none or off):
         print("  밀린 것 없음 · 시각 이탈 없음.", file=buf)
     for r in half:
@@ -355,7 +500,7 @@ def cmd_due(a) -> int:
               file=buf)
     # ★ 회고 안 된 run — 이것이 피드백 고리의 구멍이다.
     #   *실측(2026-09-11): run 10개 중 8개가 회고된 적이 없었다.*
-    unrev = [r for r in runs(a.days) if not r["reviewed"] and r["session_date"] != today]
+    unrev = [r for r in runs(a.days) if not r["reviewed"] and not _cur(r)]
     if unrev:
         print(f"\n  ★ **회고 안 된 run {len(unrev)}건** — 이번 run이 이어붙인다:", file=buf)
         for r in unrev:
@@ -445,9 +590,17 @@ def main() -> int:
     d = sub.add_parser("due", help="밀린 것·이탈만 (1단 캡처용)")
     d.add_argument("--days", type=int, default=7)
     d.add_argument("--out", default="")
+    d.add_argument("--market", default="", help="이번 run의 시장(자기 자신을 밀린 것에서 뺀다)")
+    d.add_argument("--stamp", default="", help="이번 run의 YYMMDD")
+    sd_ = sub.add_parser("stamp", help="지금 run을 시작하면 쓸 스탬프(현지 거래일 · 진행 중 run이면 그 스탬프)")
+    sd_.add_argument("--market", required=True, choices=["kr", "us"])
     t = sub.add_parser("timing", help="run별 소요·읽은 분량 (F7 계측)")
     t.add_argument("--days", type=int, default=14)
     a = ap.parse_args()
+    if a.cmd == "stamp":
+        st = run_stamp(a.market)
+        print(f"{st}  (세션 {stamp_to_session(st, a.market).isoformat()} · {a.market.upper()} 현지 거래일)")
+        return 0
     return {"scan": cmd_scan, "due": cmd_due, "prev": cmd_prev, "timing": cmd_timing}[a.cmd](a)
 
 

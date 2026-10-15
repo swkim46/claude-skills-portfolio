@@ -170,7 +170,10 @@ def check(note: Path, sources: list) -> list:
     """반환: [(줄번호, 숫자문자열, 줄내용)] — 재료에서 못 찾은 것들."""
     haystack = declared_external(note)
     for s in sources:
-        raw = s.read_text(encoding="utf-8")
+        try:
+            raw = s.read_text(encoding="utf-8")
+        except UnicodeDecodeError:          # DART 공시 원문 등 EUC-KR 저장본
+            raw = s.read_bytes().decode("cp949", errors="ignore")
         if s.suffix == ".json":
             # JSON은 숫자가 값으로 들어 있어 문자열 스캔만으로는 놓친다 → 평문화해서 같이 넣는다.
             try:
@@ -202,12 +205,70 @@ def check(note: Path, sources: list) -> list:
     return misses
 
 
+def run_sources(stamp: str, mkt: str, window_days: int = 3) -> list:
+    """한 run의 표준 출처 목록 — 매번 손으로 다시 짜지 않는다.
+
+    ★ 2026-09-30·10-01: 출처 목록을 손으로 세 번 다시 짰고(18개·30개), 빠진 파일 때문에 '재료에서
+    확인되지 않는 수치'가 났다가 사라지는 왕복이 단계마다 반복됐다. 무엇을 넣는지는 여기 한 곳에서 정한다.
+    """
+    from datetime import datetime, timedelta
+    other = {"us": "kr", "kr": "us"}.get(mkt, "")
+    out = []
+
+    text_ext = {".md", ".txt", ".json", ".jsonl", ".html", ".htm", ".csv", ".xml"}
+
+    def add(p: Path):
+        # 바이너리(PDF·이미지)는 넣지 않는다 — 텍스트로 읽을 수 없고 숫자 대조에도 쓸모가 없다
+        if p.is_file() and p.suffix.lower() in text_ext and p not in out:
+            out.append(p)
+    try:
+        d0 = datetime.strptime(stamp, "%y%m%d")
+    except ValueError:
+        d0 = None
+    for p in sorted((HERE / "data").glob(f"material_*_{mkt}.md")):
+        m = re.match(r"material_(\d{6})_", p.name)
+        if m and d0:
+            d = datetime.strptime(m.group(1), "%y%m%d")
+            if d0 - timedelta(days=window_days) <= d <= d0:
+                add(p)
+    add(HERE / "data" / f"snapshot_{stamp}_{mkt}.json")
+    for p in sorted((HERE / "data" / "run_evidence").glob(f"*_{stamp}_{mkt}.*")):
+        if not p.name.startswith("verify_"):
+            add(p)
+    if other:
+        add(HERE / "data" / "run_evidence" / f"account_status_{stamp}_{other}.md")
+    for p in sorted((HERE / "analysis").glob(f"섹터_*_{stamp}_*.md")):
+        add(p)
+    add(HERE / "analysis" / f"AI클레임_{stamp}_{mkt}_판정.md")
+    for p in sorted((HERE / "analysis").glob(f"AI클레임_{stamp}_{mkt}_[AB]_판정.md")):   # 배경 묶음 판정표(2026-10-14)
+        add(p)
+    add(HERE / "journal" / f"carry_{stamp}_{mkt}.md")
+    for n in ("sources.json", "market_map.json", "scenarios.json", "theses.json",
+              "equity_curve.jsonl", "allocation.jsonl", "position_peaks.json"):
+        add(HERE / "journal" / n)
+    for k in ("signal", "approved"):
+        add(HERE / "signals" / f"{k}_{stamp}_{mkt}.json")
+    add(HERE / "journal" / f"trades_{stamp}_{mkt}.json")
+    # 원자료는 수집 창 안의 날짜를 모두 본다 — 상대 시장 종가는 그 시장의 세션 날짜로 저장된다
+    # (예: 261001 KR run이 받은 US 09-30 종가 = `KIS_us_closes_260930.json`).
+    days = [d0 - timedelta(days=k) for k in range(window_days + 1)] if d0 else []
+    for d in days or [None]:
+        tag = d.strftime("%y%m%d") if d else stamp
+        for p in sorted((HERE / "_raw_sources").glob(f"*{tag}*")):
+            add(p)
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="분석노트의 숫자를 재료와 대조한다")
     ap.add_argument("note", help="analysis/분석노트_YYMMDD_mkt_vN_M.md")
-    ap.add_argument("--source", action="append", required=True,
+    ap.add_argument("--source", action="append", default=[],
                     help="재료 파일(여러 번 지정 가능): material_*.md, snapshot_*.json")
+    ap.add_argument("--run", nargs=2, metavar=("STAMP", "MKT"),
+                    help="이 run의 표준 출처 목록을 자동으로 쓴다(--source와 함께 쓰면 더한다)")
     args = ap.parse_args()
+    if not args.source and not args.run:
+        ap.error("--run <stamp> <mkt> 또는 --source가 필요하다")
 
     note = Path(args.note)
     if not note.is_absolute():
@@ -215,7 +276,9 @@ def main() -> int:
     if not note.exists():
         print(f"분석노트 없음: {note}", file=sys.stderr)
         return 2
-    sources = []
+    sources = run_sources(args.run[0], args.run[1].lower()) if args.run else []
+    if args.run:
+        print(f"표준 출처 {len(sources)}개(--run {args.run[0]} {args.run[1]})", file=sys.stderr)
     for s in args.source:
         p = Path(s)
         if not p.is_absolute():
@@ -223,7 +286,8 @@ def main() -> int:
         if not p.exists():
             print(f"재료 파일 없음: {p}", file=sys.stderr)
             return 2
-        sources.append(p)
+        if p not in sources:
+            sources.append(p)
 
     misses = check(note, sources)
     if not misses:
