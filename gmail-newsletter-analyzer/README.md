@@ -17,11 +17,11 @@
 | `tidy_versions.py` | 날짜별 최신 버전만 남기고 이전 버전을 `이전버전/`으로 이동 |
 | `build_corpus.py` | 직접 작성한 노트와 해당 발행분을 연결해 작성 규칙 분석용 자료 생성 |
 | `newsletters.json` | 수집할 발신자, 활성 여부, 제외 사유 관리 |
-| `run_tests.py` | 자체 검사 세 가지를 한 번에 실행하고 완주 여부와 건수를 `test_logs/`에 기록 |
+| `run_tests.py` | 자체 검사 세 가지를 한 번에 실행하고 전체 실행 완료 여부와 건수를 `test_logs/`에 기록 |
 
 ## 처리 순서
 
-1. `python3 digest.py --since "<직전 수집 스탬프>"`로 직전 노트 이후의 발행분을 한 파일로 모읍니다. 날짜가 아닌 마지막 수집 시점을 기준으로 이어서 수집해 누락과 중복을 방지합니다.
+1. `python3 digest.py --since "<마지막 수집 시각>"`으로 직전 노트 이후의 발행분을 한 파일로 모읍니다. 날짜가 아닌 마지막 수집 시점을 기준으로 이어서 수집해 누락과 중복을 방지합니다.
 2. 스킬이 자료를 읽고 노트를 작성합니다. 선별한 항목에 연결된 원문은 `fetch_article.py`로 확인합니다.
 3. `python3 check_note.py <노트> --material <자료>`로 작성된 노트를 검사합니다.
 4. 단계별 검사를 통과하면 `[AI]` 문장의 출처를 검증합니다. 이미 검증한 주장은 `cache_claims.py`가 확인해 중복 조회를 줄입니다.
@@ -44,7 +44,7 @@
 2. 저장소 루트의 `.env.example`을 `.env`로 복사해 `GMAIL_ADDRESS`와 `GMAIL_APP_PASSWORD`를 채웁니다.
 3. `python3 scan_senders.py --days 30`으로 수집이 되는지 확인합니다.
 
-자체 검사는 `python3 run_tests.py`로 한 번에 실행합니다(`check_note.py --selftest`, `cache_claims.py selftest`, `fetch_article.py --selftest`). 완주 여부와 건수를 `test_logs/`에 기록하며, API 키 없이 동작합니다.
+자체 검사는 `python3 run_tests.py`로 한 번에 실행합니다(`check_note.py --selftest`, `cache_claims.py selftest`, `fetch_article.py --selftest`). 전체 실행 완료 여부와 건수를 `test_logs/`에 기록하며, API 키 없이 동작합니다.
 
 ## 보안
 
