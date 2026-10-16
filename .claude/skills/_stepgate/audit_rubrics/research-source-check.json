@@ -1,0 +1,34 @@
+{
+  "_meta": {"note": "비봉인 — 백그라운드 gate-audit Agent용 빡빡 검수. 계속 자라는 검사표.",
+    "seeded_from": ["source-check-must-complete-all", "verify-claims-before-publishing", "source-consistency-review-workflow"]},
+  "verdict": {
+    "deliverable_glob": "{report}",
+    "global_directives": [
+      "너는 검수 결과를 *떨어뜨리려는* 적대적 메타검수자다 — 통과는 흠을 *못 찾았을 때만*.",
+      "관대한 PASS 금지: 각 lens는 산출물의 해당 줄을 *그대로 인용* 못 하면 PASS.",
+      "추측 금지: 인용 없는 FAIL 무효. high lens 하나라도 위반이면 subverdict=FAIL."
+    ],
+    "lenses": [
+      {"id": "content-not-reachability", "severity": "high", "cite_or_pass": true,
+       "ask": "각 항목이 링크 접속성(200/404)이 아니라 인용 *내용*(수치·문구)을 원문과 대조했는가? 접속성만으로 '정합' 판정한 항목을 인용 적발(★ 최빈 누락)."},
+      {"id": "per-claim-recheck", "severity": "high", "cite_or_pass": true,
+       "ask": "load-bearing 인용이 원문에서 직접 재대조됐는가? 검색요약·기억에 의존한 정황을 적발."},
+      {"id": "mismatch-ledger-complete", "severity": "high", "cite_or_pass": true,
+       "ask": "전 절차(추출~산출+값 판정)가 완료되고 MISMATCH N건 집계가 명시됐는가? 2단계(접속성)만 하고 3단계(내용)를 건너뛴 정황을 적발."},
+      {"id": "topic-not-attribution", "severity": "med", "cite_or_pass": true,
+       "ask": "출처가 토픽이 아니라 그 수치의 실제 귀속인가(토픽≠귀속, 검색요약≠출처)? 어긋난 귀속을 적발."},
+      {"id": "method-from-original", "severity": "med", "cite_or_pass": true,
+       "ask": "방법론·정의 대조가 검색요약이 아니라 원문에서 확인됐는가? 원문 미확인 정황을 적발."},
+      {"id": "unsourced-or-unlinked", "severity": "high", "cite_or_pass": true,
+       "ask": "load-bearing 주장(수치·날짜·인용·한정자·평가) 중 (a) 출처가 아예 없거나 (b) 출처를 프로즈로 지명했는데 클릭 링크가 빠진(named-source-without-link) 것을 적발 — '○○ 보도/에 따르면'이라 써놓고 URL 없는 항목(미검증·페이월·봇차단이어도 링크는 있어야 함). [분석]·자체산출 라벨·자명 진술만 면제. (1-bis 대응 lens)"},
+      {"id": "access-label-correct", "severity": "high", "cite_or_pass": true,
+       "ask": "접근성 라벨이 봇차단↔페이월을 혼동했는가 — 403·타임아웃·Cloudflare 챌린지('Just a moment')를 '유료/페이월'로 적은 항목을 적발('유료'는 200+로그인 게이트를 실제 확인했을 때만). 또 'X 없음/단일출처' 부재 단정이 쿼리 변형(동의어·사건명) 소진 없이 내려진 정황도 적발."},
+      {"id": "context-not-just-grep", "severity": "high", "cite_or_pass": true,
+       "ask": "raw '문자열 존재' grep만으로 MATCH 판정하고 surrounding context(앞뒤 문장)·어순·연결어를 대조 안 한 정황을 적발 — 같은 숫자가 다른 맥락(SVG 좌표·이미지 치수·타 지표·타 종목수 등)에서 나온 것을 실착지로 오판(숫자-only grep 오탐)했는지. '문자열이 파일에 있다' != '그 지표가 그 맥락에 있다'. 검토결과가 각 MATCH에 지표 맥락(무엇의 값인지)을 명시했는지 확인."},
+      {"id": "derived-value-labeled", "severity": "med", "cite_or_pass": true,
+       "ask": "자체산출/파생 수치(비율·합계·환산·역산)를 원문 진술처럼 출처에 귀속([자체산출]/[분석] 라벨 없이)한 것을 적발 — 원문엔 입력값만 있고 그 파생값(A x B%, 합, 통화환산 등)은 없는데 출처 링크만 단 경우."},
+      {"id": "pertinence-attribution", "severity": "high", "cite_or_pass": true,
+       "ask": "인용이 그 주장을 실제 뒷받침하는지(pertinence)를 적발 — 특히 구체 사실(개별 품목명·세부 수치·점유율)을 *범주/개요만 있는 출처*에 귀속했는지(개요 페이지엔 범주 라벨만 있는데 세부를 그 링크에 귀속). 사건/범주 존재 != 세부 사실 귀속. 검토결과가 '접속성만 아닌 내용정합'을 넘어 '맥락·귀속 적합성'까지 봤는지."}
+    ]
+  }
+}

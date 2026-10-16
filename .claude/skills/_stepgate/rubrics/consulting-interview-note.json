@@ -1,0 +1,57 @@
+{
+  "deliver": {
+    "intent": "사람이 화자 라벨링한 STT TXT를 실제 입력으로 받아 미팅록 docx를 생성했는가 (바닥. 양식·워딩 검수=비동기 gate-audit)",
+    "mode": "async",
+    "observations": [
+      {
+        "id": "docx",
+        "ask": "생성한 미팅록 docx 경로"
+      },
+      {
+        "id": "stt_input",
+        "variants": [
+          {
+            "ask": "사람이 화자 라벨링한 STT TXT를 실제 입력으로 받았는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "사람이 화자 라벨링한 STT TXT 없이 미팅록을 만들었는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "structure_confirmed",
+        "variants": [
+          {
+            "ask": "Step1 구조 초안을 사용자 확인받은 뒤 docx를 생성했는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "Step1 구조 초안을 사용자 확인 없이 건너뛰고 docx를 생성했는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "invented_speakers",
+        "variants": [
+          {
+            "ask": "화자 라벨을 사람 입력 없이 스스로 추정·생성했는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "화자 라벨을 전부 사람 입력 그대로 썼는가 (스스로 추정·생성한 라벨이 하나도 없으면 Y) (Y/N)",
+            "must": "Y"
+          }
+        ]
+      }
+    ],
+    "criteria": [
+      {
+        "check": "exists",
+        "path": "{docx}"
+      }
+    ]
+  }
+}

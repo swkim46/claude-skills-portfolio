@@ -1,0 +1,96 @@
+{
+  "compile": {
+    "intent": "Outlook 원본 메일에서 실제로 가져온 응답을 VQ 트래커에 기록했는가 (in-place 누적 — 새 사본 만들지 말 것; 바닥. 정합 검수=비동기 gate-audit)",
+    "mode": "async",
+    "observations": [
+      {
+        "id": "tracker",
+        "ask": "VQ 트래커 xlsx 경로 (전문가 VQ 모음_*.xlsx — in-place 갱신본)"
+      },
+      {
+        "id": "pulled",
+        "variants": [
+          {
+            "ask": "Outlook(M365)에서 원본 전문가 메일을 실제로 가져왔는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "Outlook(M365) 원본 메일을 가져오지 않은 채로 트래커를 채웠는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "guessed",
+        "variants": [
+          {
+            "ask": "원본 메일 없이 기억/추정으로 응답 칸을 채웠는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "응답 칸을 전부 원본 메일에 있는 내용으로만 채웠는가 (기억/추정으로 채운 칸이 하나도 없으면 Y) (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "made_copy",
+        "variants": [
+          {
+            "ask": "이 트래커는 in-place 누적인데 새 _vN 사본을 만들었는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "이 트래커를 새 _vN 사본 없이 원래 파일에 in-place로 누적했는가 (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "all_sections",
+        "variants": [
+          {
+            "ask": "모든 이메일의 모든 섹션(Profile Questions [X]체크+서술·[SCREENED]·한줄답변·커버링 산문)까지 스캔해 답변자를 집계했는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "스캔하지 않고 넘어간 섹션(Profile Questions [X]체크+서술·[SCREENED]·한줄답변·커버링 산문 중)이 있는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "dropped_weak",
+        "variants": [
+          {
+            "ask": "응답이 짧다/스크리닝이라는 이유로 답변한 전문가를 임의로 제외(드롭)했는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "답변한 전문가를 한 명도 빠뜨리지 않고 전부 집계했는가 (응답이 짧거나 스크리닝이어도 포함) (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "misattributed",
+        "variants": [
+          {
+            "ask": "포워딩/인용된 답변을 원저자가 아니라 그 메일 발신자 측 전문가에게 귀속했는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "포워딩/인용된 답변을 전부 원저자에게 귀속했는가 (메일 발신자 측으로 잘못 귀속한 것이 하나도 없으면 Y) (Y/N)",
+            "must": "Y"
+          }
+        ]
+      }
+    ],
+    "criteria": [
+      {
+        "check": "exists",
+        "path": "{tracker}"
+      }
+    ]
+  }
+}

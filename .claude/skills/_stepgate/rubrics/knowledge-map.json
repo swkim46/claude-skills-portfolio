@@ -1,0 +1,218 @@
+{
+  "start": {
+    "intent": "새 작업의 *집*(폴더·이름)을 현재 지도 택사노미에 맞게 정해 생성·등록했는가 — 지도를 먼저 읽고 §0 그룹+다음 레터 배정, 폴더명·파일명은 워크스트림 관례, 폴더+CHANGELOG+_raw_sources 골격만 생성, 지도엔 스텁 등록. 임의 위치/이름 발명·중복 폴더·다운스트림 본작업(리서치/빌드) 침범 금지(본작업은 책임 스킬이 함)",
+    "observations": [
+      {
+        "id": "map",
+        "ask": "현재 지도 파일 절대경로 (_지식지도_KNOWLEDGE_MAP.md)"
+      },
+      {
+        "id": "folder",
+        "ask": "새로 생성한 폴더의 절대경로 (CHANGELOG.md·_raw_sources 골격 포함)"
+      },
+      {
+        "id": "letter",
+        "ask": "이 작업에 부여한 워크스트림 레터 (예: AK)"
+      },
+      {
+        "id": "group",
+        "ask": "배정한 §0 전략질문 그룹 (무엇으로/어떻게/무엇을레버리지/어디로/전문가/독립 중 하나)"
+      },
+      {
+        "id": "stub_quote",
+        "ask": "지도에 새로 넣은 §1 스텁 행 또는 §2 카드 제목을 *그대로* 인용(붙여넣기)",
+        "check": "quote",
+        "file": "{map}",
+        "minlen": 10
+      },
+      {
+        "id": "read_first",
+        "variants": [
+          {
+            "ask": "폴더/레터/이름을 정하기 전에 현 지도(§0 그룹·§1 현재 마지막 레터)를 먼저 읽었는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "현 지도(§0 그룹·§1 현재 마지막 레터)를 읽기 전에 폴더/레터/이름을 먼저 정했는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "convention_ok",
+        "variants": [
+          {
+            "ask": "폴더·산출물 파일명이 워크스트림 관례(research_<task>_vN_M·framing 접두사 금지)를 따르는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "폴더·산출물 파일명이 워크스트림 관례(research_<task>_vN_M·framing 접두사 금지)에서 벗어난 것이 있는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "stub_registered",
+        "variants": [
+          {
+            "ask": "다음 레터 부여 + §1 스텁 행 + §2 스텁 카드(목표만)를 지도에 등록했는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "다음 레터 부여·§1 스텁 행·§2 스텁 카드(목표만) 중 지도에 등록하지 않고 빠뜨린 것이 있는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "invented",
+        "variants": [
+          {
+            "ask": "지도에 없는 임의 위치·프레임(렌즈1/2 등)을 새로 발명했는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "배치를 전부 지도에 이미 있는 위치·프레임 안에서 정했는가 — 임의 위치·프레임(렌즈1/2 등)을 발명하지 않았으면 Y (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "duplicate",
+        "variants": [
+          {
+            "ask": "같은 작업의 기존 폴더가 있는데 중복으로 새 폴더를 만들었는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "같은 작업의 기존 폴더가 없음을 확인하고 새 폴더를 만들었는가 (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "did_downstream",
+        "variants": [
+          {
+            "ask": "리서치·빌드 등 *책임 스킬이 할* 본작업까지 여기서 해버렸는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "리서치·빌드 등 본작업은 손대지 않고 책임 스킬에 남겨 두었는가 (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "filled_insight",
+        "variants": [
+          {
+            "ask": "산출물이 아직 없는데 스텁 카드의 핵심·이어받기를 추측으로 채웠는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "스텁 카드의 핵심·이어받기를 추측으로 채우지 않고 목표만 적어 비워 두었는가 (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "surface_matched",
+        "variants": [
+          {
+            "ask": "폴더명·주제의 표면 키워드로 자리를 정했는가(의의 대신 이름 매칭) (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "자리를 표면 키워드 매칭이 아니라 그 작업의 의의로 정했는가 (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "classified_by_significance",
+        "variants": [
+          {
+            "ask": "배치를 3층 의의로 판정했는가 — ①관점(딜도 관점 못 넘음) ②organic 시장/사업영역 연구 vs 고객사 A 직결 딜 ③딜이면 집행(executed)=본사자산 vs 검토중(prospective)=진출딜검토 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "3층 의의 판정 — ①관점(딜도 관점 못 넘음) ②organic 시장/사업영역 연구 vs 고객사 A 직결 딜 ③딜이면 집행(executed)=본사자산 vs 검토중(prospective)=진출딜검토 — 을 거치지 않고 배치를 정했는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      }
+    ],
+    "criteria": [
+      {
+        "check": "exists",
+        "path": "{map}"
+      },
+      {
+        "check": "exists",
+        "path": "{folder}"
+      }
+    ]
+  },
+  "update": {
+    "intent": "scan_folders.ps1로 폴더 현황을 스캔해 *델타만* 반영했는가 (통째 자동 재생성 금지·큐레이션 서술 보존)",
+    "observations": [
+      {
+        "id": "map",
+        "ask": "지식지도 파일 경로 (_지식지도_KNOWLEDGE_MAP.md)"
+      },
+      {
+        "id": "quote",
+        "ask": "그 지도에서 이번에 갱신한(또는 보존한) *항목 한 줄*을 그대로 인용(붙여넣기)",
+        "check": "quote",
+        "file": "{map}",
+        "minlen": 10
+      },
+      {
+        "id": "scanned_delta",
+        "variants": [
+          {
+            "ask": "scan_folders.ps1로 스캔해 변경분(델타)만 반영했는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "scan_folders.ps1 스캔 없이, 또는 변경분을 넘어서 지도를 고쳤는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "regenerated",
+        "variants": [
+          {
+            "ask": "스캔 없이 지도를 통째로 자동 재생성했는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "지도를 통째로 재생성하지 않고 바뀐 항목만 손댔는가 (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "lost_curation",
+        "variants": [
+          {
+            "ask": "기존 큐레이션 서술·택사노미를 날렸는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "기존 큐레이션 서술·택사노미를 그대로 보존했는가 (Y/N)",
+            "must": "Y"
+          }
+        ]
+      }
+    ],
+    "criteria": [
+      {
+        "check": "exists",
+        "path": "{map}"
+      }
+    ]
+  }
+}

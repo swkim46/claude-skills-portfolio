@@ -19,7 +19,7 @@ description: >-
 > *모든* SG 호출에 **같은 `dir=<과제폴더 절대경로>`**(다른 과제 = 다른 폴더 → 자동 격리).
 >   ① 시작 `SG init fact-check dir=<폴더>`
 >   ①-bis **제출 전 두 겹 사전 점검(첫 제출에서 통과하려고 — 감사가 찾을 것을 먼저 찾는다)**:
->   (가) 기계 검사 `python3 <REPO>/life/.claude/skills/fact-check/scripts/lint_verdict.py <판정표> --claims <고정 클레임 목록> [--exclude-from <도구 증거 파일>…] --write` → **`LINT OK`**
+>   (가) 기계 검사 `python3 <REPO>/.claude/skills/fact-check/scripts/lint_verdict.py <판정표> --claims <고정 클레임 목록> [--exclude-from <도구 증거 파일>…] --write` → **`LINT OK`**
 >   (집계·원 문구 대조·하위 클레임 범위·교정 연결·같은 URL의 티어 일관성·사전 점검의 손 집계 · **2026-10-13** (h) '유료' 라벨은 `fetch.py`로 연 기록이
 >   있을 때만 · (i) URL 칸은 http 링크(로컬 경로·'위 …' 금지) · MATCH인데 도메인 루트 주소뿐이면 위반(첫 화면 값이면 비고에 '첫 화면') ·
 >   (k) MATCH인데 비고에 '원문 미열람'이면 위반 · **2026-10-15** (s) 부재 단정('리포트·공시·의견 없음'·'발행하지 않음'·'no report')은
@@ -401,7 +401,7 @@ lint가 심각도 줄에 `(🔵 = 교정표 N행 + 교정 없는 UNVERIFIABLE M�
    ```
    ````
    `op` = `replace`(도구가 바꾼다) · `manual`(고칠 자리만 짚는다) · `marker` = 정정 뒤에도 남아도 되는 표지(문자열·목록).
-   `python3 <REPO>/life/.claude/skills/fact-check/scripts/fc_propagate.py plan|apply|verify <판정표> --stamp <YYMMDD> --market <mkt> [--project <폴더>] [--write]`
+   `python3 <REPO>/.claude/skills/fact-check/scripts/fc_propagate.py plan|apply|verify <판정표> --stamp <YYMMDD> --market <mkt> [--project <폴더>] [--write]`
    → `verify --write`가 남은 사본 0이면 `PROPAGATE OK` 줄을 판정표에 쓴다(범위는 호출 프로젝트의 이번 run 산출물 — 현재 `ai-trading-bot`).
    교정 표는 있는데 블록이 없으면 `PROPAGATE FAIL`이다.
    **범위(2026-10-15 확장 — 감사가 찾은 옛 값이 전부 도구가 안 훑던 파일에 있었다)**: 노트·시그널·승인·이어받기·전망·섹터에 더해

@@ -25,7 +25,7 @@ description: >-
 
 **이 스킬은 조사를 *수행*한다.** 이미 만들어진 일정표·비교표를 *검증*만 할 거면 같은 폴더의 `fact-check`가 담당(둘은 한 쌍: 여기서 만들고, 거기서 감리).
 
-검증 방법론 정본: 별도 컨설팅용 스킬의 참조 문서(비공개 — 이 저장소 미포함). **일상 주제엔 그중 출처 등급 · verbatim 확인·귀속 · 링크 생존·단위 점검만 적용**하고, 공시·사이징 파트는 건너뛴다.
+검증 방법론 정본(공유 — 복제 금지): `<REPO>/.claude/skills/research-verified/references/research_verification_methodology_guide_v2.md` (Part A~E). **일상 주제엔 Part A(출처 등급)·B(verbatim·귀속)·E(링크 생존·단위)만 적용**하고, 공시·사이징 파트는 건너뛴다.
 
 ---
 
@@ -109,7 +109,7 @@ description: >-
 - [ ] fetch·임시 파일은 `_raw_sources/`에만, 루트 0
 
 ## 참고
-- 검증 방법론(**공유 정본 — 복제 금지**): `work/consulting/.claude/skills/research-verified/references/research_verification_methodology_guide_v2.md` (Part A~E; 일상은 A·B·E만)
-- 자매 스킬: `work/consulting/.claude/skills/research-verified`(컨설팅 — 공시·사이징·Tier R/C/A/N·클라이언트 산출물)
+- 검증 방법론(**공유 정본 — 복제 금지**): `.claude/skills/research-verified/references/research_verification_methodology_guide_v2.md` (Part A~E; 일상은 A·B·E만)
+- 자매 스킬: `.claude/skills/research-verified`(컨설팅 — 공시·사이징·Tier R/C/A/N·클라이언트 산출물)
 - 같은 폴더: `fact-check`(작성된 산출물 감리 — 이 스킬의 짝) · `life-map`(폴더·이름 정하기)
 - 관련 메모리: [[analysis-must-be-reference-grounded]] · [[exhaust-before-declaring-research-limits]] · [[fetch-files-never-repo-root]] · [[deliverable-versioning]]

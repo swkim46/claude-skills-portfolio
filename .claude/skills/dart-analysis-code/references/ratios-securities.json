@@ -1,0 +1,123 @@
+{
+  "ratios": [
+    {
+      "id": "roe",
+      "category": "수익성",
+      "label": "ROE(자기자본이익률)",
+      "formula": "당기순이익 / 자본총계 × 100",
+      "expr": "당기순이익 / 자본총계 * 100",
+      "accounts": ["당기순이익", "자본총계"],
+      "unit": "%",
+      "higher_is_better": true,
+      "interpret": "증권사 최우선 수익성 지표. 자기자본 대비 수익 창출력 — 위탁·IB·운용·이자 등 사업믹스 효율의 종합. 추세·peer 중앙값 대비로 해석."
+    },
+    {
+      "id": "roa",
+      "category": "수익성",
+      "label": "ROA(총자산이익률)",
+      "formula": "당기순이익 / 자산총계 × 100",
+      "expr": "당기순이익 / 자산총계 * 100",
+      "accounts": ["당기순이익", "자산총계"],
+      "unit": "%",
+      "higher_is_better": true,
+      "interpret": "총자산 활용 효율. 증권은 자산 대부분이 금융자산이라 ROA는 낮게 나오고, ROE와의 격차가 레버리지 기여분."
+    },
+    {
+      "id": "operating_margin",
+      "category": "수익성",
+      "label": "영업이익률(÷영업수익)",
+      "formula": "영업이익 / 영업수익 × 100",
+      "expr": "영업이익 / 매출액 * 100",
+      "accounts": ["영업이익", "매출액"],
+      "unit": "%",
+      "higher_is_better": true,
+      "interpret": "영업수익(수수료+이자+운용손익 등 총額) 대비 영업이익. 분모가 gross라 제조·유통 영업이익률과 직접 비교 금지 — 증권사 간·자기 시계열로만."
+    },
+    {
+      "id": "net_margin",
+      "category": "수익성",
+      "label": "순이익률(÷영업수익)",
+      "formula": "당기순이익 / 영업수익 × 100",
+      "expr": "당기순이익 / 매출액 * 100",
+      "accounts": ["당기순이익", "매출액"],
+      "unit": "%",
+      "higher_is_better": true,
+      "interpret": "영업수익 대비 최종 순이익. 영업외·평가손익·법인세 영향 포함 — 영업이익률과의 괴리가 비영업 손익 시그널."
+    },
+    {
+      "id": "sga_to_revenue",
+      "category": "수익성",
+      "label": "판관비율(÷영업수익)",
+      "formula": "판매비와관리비 / 영업수익 × 100",
+      "expr": "판매비와관리비 / 매출액 * 100",
+      "accounts": ["판매비와관리비", "매출액"],
+      "unit": "%",
+      "higher_is_better": false,
+      "interpret": "영업수익 대비 판관비 부담(인건비·전산·지급수수료 등). 회사별 판관비 분류·영업비용 표기 차이 유의 — 미보고 시 계산 생략(추정 금지)."
+    },
+    {
+      "id": "revenue_growth",
+      "category": "성장성",
+      "label": "영업수익증가율(YoY)",
+      "formula": "(영업수익 - 전기영업수익) / 전기영업수익 × 100",
+      "expr": "(매출액 - 매출액_prev) / 매출액_prev * 100",
+      "accounts": ["매출액"],
+      "yoy": true,
+      "unit": "%",
+      "higher_is_better": true,
+      "interpret": "외형(영업수익) 성장. 증권은 시황(거래대금·금리·증시)에 민감 — 비교 모드에선 전사 동반=산업요인 vs 한 곳만 역행=당사요인 판별."
+    },
+    {
+      "id": "op_growth",
+      "category": "성장성",
+      "label": "영업이익증가율(YoY)",
+      "formula": "(영업이익 - 전기영업이익) / 전기영업이익 × 100",
+      "expr": "(영업이익 - 영업이익_prev) / 영업이익_prev * 100",
+      "accounts": ["영업이익"],
+      "yoy": true,
+      "unit": "%",
+      "higher_is_better": true,
+      "interpret": "수익 성장. 영업수익 성장률과의 괴리가 비용효율·믹스 시그널(외형↑인데 이익↓이면 비용·운용손실 점검)."
+    },
+    {
+      "id": "equity_growth",
+      "category": "성장성",
+      "label": "자기자본증가율(YoY)",
+      "formula": "(자본총계 - 전기자본총계) / 전기자본총계 × 100",
+      "expr": "(자본총계 - 자본총계_prev) / 자본총계_prev * 100",
+      "accounts": ["자본총계"],
+      "yoy": true,
+      "unit": "%",
+      "higher_is_better": true,
+      "interpret": "자기자본 축적 속도. 증권은 자기자본이 영업용순자본(NCR)·IB 투자여력의 토대 — 증자·이익유보로 확대, 자사주·배당으로 축소."
+    },
+    {
+      "id": "leverage_ratio",
+      "category": "안정성",
+      "label": "레버리지비율(총자산/자기자본)",
+      "formula": "자산총계 / 자본총계 × 100",
+      "expr": "자산총계 / 자본총계 * 100",
+      "accounts": ["자산총계", "자본총계"],
+      "unit": "%",
+      "higher_is_better": false,
+      "interpret": "재무제표 기준 레버리지 proxy. 금융위 규제 레버리지비율(한도 1,100%)·NCR과는 정의·조정이 달라 동일시 금지 — 추세·peer 비교용. 급증 시 위험인수 확대 신호."
+    },
+    {
+      "id": "equity_ratio",
+      "category": "안정성",
+      "label": "자기자본비율",
+      "formula": "자본총계 / 자산총계 × 100",
+      "expr": "자본총계 / 자산총계 * 100",
+      "accounts": ["자본총계", "자산총계"],
+      "unit": "%",
+      "higher_is_better": true,
+      "interpret": "총자산 대비 자기자본(레버리지비율의 역수 관점). 높을수록 자본완충 두꺼움. 증권 평균 대비·추세로 해석."
+    }
+  ],
+  "lenses": {
+    "default": {
+      "label": "증권업 재무 리뷰",
+      "include_categories": ["수익성", "성장성", "안정성"]
+    }
+  }
+}

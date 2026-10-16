@@ -102,7 +102,7 @@ python3 fc_track1.py decide --mode pre --stamp <YYMMDD> --market <mkt>
 # ↓ 정식 judge 전에 모의 감사 1회(배경 · 2026-10-15 · 4단 5-C 〈모의 감사〉) — 주문을 막지 않으려고 decide 뒤에 돈다.
 #   지적으로 판정이 바뀌면 고친 뒤 decide --mode post(체결된 매수의 근거가 무너지면 소급) → 정식 judge → FIRE
 ```
-(`<fact-check>` = `<REPO>/life/.claude/skills/fact-check`)
+(`<fact-check>` = `<REPO>/.claude/skills/fact-check`)
 
 - **근거 판정은 손으로 적지 않는다.** `decide`가 판정표의 판정·등급·행 번호(`fc_row`)·검증한 주소를 시그널 `evidence`에 덮어쓰고
   `track1` 블록을 남긴다. `extract` 뒤에 근거를 더하면 그 행은 `UNVERIFIED_T1`이다.

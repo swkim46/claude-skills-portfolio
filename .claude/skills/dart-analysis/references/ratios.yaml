@@ -1,0 +1,142 @@
+# 재무비율 레지스트리 (dart-analysis)
+# ─────────────────────────────────────────────────────────────────
+# 새 지표 추가 = 아래에 블록 한 개 추가. 스크립트·SKILL.md 수정 불필요.
+# analyze.py가 이 파일을 읽어 비율을 계산함.
+#
+# 필드:
+#   id          : 고유 식별자(영문 snake_case)
+#   category    : 수익성 | 성장성 | 안정성 | 현금흐름  (새 범주 추가 가능)
+#   label       : 채팅·Excel에 표시할 한글 이름
+#   formula     : 사람이 읽는 공식(문서용). 실제 계산은 expr로.
+#   expr        : 계산식 — accounts의 표준 계정명을 변수로 사용.
+#                 전기값은 접미사 _prev (예: 매출액_prev) — yoy:true일 때 제공됨.
+#   accounts    : 필요한 표준 계정명(account-aliases.yaml에서 표기차 흡수)
+#   unit        : "%", "배", "원" 등
+#   yoy         : true면 전기 대비 계산(전년 데이터 필요)
+#   higher_is_better : 해석 방향(▲▼ 표시·코멘트용)
+#   interpret   : 컨설팅식 해석 가이드(LLM이 수치에 맞춰 서술)
+
+ratios:
+  # ── 수익성 ──────────────────────────────────────────────
+  - id: operating_margin
+    category: 수익성
+    label: 영업이익률
+    formula: 영업이익 / 매출액 × 100
+    expr: 영업이익 / 매출액 * 100
+    accounts: [영업이익, 매출액]
+    unit: "%"
+    higher_is_better: true
+    interpret: 본업 수익성. 하락 추세면 매출원가율·판관비·판가(ASP) 중 무엇이 압박했는지 점검.
+
+  - id: net_margin
+    category: 수익성
+    label: 순이익률
+    formula: 당기순이익 / 매출액 × 100
+    expr: 당기순이익 / 매출액 * 100
+    accounts: [당기순이익, 매출액]
+    unit: "%"
+    higher_is_better: true
+    interpret: 최종 수익성. 영업이익률과 괴리가 크면 영업외손익·금융손익·법인세 영향 확인.
+
+  - id: roe
+    category: 수익성
+    label: ROE(자기자본이익률)
+    formula: 당기순이익 / 자본총계 × 100
+    expr: 당기순이익 / 자본총계 * 100
+    accounts: [당기순이익, 자본총계]
+    unit: "%"
+    higher_is_better: true
+    interpret: 주주자본 대비 수익 창출력. 추세 하락 시 마진·자산효율·레버리지(듀폰) 중 원인 분해 여지.
+
+  - id: roa
+    category: 수익성
+    label: ROA(총자산이익률)
+    formula: 당기순이익 / 자산총계 × 100
+    expr: 당기순이익 / 자산총계 * 100
+    accounts: [당기순이익, 자산총계]
+    unit: "%"
+    higher_is_better: true
+    interpret: 총자산 활용 효율. ROE와 함께 보면 레버리지 기여도 가늠.
+
+  # ── 성장성 ──────────────────────────────────────────────
+  - id: revenue_growth
+    category: 성장성
+    label: 매출액증가율(YoY)
+    formula: (매출액 - 전기매출액) / 전기매출액 × 100
+    expr: (매출액 - 매출액_prev) / 매출액_prev * 100
+    accounts: [매출액]
+    yoy: true
+    unit: "%"
+    higher_is_better: true
+    interpret: 외형 성장. 영업이익증가율과의 괴리가 핵심 시그널.
+
+  - id: op_growth
+    category: 성장성
+    label: 영업이익증가율(YoY)
+    formula: (영업이익 - 전기영업이익) / 전기영업이익 × 100
+    expr: (영업이익 - 영업이익_prev) / 영업이익_prev * 100
+    accounts: [영업이익]
+    yoy: true
+    unit: "%"
+    higher_is_better: true
+    interpret: 수익 성장. 매출은 늘되 영업이익이 줄면 '성장하는데 남는 게 없는' 구조 — 비용 점검.
+
+  # ── 안정성 ──────────────────────────────────────────────
+  - id: debt_ratio
+    category: 안정성
+    label: 부채비율
+    formula: 부채총계 / 자본총계 × 100
+    expr: 부채총계 / 자본총계 * 100
+    accounts: [부채총계, 자본총계]
+    unit: "%"
+    higher_is_better: false
+    interpret: 재무 레버리지. 통상 100~200% 이하를 양호로 보나 업종차 큼(자본집약·금융업 예외).
+
+  - id: current_ratio
+    category: 안정성
+    label: 유동비율
+    formula: 유동자산 / 유동부채 × 100
+    expr: 유동자산 / 유동부채 * 100
+    accounts: [유동자산, 유동부채]
+    unit: "%"
+    higher_is_better: true
+    interpret: 단기 지급능력. 통상 100% 이상 양호. 급락 시 운전자본·단기차입 점검.
+
+  - id: interest_coverage
+    category: 안정성
+    label: 이자보상배율
+    formula: 영업이익 / 이자비용
+    expr: 영업이익 / 이자비용
+    accounts: [영업이익, 이자비용]
+    unit: "배"
+    higher_is_better: true
+    interpret: 영업이익으로 이자 감당 능력. 1배 미만이면 영업이익으로 이자도 못 갚는 상태.
+
+  # ── 현금흐름 (이익의 질) ────────────────────────────────
+  - id: ocf
+    category: 현금흐름
+    label: 영업활동현금흐름
+    formula: 영업활동현금흐름
+    expr: 영업활동현금흐름
+    accounts: [영업활동현금흐름]
+    unit: "원"
+    higher_is_better: true
+    interpret: 본업의 현금 창출력. 마이너스 지속은 적신호.
+
+  - id: ocf_to_ni
+    category: 현금흐름
+    label: 영업CF/순이익
+    formula: 영업활동현금흐름 / 당기순이익 × 100
+    expr: 영업활동현금흐름 / 당기순이익 * 100
+    accounts: [영업활동현금흐름, 당기순이익]
+    unit: "%"
+    higher_is_better: true
+    interpret: 이익의 질. 100% 근방·이상이면 회계이익이 실제 현금으로 뒷받침됨. 낮으면 운전자본·일회성 점검.
+
+# ── 분석 관점(렌즈) 기본값 ───────────────────────────────
+# lenses/에 별도 파일로 관점을 추가하면 여기서 참조 가능.
+# 미지정 시 default(전체 범주)를 적용.
+lenses:
+  default:
+    label: 표준 재무 리뷰
+    include_categories: [수익성, 성장성, 안정성, 현금흐름]

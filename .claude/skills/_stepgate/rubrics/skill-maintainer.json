@@ -1,0 +1,103 @@
+{
+  "verify": {
+    "intent": "스킬 편집을 무손실로 마쳤는가 — 중량 편집이면 백업 + lossless_assert removed=0 통과, 보호 스킬 원본 미수정",
+    "observations": [
+      {
+        "id": "backup",
+        "variants": [
+          {
+            "ask": "편집 전 백업을 스킬 폴더 절대경로에 만들었는가 (경량 편집이면 Y로 간주) (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "편집 전 백업 없이(또는 스킬 폴더 절대경로가 아닌 곳에) 편집을 시작했는가 (경량 편집이면 N) (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "lossless",
+        "variants": [
+          {
+            "ask": "중량 편집이면 lossless_assert를 돌려 removed=0을 확인했거나, removed가 있으면 사라진 각 줄을 의도한 편집으로 1:1 대조했는가 (경량 편집이면 Y) (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "중량 편집인데 lossless_assert를 돌리지 않았거나, removed가 있는데 사라진 줄을 1:1 대조하지 않고 넘어갔는가 (경량 편집이면 N) (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "touched_protected",
+        "variants": [
+          {
+            "ask": "보호 스킬(deckster-slide-generator·dart-analysis) 원본을 직접 수정했는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "보호 스킬(deckster-slide-generator·dart-analysis) 원본을 손대지 않고 그대로 두었는가 (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "hardcoded",
+        "variants": [
+          {
+            "ask": "헬퍼 대신 레이아웃·매직넘버를 SKILL 본문/스크립트에 하드코딩했는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "레이아웃·매직넘버를 하드코딩하지 않고 헬퍼로 처리했는가 (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "unintended_loss",
+        "variants": [
+          {
+            "ask": "사라진 줄 중 의도한 편집으로 설명되지 않는 유실이 하나라도 있는가 (removed=0이었으면 N) (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "사라진 줄이 전부 의도한 편집으로 설명되는가 (removed=0이었으면 Y) (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "code_removed_accounted",
+        "variants": [
+          {
+            "ask": "코드(.py)를 고쳤다면 파일마다 편집 전 백업을 만들고 code_edit_check.py <백업> <파일>이 보고한 사라진 줄을 전부 --ok로 대응시켜 종료코드 0을 받았는가 (코드를 안 고쳤으면 Y) (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "코드(.py)를 고친 파일 가운데 편집 전 백업이 없거나, code_edit_check.py의 사라진 줄 중 --ok로 대응시키지 않은 줄이 남은 파일이 있는가 (코드를 안 고쳤으면 N) (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "project_tests_rerun",
+        "variants": [
+          {
+            "ask": "고친 .py가 속한 프로젝트의 테스트 러너를 마지막 편집 뒤에 돌려 완주·실패 0을 확인했고, 주문·전송·외부 쓰기 경로를 고쳤다면 그 경로를 끝까지 도는 테스트가 그 안에 있는가 (코드를 안 고쳤으면 Y) (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "마지막 편집 뒤 테스트 러너를 돌리지 않았거나 실패·멈춤이 남았거나, 고친 주문·전송·외부 쓰기 경로를 끝까지 도는 테스트가 없는 .py 프로젝트가 있는가 (코드를 안 고쳤으면 N) (Y/N)",
+            "must": "N"
+          }
+        ]
+      }
+    ],
+    "criteria": [
+      {
+        "check": "code_audit"
+      }
+    ]
+  }
+}

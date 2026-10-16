@@ -644,7 +644,7 @@ python3 verify_numbers.py analysis/분석노트_<YYMMDD>_<mkt>_vN_M.md --run <YY
 4. **판정표** `analysis/AI클레임_<YYMMDD>_<mkt>_<A|B>_판정.md`(묶음마다) — fact-check §5 양식. 범위 밖(책 자체 예측·규칙·도구 수치)은
    `## 판정 범위 밖` 절에 적는다.
 5. **제출 전 두 겹 사전 점검** — (가)
-   `python3 <REPO>/life/.claude/skills/fact-check/scripts/lint_verdict.py analysis/AI클레임_<YYMMDD>_<mkt>_<A|B>_판정.md --claims analysis/AI클레임_<YYMMDD>_<mkt>_<A|B>.md --exclude-from data/run_evidence/tools_<YYMMDD>_<mkt>.md --exclude-from data/run_evidence/levels_<YYMMDD>_<mkt>.md --exclude-from data/run_evidence/base_rates_<YYMMDD>_<mkt>.txt --write`
+   `python3 <REPO>/.claude/skills/fact-check/scripts/lint_verdict.py analysis/AI클레임_<YYMMDD>_<mkt>_<A|B>_판정.md --claims analysis/AI클레임_<YYMMDD>_<mkt>_<A|B>.md --exclude-from data/run_evidence/tools_<YYMMDD>_<mkt>.md --exclude-from data/run_evidence/levels_<YYMMDD>_<mkt>.md --exclude-from data/run_evidence/base_rates_<YYMMDD>_<mkt>.txt --write`
    → `LINT OK` (나) 감사 기준표 전 lens 사전 점검 지적 0 (다) 6번 `PROPAGATE OK`. **게이트 ②(form·judge)와 감사는 전파가 끝나는 즉시
    돈다** — 교정 0이면 배경 에이전트가 그 자리에서, 교정이 있으면 본 세션이 가장 가까운 경계에서 apply·verify한 뒤(〈배경 에이전트〉).
    감사를 6단 뒤로 미루지 않는다 — 주문은 감사를 기다리지 않는다.
@@ -666,7 +666,7 @@ python3 verify_numbers.py analysis/분석노트_<YYMMDD>_<mkt>_vN_M.md --run <YY
    ````
    (`op`: `replace` = 도구가 바꾼다 · `manual` = 사람이 고칠 자리만 짚는다 · `family`: 같은 사실을 다른 말로 쓴 곳을 찾는 정규식 묶음 ·
    `marker`: 정정 뒤에도 남아도 되는 표지 — 문자열 또는 목록) 그리고
-   `python3 <REPO>/life/.claude/skills/fact-check/scripts/fc_propagate.py plan|apply|verify <판정표> --stamp <YYMMDD> --market <mkt> [--write]`
+   `python3 <REPO>/.claude/skills/fact-check/scripts/fc_propagate.py plan|apply|verify <판정표> --stamp <YYMMDD> --market <mkt> [--write]`
    → `verify --write`가 판정표에 `PROPAGATE OK` 줄을 쓴다(남은 것 0). **`apply`는 본 세션만 부른다**(배경 에이전트는 `plan`까지).
    범위는 이번 run이 만든 것 전부다 — 최신 노트 · 시그널·승인 ·
    이어받기 · 전망 · 섹터 리서치 · market_map(이번 run 갱신분) · 그날 건드린 논지 · 그날 더한 일정 · 이번 run 출처 · 이번 run 시나리오.

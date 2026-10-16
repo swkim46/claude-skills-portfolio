@@ -1,0 +1,44 @@
+{
+  "_meta": {"note": "비봉인 — 백그라운드 gate-audit Agent용 빡빡 검수. cp별 lens. 계속 자라는 검사표.",
+    "seeded_from": ["verify-claims-before-publishing", "exhaust-before-declaring-research-limits", "causal-why-over-surface-verdict", "source-link-lands-on-figure", "md-research-note-format", "declarative-section-headings", "consulting-register-always"]},
+  "absorb": {
+    "deliverable_glob": "{ledger}",
+    "global_directives": [
+      "너는 흡수 ledger를 *떨어뜨리려는* 적대적 검수자다 — 통과는 흠을 *못 찾았을 때만*.",
+      "관대한 PASS 금지: 위반 줄을 *그대로 인용* 못 하면 그 lens는 PASS. 인용 없는 FAIL 무효."
+    ],
+    "lenses": [
+      {"id": "external-primary-not-internal", "severity": "high", "cite_or_pass": true,
+       "ask": "ledger 출처가 외부 1차 원본(공식 페이지·공시·거래소·규제 등록부)인가? 내부 2차 가공물(과거 자체 .md/xlsx/docx)뿐인 정황을 인용 적발."},
+      {"id": "actually-summarized", "severity": "high", "cite_or_pass": true,
+       "ask": "직전/인접 리서치의 핵심 발견이 실제로 흡수·요약됐는가? 맥락 없이 URL만 나열한 빈 껍데기를 적발."},
+      {"id": "home-mapped-correctly", "severity": "high", "cite_or_pass": true,
+       "ask": "산출물의 집(과제 폴더)이 제대로 지정됐는가 — ledger 경로에서 과제 폴더명을 뽑아 `_stepgate/onedrive_sync_map.json`의 mappings와 대조하라. (1) 그 폴더명이 mappings에 등록돼 있는가(미등록이면 사인오프 시 어느 OneDrive 폴더로도 싱크 안 됨), (2) 매핑 대상 OneDrive 경로의 *주제가 이 과제와 일치*하는가(다른 주제 전용 폴더 — 예 '…_시장규모' 전용 — 의 매핑을 물려받아 주제가 어긋나면 위반). 미등록이거나 주제 불일치 정황을 그 매핑 라인 그대로 인용 적발. 신규 과제면 착수 전 /knowledge-map start로 전용 폴더·매핑을 먼저 지정했어야 한다."}
+    ]
+  },
+  "publish": {
+    "deliverable_glob": "{master}",
+    "global_directives": [
+      "너는 리포트를 *떨어뜨리려는* 적대적 검수자다 — 통과는 흠을 *못 찾았을 때만*.",
+      "관대한 PASS 금지: 위반 문장/링크를 *그대로 인용* 못 하면 그 lens는 PASS. high 하나라도 위반이면 FAIL."
+    ],
+    "lenses": [
+      {"id": "all-claims-recollated", "severity": "high", "cite_or_pass": true,
+       "ask": "본문 claim이 링크 원문에서 재대조됐는가? 검색요약/기억으로 먼저 쓰고 출처를 나중에 붙인(reverse-draft) 정황을 적발."},
+      {"id": "source-link-lands-on-figure", "severity": "high", "cite_or_pass": true, "needs_fetch": true,
+       "ask": "각 출처 링크가 그 수치가 *실제 보이는* 페이지/앵커로 가는가? 제네릭 URL·표지 착지를 실제 WebFetch로 적발."},
+      {"id": "exhaust-before-limits", "severity": "med", "cite_or_pass": true,
+       "ask": "'도달 한계'를 단정하기 전 1차·어닝콜·인터뷰·페이월 레이어를 소진했는가? 성급한 한계 선언을 적발."},
+      {"id": "causal-why", "severity": "med", "cite_or_pass": true,
+       "ask": "명제 검증이 표면 '맞다/틀리다'에 그치지 않고 인과(왜)·차이 결정변수를 1차 자료로 규명했는가? 표면 판정만 있는 곳을 적발."},
+      {"id": "filings-narrative-exhausted", "severity": "med", "cite_or_pass": true, "needs_fetch": true,
+       "ask": "근거가 SEC/DART 공시인데 재무제표 수치에만 의존하고, 같은 발행처의 IR 발표자료(SEC 8-K EX-99.x investor presentation·earnings deck)·MD&A·DART '사업의 내용'의 고객 구성·세그먼트 KPI·사업 전략 등 정성 정보를 누락했는가? '무엇을·누구에게·어떻게 파는가'를 재무제표만으로 답한 정황을 적발(발표자료에 있는데 안 쓴 차원을 인용)."},
+      {"id": "declarative-headings", "severity": "low", "cite_or_pass": true,
+       "ask": "모든 섹션/하위섹션 제목(##·###)이 선언형 *명사구*인가? 질문형('왜 ~하나/~아닌가')·부정형('~ 못 하는 이유/~ 안 됨')·서술형 평서문 술어('A는 B다/보수적')로 끝나는 제목을 그대로 인용 적발. 명사구가 아닌 문장형 제목은 위반. (severity=low: FAIL 유발 아님, 참고만)"},
+      {"id": "consulting-register", "severity": "med", "cite_or_pass": true,
+       "ask": "본문 종결이 명사형(~함/~임/~됨/~음)·한다체 등으로 *일관*되고, 구어·1인칭·hand-holding('쉽게 말하면')·과장 최상급('압도적·최강')이 없는가? 위반 문장 인용 적발(register 혼재 포함)."},
+      {"id": "source-citations-hyperlinked-and-structured", "severity": "med", "cite_or_pass": true,
+       "ask": "본문 각 [R#] 인용이 원문 URL 하이퍼링크(HTML 앵커 또는 마크다운 링크)로 *직접 랜딩*하고(제네릭·표지·미링크 아님; 웹 URL 없는 출처만 예외로, 〈출처〉 앵커 점프+사유 명시), 〈출처〉 각 항목이 *원문(verbatim)·(외국어면)번역·내용·활용*을 각자 줄에 둔 구조화 하위불릿으로 전개됐는가? 본문에 하이퍼링크 없이 방치된 맨 텍스트 [R#], 〈출처〉를 한 줄로 인라인 압축(각 단을 가운뎃점으로 한 문단에 뭉침)한 항목, verbatim·URL이 누락된 항목을 그대로 인용 적발."}
+    ]
+  }
+}

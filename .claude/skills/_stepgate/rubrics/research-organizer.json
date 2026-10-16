@@ -1,0 +1,164 @@
+{
+  "publish": {
+    "intent": "새 vN_M xlsx 발행(덮어쓰기 금지) + 스토리라인 리드 + 출처 규율(R# 인덱스·다출처 열·하이퍼링크) + 색 절제(하이라이트 1-2행)·명사형 컨설팅체가 *형식상* 존재/충족하는가. ※스코프=형식·결정론 floor까지(주장별 출처 정확성·AI틱 전수·가이드 전수 검수=비동기 gate-audit 소관).",
+    "mode": "async",
+    "observations": [
+      {
+        "id": "xlsx",
+        "ask": "발행한 xlsx 산출물 경로 (새 vN_M 파일, 첫 발행=v1_0)"
+      },
+      {
+        "id": "newfile",
+        "variants": [
+          {
+            "ask": "기존 파일을 in-place 덮어쓰지 않고 *새 vN_M 파일*(v1_0 등)로 저장했는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "기존 파일과 같은 이름으로 저장해 새 vN_M 파일(v1_0 등)을 만들지 않았는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "storyline",
+        "variants": [
+          {
+            "ask": "산출물 맨 앞에 스토리라인 리드(결론→근거 흐름)를 두었는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "산출물이 스토리라인 리드(결론→근거 흐름) 없이 바로 표부터 시작하는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "tier_leaked",
+        "variants": [
+          {
+            "ask": "Tier 등 내부 메타 라벨/★편집 마커를 클라이언트 xlsx에 노출했는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "클라이언트 xlsx에서 Tier 등 내부 메타 라벨/★편집 마커를 전부 걷어냈는가 (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "invented_frame",
+        "variants": [
+          {
+            "ask": "사용자 기존 분류축 대신 임의 프레임(렌즈1/2 등)을 발명해 정리축으로 썼는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "정리축으로 사용자의 기존 분류축을 그대로 썼는가 — 임의 프레임(렌즈1/2 등)을 발명하지 않았으면 Y (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "bare_links",
+        "variants": [
+          {
+            "ask": "출처를 R#류 인덱스 없이 맨 하이퍼링크/이름만 달았는가(인덱스 라벨·RAW Data 매핑 없음) (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "모든 출처에 R#류 인덱스 라벨과 RAW Data 매핑을 붙였는가 (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "sources_crammed",
+        "variants": [
+          {
+            "ask": "한 행에 출처가 여럿인데 출처1/출처2 열(또는 하위행)로 나누지 않고 한 셀에 몰아넣었는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "출처가 여럿인 행을 전부 출처1/출처2 열(또는 하위행)로 나눴는가 (출처가 여럿인 행이 없었으면 Y) (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "highlight_overload",
+        "variants": [
+          {
+            "ask": "decisive insight가 아닌 행을 하이라이트했거나, 한 표에서 하이라이트 행이 2행을 넘겼거나, 강점/약점 분류를 행 색으로 칠했는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "하이라이트를 표당 2행 이내의 decisive insight에만 썼는가 — 강점/약점 분류를 행 색으로 칠하지 않았으면 Y (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "ai_register",
+        "variants": [
+          {
+            "ask": "본문에 hand-holding('쉽게 말하면·주목할 포인트')·과장 최상급('최강·압도적·아시아 최고')·동사 또는 polite 종결('~한다·~합니다')을 섞었는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "본문이 전부 명사형 컨설팅체인가 — hand-holding('쉽게 말하면·주목할 포인트')·과장 최상급('최강·압도적·아시아 최고')·동사 또는 polite 종결('~한다·~합니다')이 하나도 없으면 Y (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "unit_mixed",
+        "variants": [
+          {
+            "ask": "한 표의 한 컬럼 안에서 단위·포맷을 섞었는가(예: 'M USD'와 '50억/수억 달러' 혼용, 미공개 placeholder 불일치) (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "한 표의 한 컬럼 안에서 단위·포맷을 하나로 통일했는가(예: 'M USD'와 '50억/수억 달러' 혼용 없음, 미공개 placeholder 일치) (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "src_quote",
+        "ask": "RAW Data 시트의 출처 항목 한 줄(예: 'R3 — …: https://…')을 셀 내용 *그대로* 붙여넣기",
+        "check": "quote",
+        "file": "{xlsx}",
+        "minlen": 30
+      }
+    ],
+    "criteria": [
+      {
+        "check": "exists",
+        "path": "{xlsx}"
+      },
+      {
+        "check": "xlsx_links",
+        "file": "{xlsx}",
+        "min": 8,
+        "min_distinct": 6,
+        "cell_pat": "R\\d+",
+        "cell_min": 8
+      },
+      {
+        "check": "xlsx_highlight",
+        "file": "{xlsx}",
+        "max_run": 2
+      },
+      {
+        "check": "xlsx_no_crammed_src",
+        "file": "{xlsx}"
+      },
+      {
+        "check": "deliverable_name",
+        "file": "{deliverable}",
+        "pat": "_v\\d+_\\d+\\.[A-Za-z0-9]+$"
+      }
+    ]
+  }
+}

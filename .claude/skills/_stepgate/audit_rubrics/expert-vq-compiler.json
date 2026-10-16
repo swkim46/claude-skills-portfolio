@@ -1,0 +1,26 @@
+{
+  "compile": {
+    "deliverable_glob": "전문가_VQ_모음*.xlsx",
+    "global_directives": [
+      "openpyxl로 산출물의 실제 셀 값을 열어 확인(PYTHONIOENCODING=utf-8). 시트별 전문가 열(D+)·라벨(C)·질문표(B2:C) 구조로 파싱.",
+      "원문 대조가 필요하면 스레드 원본 메일(Outlook)과 비교. 인용(셀좌표/문안) 못 하면 그 lens는 PASS(cite-or-pass).",
+      "이번 변경분(신규/수정된 전문가 열)에 집중하되, 기존 열 무손실도 확인."
+    ],
+    "lenses": [
+      {"id": "all_answerers_present", "severity": "high", "cite_or_pass": true,
+       "ask": "VQ에 어떤 형태로든 응답한 전문가가 모두 시트에 있는가? Profile Questions([X]체크+한 줄 서술)·[SCREENED] 번호답변·한줄답변·'I can discuss/Can discuss/on call' 같은 소극 답변도 '응답'으로 포함돼야 한다. 응답이 짧다·스크리닝이라는 이유로 드롭된 답변자가 있으면 그 전문가·근거 메일을 인용."},
+      {"id": "attribution_original_author", "severity": "high", "cite_or_pass": true,
+       "ask": "각 전문가 열의 답변이 실제로 그 전문가 본인이 작성한 것인가? 포워딩/인용된 다른 네트워크·전문가의 답변 텍스트가 엉뚱한 전문가 열에 귀속돼 있으면 인용(예: 한 네트워크 포워드의 인용 히스토리에 있던 타 네트워크 전문가 답변을 그 발신자 측 전문가로 오귀속). 동일 문안이 두 전문가에 중복되면 원저자를 원본 메일로 확인."},
+      {"id": "bilingual_cells", "severity": "med", "cite_or_pass": true,
+       "ask": "답변 셀이 '영문 원문 + 빈 줄(\\n\\n) + 한국어 번역' 구조인가? (원문이 한국어면 번역 불요·그대로). 구조를 어긴 셀 좌표를 인용. 미응답 문항의 공란은 정상."},
+      {"id": "original_verbatim", "severity": "med", "cite_or_pass": true,
+       "ask": "영문 원문 블록이 near-verbatim인가? 한국어·질문라벨·편집주석(※/노트)이 원문 블록에 주입됐거나, 명백한 오탈자 교정을 넘어 rephrase·의미변경이 있으면 인용. 편집성 노트는 한국어 블록 또는 '제한 주제'에만 있어야 함."},
+      {"id": "no_leading_formula", "severity": "high", "cite_or_pass": true,
+       "ask": "답변/라벨 셀이 '=', '+', '-', '@'로 시작해 openpyxl이 formula(data_type=='f')로 저장한 셀이 있는가? (Excel에서 'Removed Records: Formula' 파일 손상 유발) 있으면 셀 좌표를 인용."},
+      {"id": "background_oneline", "severity": "low", "cite_or_pass": true,
+       "ask": "background가 1줄 역할 요약인가? 전체 employment-history 표가 통째로 붙어 있으면 인용."},
+      {"id": "structure_preserved", "severity": "med", "cite_or_pass": true,
+       "ask": "각 응답 시트에 질문표(B2=VQ No./C2=Questions·질문행)·전치 응답블록(C 라벨·D+ 전문가 열)·freeze panes·라벨 순서(전문가 네트워크 이름/이름/주요 경력/Q들/가능시간/제한 주제)가 보존됐고, 기존 전문가 열·타 시트가 훼손되지 않았는가? 위반을 인용."}
+    ]
+  }
+}

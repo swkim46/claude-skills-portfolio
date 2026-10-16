@@ -42,3 +42,8 @@ gmail-newsletter-analyzer/test_logs/*
 .claude/skills/_stepgate/_rubric_backups/
 **/_*backup*
 !gmail-newsletter-analyzer/test_logs/.gitkeep
+
+# --- 2026-10-16: 스킬 폴더의 키 파일·실제 회의록·압축본은 어떤 경우에도 올리지 않는다 ---
+.claude/skills/**/.env
+**/*.docx
+**/*.zip

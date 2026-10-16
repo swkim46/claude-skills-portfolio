@@ -1,0 +1,57 @@
+{
+  "publish": {
+    "intent": "기존 docx를 덮어쓰지 않고 새 버전을 발행했는가 + 모든 [분석]에 근거를 붙였는가 (바닥; 가이드 전수 검수=비동기 gate-audit)",
+    "mode": "async",
+    "observations": [
+      {
+        "id": "docx",
+        "ask": "발행한 docx 산출물 경로 (새 vN_M 파일)"
+      },
+      {
+        "id": "newfile",
+        "variants": [
+          {
+            "ask": "기존 docx를 in-place 덮어쓰지 않고 *새 vN_M 파일*로 저장했는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "기존 docx와 같은 파일명으로 저장해 새 vN_M 파일을 만들지 않았는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "overwrote",
+        "variants": [
+          {
+            "ask": "기존 docx 파일을 그대로 덮어썼는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "기존 docx 파일을 손대지 않고 그대로 남겨 두었는가 (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "ungrounded",
+        "variants": [
+          {
+            "ask": "출처/근거 없는 [분석](뇌피셜)을 본문에 남겼는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "본문의 모든 [분석]에 출처/근거가 붙어 있는가 (Y/N)",
+            "must": "Y"
+          }
+        ]
+      }
+    ],
+    "criteria": [
+      {
+        "check": "exists",
+        "path": "{docx}"
+      }
+    ]
+  }
+}

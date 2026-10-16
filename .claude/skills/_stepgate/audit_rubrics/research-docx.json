@@ -1,0 +1,43 @@
+{
+  "_meta": {"note": "비봉인 — 백그라운드 gate-audit Agent용 빡빡 검수. 계속 자라는 검사표.",
+    "seeded_from": ["consulting-register-always", "avoid-translationese-korean", "declarative-section-headings", "analysis-must-be-reference-grounded", "source-link-lands-on-figure", "cite-official-doc-pages", "figures-self-explanatory", "deliverable-storyline-lead", "md-research-note-format", "no-audit-stamp-in-client-deliverable", "deliverable-versioning"]},
+  "publish": {
+    "deliverable_glob": "{docx}",
+    "global_directives": [
+      "너는 컨설팅 산출물을 *떨어뜨리려는* 적대적 검수자다 — 통과는 위반을 *못 찾았을 때만*.",
+      "관대한 PASS 금지: 각 lens는 위반 문장/제목/도표 캡션을 *그대로 인용* 못 하면 그 lens는 PASS.",
+      "추측 금지: 인용 없는 FAIL 무효. high lens 하나라도 위반이면 subverdict=FAIL.",
+      "version-management lens는 산출물 파일뿐 아니라 그 폴더(메인)·`이전버전\\` 하위·CHANGELOG.md를 ls/열람해 버전 이관 규칙 준수를 검사할 것."
+    ],
+    "lenses": [
+      {"id": "consulting-register", "severity": "high", "cite_or_pass": true,
+       "ask": "본문·표·제목이 격식 컨설팅체인가? 명시 은어만 보지 말고 문서 전체를 훑어 아래 부류를 *능동 색출*해 위반 문구를 그대로 인용 적발(대표어 grep하고 끝내지 말 것): (1) 구어 동사·서술 — 열다(개설)·두다(보유)·자금을 굴리다(운용)·삼다(활용)·수요가 몰리다(집중)·넘어오다(전환)·사례가 나오다(발생·이뤄지다)·묶다/묶음(결합)·얹히다(더해지다)·넓히다(확대)·만들다(마련·도입)·쓰이다(활용)·보여주다(제시); (2) 구어 부사·연결 — 한꺼번에(일괄)·곧바로(즉시)·이제 막(이제)·~라서/~이라 구어 인과(~이므로·~이어서); (3) 비유·은어 명사 — 문턱(진입 장벽)·발판(기반)·먹거리(수익원)·대못(핵심 제약)·死제도(미가동)·물량(거래량·거래 규모)·양방향/강자끼리(상호·선도사 간)·마중물·빡셈·조이다·서빙·핏; (4) 구어 구문 — '아무 ~나 ~한 게 아니라'(임의로 ~한 것이 아니라)·'~게 아니라'(것이 아니라); (5) 1인칭·만연체·엠대시(—) 절잇기 리드·버전메타·물음표 문장·요청자 지칭 메타('컨설턴트'·'의뢰'·'고객 요청'·'추가 문항'·'질문 흐름'). 종결은 명사형(임/음/함/됨). ※ 사전은 대표 스캔 목록일 뿐 — 같은 부류의 다른 구어도 적발."},
+      {"id": "declarative-headings", "severity": "high", "cite_or_pass": true,
+       "ask": "모든 섹션 제목이 결론을 말하는 *간결한 선언형 명사구*인가? (a) 질문형·부정형·'X 현황'류 토픽형, (b) 완결 문장형·서술 흐름('~로 ~으로'·'~해 ~됨'처럼 주어+서술어로 읽히는 제목 — 예 '규제 3단계 해소로 미가동에서 가동으로')을 인용 적발. 제목은 문장이 아니라 명사구여야 함."},
+      {"id": "analysis-grounded", "severity": "high", "cite_or_pass": true,
+       "ask": "모든 [분석]·정성 서술이 레퍼런스/comparable/proxy에 근거하는가? 출처 없는 뇌피셜·LLM 일반지식 의존 서술을 인용 적발."},
+      {"id": "source-link-lands-on-figure", "severity": "high", "cite_or_pass": true, "needs_fetch": true,
+       "ask": "출처 링크가 인용 수치가 *실제 보이는* 페이지/앵커로 가는가? 제네릭 홈·표지로 가는 링크를 실제 WebFetch로 적발."},
+      {"id": "cite-doc-pages", "severity": "med", "cite_or_pass": true,
+       "ask": "첨부 공식자료(사업보고서/ESG 등) 인용에 페이지 번호가 있는가? 페이지 없는 인용을 적발."},
+      {"id": "figures-self-explanatory", "severity": "med", "cite_or_pass": true,
+       "ask": "각 수치가 단위+지표정의까지 자족적인가? 단위 누락·라벨 없는 병치를 인용 적발."},
+      {"id": "storyline-lead", "severity": "high", "cite_or_pass": true,
+       "ask": "맨 앞에 결론→근거 스토리라인 리드가 있는가? 분석 나열만 있고 리드가 없으면 FAIL."},
+      {"id": "named-source-linked", "severity": "high", "cite_or_pass": true,
+       "ask": "특정 출처를 *지목*한 load-bearing 문장('○○(매체·보고서)에 따르면'·'△△ 보도')이 그 출처의 클릭 링크를 동반하는가? 출처명만 쓰고 URL이 없는 문장(named-source-without-link)을 인용 적발 — 본문 미검증·봇차단·페이월이어도 링크는 있어야 함."},
+      {"id": "access-label-correct", "severity": "med", "cite_or_pass": true,
+       "ask": "봇차단(403·Cloudflare 'Just a moment')을 '유료/페이월'로 잘못 라벨한 문장이 있는가? '유료'는 200+로그인 게이트 실제 확인 시에만. 봇차단을 '죽은 링크/미확인'으로 적은 것도 적발."},
+      {"id": "no-verification-process-meta", "severity": "high", "cite_or_pass": true,
+       "ask": "검증·정합·출처 reconciliation 절차를 *어떻게 했는지* 서술한 문장이 본문에 유출됐는가? 클라이언트 산출물엔 결과(사실)만 남기고 *작성자의 검증 행위*는 비노출이 원칙(가이드 §7 Part D 메타 코멘트 금지). 다음 유형을 인용 적발: (a) 출처 '나열/게재 순서'·'재정렬/재산정으로 산정'처럼 출처를 어떻게 대조·정렬했는지, (b) 'MISMATCH·정합·재대조·verbatim 확인·교차검증·역산' 같은 검증 어휘, (c) '검증됨·감리·게이트 PASS·검증 통과' 같은 QA 스탬프, (d) '출처 대조 결과 ~와 일치/불일치함'. ★ 데이터 *자체*의 한계(미공시·미공개·분리 공시 안 됨·부재)를 밝히는 문장은 허용(위반 아님) — 위반은 오직 *작성자가 무엇을 어떻게 검증·재정렬했는지*를 설명한 문장. 실사례(위반): '출처 나열 순서 자체는 금액과 불일치하여 금액 재정렬로 산정했으며, 총자산·매출·순이익 순위는 출처 나열과 금액이 일치함' — 순위(사실)만 남기고 이 reconciliation 설명은 삭제했어야 함."},
+      {"id": "version-management", "severity": "high", "cite_or_pass": true,
+       "ask": "버전 이관이 규칙대로인가? 산출물 폴더(메인)와 `이전버전\\` 하위·CHANGELOG를 함께 ls/열람해 위반을 인용 적발 — (a) 기존 vN_M을 in-place 덮어씀, (b) 주요 승격(N++, 예 v1_x→v2_0)인데 직전 major를 `이전버전\\`으로 이관(주요 버전은 메인 누적이어야 함), (c) 경미 개정(M++, 예 v2_0→v2_1)인데 직전 minor를 메인에 방치, (d) flat 번호(v1·v2… — major/minor 구분 소실)·vN_M 표기 위반, (e) 이번 버전 발행의 CHANGELOG 항목 누락. 규칙: N++=직전 major 메인 보존(이관 금지) / M++만 직전 minor를 `이전버전\\`으로 이관 / 기존 파일 덮어쓰기 금지. 폴더 리스팅으로 major/minor를 판별해 판정."},
+      {"id": "no-worknote-meta-tag", "severity": "high", "cite_or_pass": true,
+       "ask": "본문(문단·표 셀)에 작업노트용 대괄호 메타 태그가 *글자 그대로* 남았는가? '[분석]'·'[사실]'·'[fact]'·'[가정]'·'[검증]'·'Tier N' 등 마스터 .md 관행 태그를 클라이언트 docx에 리터럴로 노출한 문구를 인용 적발 — analysis-grounded lens(근거 유무)와 별개로, 여기선 *대괄호 태그의 존재 자체*가 위반. 클라 docx는 판단을 서술문('~로 판단됨'·'결국 ~의 문제임')으로 녹여야 하며 대괄호 태그로 표기하지 않음. 실사례: 불릿에 '[분석] …'을 그대로 노출 → 사용자 '장난이냐' 지적."},
+      {"id": "no-note-label-bullet", "severity": "high", "cite_or_pass": true,
+       "ask": "불릿·문단 리드가 (a) 한두 단어+콜론의 작업노트식 라벨('언제:'·'왜:'·'어떻게:'·'요약:'·'결론:'·'배경:' 등 의문사/토픽어+콜론), 또는 (b) *정체불명·모호* 라벨(무엇을 가리키는지 라벨만 읽어선 안 잡히는 것 — 예 '일부 세부:'·'기타:'·'관련 사항:')인가? 인용 적발 — 비즈니스 문서는 굵은 명사구 헤드라인('철수 배경.'·'로스터의 시간 경계.')이나 완결 문장으로, *내용이 곧장 읽히는* 리드여야 함. ※ 내용이 분명한 서술형 명사구 리드('직접 계좌개설 구성:'·'제휴별 고객 기반:')는 허용 — 위반은 노트식 라벨과 모호 라벨."},
+      {"id": "no-obvious-or-redundant", "severity": "med", "cite_or_pass": true,
+       "ask": "자명한 기본 설명·불필요한 반복이 있는가? 인용 적발: (a) 정의만 읽어도 자명한 부연(예 방향을 '외국인→한국주식'으로 정의해 놓고 다시 '기존 거래와 정반대'라고 되풀이), (b) 같은 개념어·jargon의 남발(한 용어가 여러 절에 반복 등장해 디테일 과잉), (c) 두 섹션이 제목·논지 모두 겹침(예 §A '시사점'과 §B '핵심 시사점'이 같은 내용). 각 문장이 *비자명한 정보·판단*을 더하는지 물을 것."}
+    ]
+  }
+}

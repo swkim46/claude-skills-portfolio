@@ -1,0 +1,92 @@
+{
+  "verdict": {
+    "intent": "링크 접속성(2단계)만 하고 *내용 정합성(3단계)*을 건너뛰지 않았는가 — 인용 수치·문구를 원문과 대조해 MATCH/MISMATCH 판정을 산출했는가 (★ 최빈 누락; 바닥. 전수 정합 심판=비동기 gate-audit)",
+    "mode": "async",
+    "observations": [
+      {
+        "id": "report",
+        "ask": "정합성 검증 산출물(.md) 경로 — 각 인용의 원문 대조 결과(MATCH/MISMATCH)가 적힌 파일"
+      },
+      {
+        "id": "quote",
+        "ask": "그 산출물에서 *내용 대조 결과 한 줄*(MATCH/MISMATCH 판정 문장)을 그대로 인용(붙여넣기)",
+        "check": "quote",
+        "file": "{report}",
+        "minlen": 10
+      },
+      {
+        "id": "content_checked",
+        "variants": [
+          {
+            "ask": "링크가 200인지(접속성)만이 아니라 인용 *내용*을 원문과 대조했는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "인용 *내용*을 원문과 대조하지 않고 링크 접속성 확인에서 멈췄는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "reachability_only",
+        "variants": [
+          {
+            "ask": "링크 접속성(200/404)만으로 '정합'이라 판정한 항목이 있는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "모든 항목의 '정합' 판정이 접속성이 아니라 원문 내용 대조에 근거하는가 (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "context_matched",
+        "variants": [
+          {
+            "ask": "raw '문자열 존재' grep만이 아니라 각 인용의 surrounding context(앞뒤 1~2문장)·어순·연결어로 대조했는가 — 같은 숫자가 다른 맥락(SVG좌표·타 지표·타 종목수)일 수 있으므로 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "surrounding context(앞뒤 1~2문장)·어순·연결어를 보지 않고 raw '문자열 존재' grep만으로 대조를 끝낸 인용이 있는가 — 같은 숫자가 다른 맥락(SVG좌표·타 지표·타 종목수)일 수 있는데도 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "derived_unlabeled",
+        "variants": [
+          {
+            "ask": "자체산출/파생 수치(비율·합계·통화환산·역산)를 원문 진술처럼 [자체산출]/[분석] 라벨 없이 출처에 귀속한 항목이 있는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "자체산출/파생 수치(비율·합계·통화환산·역산)에 전부 [자체산출]/[분석] 라벨을 붙였는가 — 원문 진술처럼 출처에 귀속한 것이 하나도 없으면 Y (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "pertinence_checked",
+        "variants": [
+          {
+            "ask": "각 인용이 그 주장을 실제 뒷받침하는지(pertinence) — 구체 사실(개별 품목·세부 수치)을 범주/개요만 있는 출처에 귀속하지 않았는지 — 를 점검했는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "각 인용이 그 주장을 실제 뒷받침하는지(pertinence)를 점검하지 않고 넘어갔는가 — 구체 사실(개별 품목·세부 수치)을 범주/개요만 있는 출처에 귀속했는지 확인 없이 (Y/N)",
+            "must": "N"
+          }
+        ]
+      }
+    ],
+    "criteria": [
+      {
+        "check": "contains",
+        "file": "{report}",
+        "pat": "MISMATCH|MATCH|일치|불일치",
+        "min": 1
+      }
+    ]
+  }
+}

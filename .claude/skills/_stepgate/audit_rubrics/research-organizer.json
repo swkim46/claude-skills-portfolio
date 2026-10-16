@@ -1,0 +1,54 @@
+{
+  "_meta": {
+    "note": "비봉인 — 백그라운드 gate-audit Agent가 읽는 빡빡 검수 체크리스트. 봉인 루브릭(rubrics/)과 별개. lens는 SKILL.md 가이드(§A~H) + references/(color-policy·column-standards·wording-tone·formatting-spec) + 피드백 메모리에서 시드하며 *계속 자란다*(새 교정→새 lens). 2026-06-30 대폭 강화: color-policy(하이라이트 절제)·§C-10-bis(AI틱 A~L)·명사형 종결·§D(R# 인덱싱·다출처 열)·column-standards(단위/태그 일관)·field 분해·계산식·clean-view를 lens로 승격(이전엔 메모리 9종만 시드돼 가이드 본문이 거의 미반영이었음).",
+    "seeded_from": ["references/color-policy.md", "references/column-standards.md", "references/wording-tone.md", "references/formatting-spec.md", "consulting-register-always", "declarative-section-headings", "figures-self-explanatory", "source-link-lands-on-figure", "organize-by-user-taxonomy", "deliverable-storyline-lead", "analysis-must-be-reference-grounded", "verify-claims-before-publishing", "no-audit-stamp-in-client-deliverable"]
+  },
+  "publish": {
+    "deliverable_glob": "{deliverable}",
+    "global_directives": [
+      "너는 산출물을 *떨어뜨리려는* 적대적 검수자다 — 통과는 위반을 *못 찾았을 때만*.",
+      "관대한 PASS 금지: 각 lens는 위반 셀좌표/시트명/문구를 *그대로 인용* 못 하면 그 lens는 PASS로만 기록.",
+      "추측 금지: 인용 없는 FAIL은 무효. 한 lens라도 high 위반이면 전체 subverdict=FAIL.",
+      "산출물은 .xlsx — openpyxl로 셀 값·하이퍼링크·fill(색)·number_format을 직접 열어 확인하라(눈대중 금지). 색 검수는 cell.fill.start_color.rgb 끝 6자리로 대조: D9F2D0=하이라이트행, 0000FF=KEY_FONT(파란 글꼴), A6CAEC=표 헤더, 8ED973=Task배너, B4E5A2=Section배너.",
+      "이 산출물의 가이드 정본은 SKILL.md(§A~H)와 references/(color-policy·column-standards·wording-tone·formatting-spec) — 아래 lens는 그 표면이다. lens에 명시 안 됐어도 가이드 위반을 *그대로 인용*할 수 있으면 적발하라(검사표는 계속 자란다)."
+    ],
+    "lenses": [
+      {"id": "color-restraint", "severity": "high", "cite_or_pass": true,
+       "ask": "color-policy 위반 — ①하이라이트 행(D9F2D0 fill)이 한 표에서 1-2행을 초과하는가(연속 3행+ 또는 표의 절반 칠하기)? ②'강점/중립/약점·정합도·활성/초기' 같은 분류를 *행 색*으로 칠했는가 → 색이 아니라 *컬럼*으로 표현해야 함(anti-pattern 2). ③decisive insight가 아닌 평범한 행을 장식으로 하이라이트했는가('이 섹션 비어 보여서' 류). ④KEY_FONT(0000FF 파란 글꼴)가 Summary 전체에서 2셀 초과인가. ⑤한 섹션(연속 5행 내)에 3종+ fill 색이 동시에 쓰였는가. 위반 셀좌표·색 인용 적발(없으면 PASS)."},
+      {"id": "consulting-register", "severity": "high", "cite_or_pass": true,
+       "ask": "본문 워딩이 명사형 단정 컨설팅체인가? 구어체·1인칭('우리는/우리 재계산')·만연체·버전메타('v3에서 수정'·'PPT 초안 V4')·물음표 문장·*의문사 어두 라벨/머리말*('무슨 일 — '·'어떻게'·'왜 ~'; 제목·셀 라벨 공통 — declarative-headings와 교차), 그리고 마케팅 형용사('혁신적·독보적·차세대')·저널리즘('충격적·놀라운·주목할 만한')·격식체 학술('본 보고서에서는·전술한 바와 같이')을 셀좌표와 함께 적발. (LLM 특유 패턴은 ai-tells, 종결어미는 noun-ending lens가 본다.)"},
+      {"id": "ai-tells", "severity": "high", "cite_or_pass": true,
+       "ask": "본문에 LLM/아마추어 문체(§C-10-bis A~L)가 있는가? ①hand-holding 도입('쉽게 말하면·한 줄로 정리하면·주목할 포인트:·여기서 핵심은·흔한 오해 정정') ②Q&A·콜론답('왜 X인가? 답: Y'·'X가 누구인가? =') ③근거 없는 과장 최상급('최강/최강자·압도적·단연 1위·아시아 최고·역내 최고·최고 수준') 및 볼륨·순위 근거 없이 붙인 '핵심/결정적/본질적' ④meta-commentary('사실은·흥미롭게도·본 표에서 무엇을 읽어야 하는가') ⑤본문 산문 속 이모지·기호(✓ ✗ 🔴 🟡 🟢; ★은 표당 1-2개만 허용) ⑥인위적 신조어('저심화·표준 렌즈') ⑦불필요 영한혼용('narrative 재작성·case study로'; KYC·AUM 등 업계표준어는 예외) ⑧표 앞 장황한 teaching 캡션. 위반 셀 그대로 인용 적발."},
+      {"id": "noun-ending", "severity": "high", "cite_or_pass": true,
+       "ask": "본문·표 해설·support·key_line·<중간 결론>·<종합> 셀이 명사형 종결(~함/~임/~됨/~음/순수 명사구)로 *통일*됐는가? 동사 종결('~한다/~이다/~된다/~한다.')이나 polite-formal('~합니다/~봅니다')이 보고서 본문에 섞였는가(Intro 메타 줄만 예외)? ~다체와 명사형이 한 문서에 혼재하는가('갑자기 ~다 문장이 많다' 실피드백)? 위반 셀좌표·문구 인용 적발."},
+      {"id": "declarative-headings", "severity": "high", "cite_or_pass": true,
+       "ask": "섹션/시트/표/컬럼 제목 *및 셀 내 라벨·머리말*('라벨 — 내용' 형식 포함, 예: support 셀의 '무슨 일 — …')이 결론을 말하는 선언형 명사구인가? *어두가 의문사/구어*인 것을 적발 — '왜 ~하나'·'~ 못 하는 이유'·'무엇을 넣었나'뿐 아니라 의문형·구어 라벨 일반('무슨 일'·'무슨 말'·'어떻게'·'어떡'·'왜 ~'·'~했나'·'~하나?'·'~인가?'·'~되나'), 'X 현황'류 맹탕 토픽형 제목. ★제목만 보지 말고 셀 머리말 라벨까지 검수(명사구 대체 권고: '무슨 일'→'개요', '어떻게 키웠나'→'전개'). 위반 셀좌표·문구 그대로 인용 적발(없으면 PASS)."},
+      {"id": "figures-self-explanatory", "severity": "high", "cite_or_pass": true,
+       "ask": "각 수치가 단위+지표정의까지 자족적인가(셀만 떼어 봐도 읽힘)? 단위 누락(raw '10000'), 지표명 없는 바 숫자('15%'가 아니라 '세전이익률 15%'여야), 같은 단위 다른 지표를 라벨 없이 병치('15%·62%'), 약식 'A→B' 관계어 누락을 인용 적발."},
+      {"id": "field-decomposition", "severity": "high", "cite_or_pass": true,
+       "ask": "한 셀에 수치·연도·출처·복수 지표를 cram했는가('$92.3B (2025) / 토큰화 $600B (2030) [실적+전망]' 류)? → 필드별 별도 셀/열로 펼쳐야 함(§B-A). 단위·scope(발행잔액/거래대금flow/AUC/AUM/보유수량/TVL)가 다른 수치를 한 표에 라벨 없이 섞고 '합산·교차비율 금지' 명기를 누락했는가? 다른 값의 함수인 산출값(결과=베이스×비중×요율)을 인수 분해 없이 결과 한 칸만 던졌는가(블랙박스)? 위반 셀 인용 적발."},
+      {"id": "column-format-consistency", "severity": "high", "cite_or_pass": true,
+       "ask": "한 표의 *한 컬럼* 안에서 단위·포맷·태그 위치가 일관된가(column-standards)? 통화가 'M USD/B USD' 영문으로 통일인가('50억 달러'·'$19.5M'·'수억 USD 수준'을 같은 컬럼에 혼용 적발)? 미공개 placeholder가 '비공개'로 통일됐는가('N/A'·'—'·'정보 없음' 혼용)? 신뢰도 태그([검증·SEC]/[검증]/[2차]/[추정])가 위치 일관이고 *일부 행만 누락*되지 않았는가? 연도가 텍스트('2024')인가? 헤더가 parallel form(한/영 택1·괄호 부연 금지)인가? 위반 셀 인용."},
+      {"id": "source-link-lands-on-figure", "severity": "high", "cite_or_pass": true, "needs_fetch": true,
+       "ask": "각 R# 출처 하이퍼링크가 *인용 수치가 실제 보이는* 구체 페이지/앵커로 가는가? SPA 앱홈·제네릭 도메인 URL을 적발. 라이브 트래커는 토픽 서브페이지로 가는지 실제 WebFetch로 확인."},
+      {"id": "source-attribution", "severity": "high", "cite_or_pass": true,
+       "ask": "우측 출처 태그가 그 수치의 *실제 귀속*인가(토픽≠귀속, 검색요약≠출처, 점값 출처≠range 귀속)? 수치와 태그가 어긋나거나, 내부 장표를 출처로 인용했거나(외부 1차/공개 자료여야), 출처가 같은 현상을 다른 관점(리스크 등)으로 규정하는데 과대귀속한 경우를 인용 적발."},
+      {"id": "source-indexing", "severity": "high", "cite_or_pass": true,
+       "ask": "출처가 그룹+인덱스(A1·B2·R3)로 인덱싱되고 본문 인용이 *그 인덱스*를 가리키는가('출처 A' 그룹 단위 표기·R# 인덱스 없는 맨 링크 적발)? 한 항목에 출처가 여럿일 때 출처1/출처2 *열* 또는 하위행(R3a/R3b)으로 나뉘었는가, 아니면 한 셀에 'A·B·C'를 몰아넣어 하이퍼링크가 1개만 걸렸는가(보조 출처는 삭제 말고 분리)? 셀에 평문 http(하이퍼링크 없는 URL 텍스트, stray)가 남았는가? 본문 인용 인덱스↔RAW Data 인덱스가 1:1인가(dangling/unused/결번 0)? 위반 셀 인용."},
+      {"id": "calc-as-formula", "severity": "med", "cite_or_pass": true,
+       "ask": "표의 계산값(비율·합계·차감)이 Excel 수식(=H19/G19)인가, Python으로 하드코딩한 상수(0.43)인가? 비수식 텍스트 셀이 '='로 시작하는가(Excel이 수식 오인→제거)? 합계 라벨이 '='로 시작하는가(#NAME?)? bp/%가 number_format으로 저장되고 raw 정수 노출이 없는가? 위반 셀 인용(없으면 PASS)."},
+      {"id": "clean-canvas", "severity": "med", "cite_or_pass": true,
+       "ask": "모든 시트가 gridlines off(set_clean_view)인가? 레이어 열(A~E)에 떠 있는 단일 셀 테두리(부유 border)가 남았는가? Intro가 가벼운 레지스터(task_banner만·section_label 없음·intro_meta_label로 메타)인가, 아니면 Summary처럼 무거운 녹색 밴드(section_label)를 Intro에 썼는가? 셀 병합을 남발했는가(배너는 fill-span)? RAW Data의 URL이 평문이 아니라 클릭 하이퍼링크인가? 위반 셀/시트 인용(없으면 PASS)."},
+      {"id": "tier-not-leaked", "severity": "med", "cite_or_pass": true,
+       "ask": "내부 작업용 Tier/등급/우선순위 라벨, ★교정·★신규·★강등 등 편집 마커, '정정'·'요청서대로'·'기존엔 X였으나' 같은 문서 밖 맥락 참조가 산출물 표면에 노출됐는가? 노출 셀 인용 적발(없으면 PASS)."},
+      {"id": "no-verification-process-meta", "severity": "high", "cite_or_pass": true,
+       "ask": "검증·정합·출처 reconciliation 절차를 *어떻게 했는지* 서술한 셀이 산출물에 유출됐는가? 클라이언트 산출물엔 결과(사실)만 남기고 *작성자의 검증 행위*는 비노출이 원칙. 다음 유형을 셀좌표와 함께 적발: (a) 출처 '나열/게재 순서'·'재정렬/재산정으로 산정'처럼 출처를 어떻게 대조·정렬했는지, (b) 'MISMATCH·정합·재대조·verbatim 확인·교차검증·역산' 같은 검증 어휘, (c) '검증됨·감리·게이트 PASS·검증 통과·MISMATCH 0' 같은 QA 스탬프, (d) '출처 대조 결과 ~와 일치/불일치함'. ★ 데이터 *자체*의 한계(미공시·미공개·분리 공시 안 됨·부재)를 밝히는 것은 허용(위반 아님) — 위반은 오직 *작성자가 무엇을 어떻게 검증·재정렬했는지*를 설명한 셀. 실사례(위반): '출처 나열 순서 자체는 금액과 불일치하여 금액 재정렬로 산정했으며 …순위는 출처 나열과 금액이 일치함' — 결과(순위)만 남기고 이 reconciliation 설명은 삭제했어야 함. cf. no-audit-stamp-in-client-deliverable."},
+      {"id": "storyline-lead", "severity": "high", "cite_or_pass": true,
+       "ask": "맨 앞에 결론→근거 스토리라인 리드(핵심 메시지→핵심수치표→인사이트(주장+근거)→종합결론)가 있는가? 익썸이 *완결 문장형 산문*인가(대시·슬래시 토막 파편·단일토큰 불릿·표 낭독이 아니라)? 분석표만 나열돼 있고 리드가 없거나, 익썸이 파편이면 FAIL(있으면 인용)."},
+      {"id": "user-taxonomy", "severity": "med", "cite_or_pass": true,
+       "ask": "정리 축이 사용자 기존 분류(모델번호·밸류체인 등)인가? 임의 발명 프레임('렌즈1/2' 등)을 주축으로 쓴 정황을 인용 적발(없으면 PASS)."},
+      {"id": "analysis-grounded", "severity": "high", "cite_or_pass": true,
+       "ask": "[분석]·정성 서술이 레퍼런스/comparable/proxy에 근거하는가? 출처 없는 뇌피셜·LLM 일반지식 의존 서술, 사실(출처 derive)과 해석을 ([분석]/[추정]/[가설] 라벨 없이) 뭉뚱그린 문장을 인용 적발."}
+    ]
+  }
+}

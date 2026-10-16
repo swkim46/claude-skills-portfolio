@@ -1,0 +1,59 @@
+{
+  "deliver": {
+    "intent": "산출 Excel을 내기 전, 핵심 수치를 raw.json/원문과 결정적으로 재대조했는가 (§4-2; 바닥. 가이드 전수 검수=비동기 gate-audit)",
+    "mode": "async",
+    "observations": [
+      {
+        "id": "xlsx",
+        "ask": "발행할 Excel 데이터팩 경로"
+      },
+      {
+        "id": "raw",
+        "ask": "수집 원자료 raw.json 경로 (재대조 기준)"
+      },
+      {
+        "id": "quote",
+        "ask": "그 raw.json에서 산출에 쓴 *핵심 계정·수치 한 줄*을 그대로 인용(붙여넣기)",
+        "check": "quote",
+        "file": "{raw}",
+        "minlen": 8
+      },
+      {
+        "id": "reconciled",
+        "variants": [
+          {
+            "ask": "산출 핵심 수치(매출·영업이익 등)를 raw.json/원문과 재대조했는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "산출 핵심 수치(매출·영업이익 등)를 raw.json/원문과 재대조하지 않고 발행하는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "trusted_blindly",
+        "variants": [
+          {
+            "ask": "raw.json/원문 대조 없이 스크립트 산출 수치를 그대로 신뢰했는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "스크립트 산출 수치를 그대로 믿지 않고 raw.json/원문으로 직접 확인했는가 (Y/N)",
+            "must": "Y"
+          }
+        ]
+      }
+    ],
+    "criteria": [
+      {
+        "check": "exists",
+        "path": "{xlsx}"
+      },
+      {
+        "check": "exists",
+        "path": "{raw}"
+      }
+    ]
+  }
+}

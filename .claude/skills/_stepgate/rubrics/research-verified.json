@@ -1,0 +1,161 @@
+{
+  "absorb": {
+    "intent": "fan-out(검색) 직행 전에 직전·인접 리서치를 흡수했는가 — 지식지도/기존 폴더의 외부 1차 출처를 _raw_sources\\_absorption_ledger.md 에 요약·기록했는가 (★ 반복 실패 단계; 바닥. 흡수 품질 심판=비동기 gate-audit)",
+    "mode": "async",
+    "observations": [
+      {
+        "id": "ledger",
+        "ask": "흡수 ledger 파일 경로 — 직전/인접 리서치의 핵심 발견 요약 + 그 외부 1차 출처 URL을 적은 _raw_sources\\_absorption_ledger.md (없으면 먼저 만들어라)"
+      },
+      {
+        "id": "quote",
+        "ask": "그 ledger에서 직전 리서치의 *핵심 발견 한 문장*을 그대로 인용(붙여넣기)",
+        "check": "quote",
+        "file": "{ledger}",
+        "minlen": 12
+      },
+      {
+        "id": "opened",
+        "variants": [
+          {
+            "ask": "기존/인접 리서치 폴더(또는 지식지도가 가리키는 폴더)를 실제로 열어 읽고 출처를 추출했는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "기존/인접 리서치 폴더(또는 지식지도가 가리키는 폴더)를 열어 보지 않고 이 ledger를 작성했는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "internal_only",
+        "variants": [
+          {
+            "ask": "이 ledger에 적은 출처가 내부 2차 가공물(과거 자체 .md/xlsx/docx) *뿐*인가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "이 ledger에 외부 1차 출처가 하나 이상 들어 있는가 — 내부 2차 가공물(과거 자체 .md/xlsx/docx)만 있는 게 아니라 (Y/N)",
+            "must": "Y"
+          }
+        ]
+      },
+      {
+        "id": "urls_only",
+        "variants": [
+          {
+            "ask": "직전 발견을 실제로 읽지 않고 URL만 긁어 나열했는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "ledger에 적은 직전 발견을 전부 실제로 읽고 요약했는가 — URL만 긁어 나열한 것이 아니라 (Y/N)",
+            "must": "Y"
+          }
+        ]
+      }
+    ],
+    "criteria": [
+      {
+        "check": "contains",
+        "file": "{ledger}",
+        "pat": "https?://",
+        "min": 3
+      }
+    ]
+  },
+  "fetch": {
+    "intent": "후보 URL의 원문을 실제로 fetch해 과제 _raw_sources\\ 에 원자료를 남겼는가 (WebSearch 요약이 아니라 원문)",
+    "after": "absorb",
+    "observations": [
+      {
+        "id": "dir",
+        "ask": "과제 폴더 경로 (그 안 _raw_sources\\ 에 fetch한 원자료가 있어야 함)"
+      },
+      {
+        "id": "fetched",
+        "variants": [
+          {
+            "ask": "원문을 직접 fetch(WebFetch/curl)해 _raw_sources에 저장했는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "원문을 직접 fetch(WebFetch/curl)하지 않고 _raw_sources를 채웠는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "summary_only",
+        "variants": [
+          {
+            "ask": "원문 fetch 없이 WebSearch *요약*만으로 _raw_sources를 채웠는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "_raw_sources의 원자료가 전부 fetch한 *원문*인가 — WebSearch 요약으로 대신한 것이 하나도 없으면 Y (Y/N)",
+            "must": "Y"
+          }
+        ]
+      }
+    ],
+    "criteria": [
+      {
+        "check": "files",
+        "glob": "{dir}\\_raw_sources\\*",
+        "min": 3
+      }
+    ]
+  },
+  "publish": {
+    "intent": "작업 마스터 .md에 출처 하이퍼링크가 충분히 박힌, 재대조 통과한 산출물이 존재하는가 (바닥; 전 claim 정합·가이드 심판=비동기 gate-audit)",
+    "after": "fetch",
+    "mode": "async",
+    "observations": [
+      {
+        "id": "master",
+        "ask": "작업 마스터 .md 경로"
+      },
+      {
+        "id": "quote",
+        "ask": "그 마스터 .md에서 출처 하이퍼링크가 붙은 *핵심 문장 한 줄*을 그대로 인용(붙여넣기)",
+        "check": "quote",
+        "file": "{master}",
+        "minlen": 12
+      },
+      {
+        "id": "recollated",
+        "variants": [
+          {
+            "ask": "게재 전 모든 claim을 그 링크 원문에서 재대조했는가 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "게재 전 링크 원문에서 재대조하지 않은 claim이 남아 있는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "reverse_draft",
+        "variants": [
+          {
+            "ask": "본문 인용을 원문 재대조 없이 검색요약/기억으로 먼저 쓰고 출처를 나중에 붙였는가 (Y/N)",
+            "must": "N"
+          },
+          {
+            "ask": "본문 인용을 원문을 먼저 읽고 그 근거 위에서 썼는가 — 검색요약/기억으로 먼저 쓰고 출처를 나중에 붙인 것이 아니라 (Y/N)",
+            "must": "Y"
+          }
+        ]
+      }
+    ],
+    "criteria": [
+      {
+        "check": "contains",
+        "file": "{master}",
+        "pat": "https?://",
+        "min": 8
+      }
+    ]
+  }
+}
