@@ -15,6 +15,10 @@ Claude Code에 작업 절차와 판단 기준을 정의하고, Python으로 자�
 
 개발 배경과 기존 노트를 작성 규칙으로 정리한 과정은 [프로젝트 배경과 설계](docs/00_프로젝트_배경과_설계.md)에 담았습니다.
 
+## 같은 원칙을 여러 스킬에 적용한 과정
+
+작업이 컨설팅 리서치로 넓어지면서 스킬은 17개가 됐고, 문제는 개별 스킬보다 스킬 사이에서 생겼습니다. 고치다가 줄이 빠지고, 이름을 바꾸다가 검사가 멈추고, 같은 지적이 실행마다 되풀이됐습니다. 저는 새 스킬을 만들기 전에 스킬을 고치고 검사하는 절차부터 정했습니다. 편집은 되돌릴 수 있고 빠진 줄은 기계가 대조하며, 합격 기준은 작업자가 모르게 두되 파일에서 확인할 수 있는 항목은 언제나 다시 검증합니다. 감사는 작업을 막는 관문이 아니라 뒤에서 돌아가는 관측으로 두고, 같은 유형의 지적이 반복될 때만 검사 항목으로 올립니다. 일상과 컨설팅에 같은 방법을 쓰되 정본은 하나로 두고, 비슷한 스킬은 범위를 문장으로 못 박아 경계를 가르게 했습니다. 어떤 사건에서 이 기준이 나왔고 무엇이 한계로 남았는지는 [스킬 운영 원칙](docs/06_스킬_운영_원칙.md)에 정리했습니다.
+
 ## 운영하면서 바꾼 기준과 설계
 
 ### 설명이 충분한 학습 노트의 기준
@@ -81,25 +85,48 @@ AI가 덧붙인 용어와 배경 설명에서 오류가 발견됐습니다. 학�
 
 ## 설계 문서와 코드
 
-| 구성 요소 | 역할 |
+**일상·투자**
+
+| 스킬 | 역할 |
 |---|---|
 | [world-study](.claude/skills/world-study/SKILL.md) | 뉴스레터 선별, 학습 노트 작성, 내용 검토 |
 | [trade-run](.claude/skills/trade-run/SKILL.md) | 투자 시나리오 수립, 모의매매, 실행 결과 기록 |
 | [trade-feedback](.claude/skills/trade-feedback/SKILL.md) | 운영 결과 분석, 규칙 변경 제안, 적용 후 평가 |
-| [fact-check](.claude/skills/fact-check/SKILL.md) | 출처와 주장의 대조, 교정 내용 확인 |
-| [life-research](.claude/skills/life-research/SKILL.md) | 추가 조사와 근거 확보 |
-| [단계별 검사 코드](.claude/skills/_stepgate/) | 단계별 조건과 산출 파일 확인 |
-| [gate-audit](.claude/skills/gate-audit/SKILL.md) | 검사 과정과 판정 결과 점검 |
+| [fact-check](.claude/skills/fact-check/SKILL.md) | 일상·실무 산출물의 출처와 주장 대조 |
+| [life-research](.claude/skills/life-research/SKILL.md) | 일상·실무 주제의 출처 확인형 조사 |
+| [life-map](.claude/skills/life-map/SKILL.md) | 개인 프로젝트 폴더의 지식지도 관리 |
 
-실행 방법과 설정은 [모의투자 기술 문서](ai-trading-bot/README.md)와 [뉴스레터 처리 도구 기술 문서](gmail-newsletter-analyzer/README.md)에 정리했습니다. 테스트 실행 방법도 해당 문서에 있으며, 가상 사례의 코드 실행 부분은 `bash examples/run_trace.sh`로 재현할 수 있습니다.
+**컨설팅 리서치** (펌·고객사·실명은 일반어로 바꿨습니다)
+
+| 스킬 | 역할 |
+|---|---|
+| [research-verified](.claude/skills/research-verified/SKILL.md) | 출처 검증을 강제하는 컨설팅 리서치, 검증 방법론 가이드의 정본 |
+| [research-source-check](.claude/skills/research-source-check/SKILL.md) | 완성된 리서치 산출물의 링크·수치·인용 감리 |
+| [research-docx](.claude/skills/research-docx/SKILL.md) | 검증된 내용의 Word 보고서 조판 |
+| [research-organizer](.claude/skills/research-organizer/SKILL.md) | 정리된 리서치의 Excel 산출물 작성 |
+| [knowledge-map](.claude/skills/knowledge-map/SKILL.md) | 컨설팅 워크스트림 폴더의 지식지도 관리 |
+| [consulting-interview-note](.claude/skills/consulting-interview-note/SKILL.md) | 녹취 텍스트로 표준 양식의 인터뷰 회의록 작성 |
+| [expert-vq-compiler](.claude/skills/expert-vq-compiler/SKILL.md) | 전문가 네트워크의 사전 검증 답변 정리 |
+| [dart-analysis](.claude/skills/dart-analysis/SKILL.md) · [dart-analysis-code](.claude/skills/dart-analysis-code/SKILL.md) | 공시 재무제표 수집과 비율·추세 분석(원본 엔진과 실행 절차) |
+
+**스킬을 다루는 스킬과 공용 코드**
+
+| 구성 요소 | 역할 |
+|---|---|
+| [skill-maintainer](.claude/skills/skill-maintainer/SKILL.md) | 스킬을 고칠 때의 절차: 백업, 무손실 대조, 코드 편집 검사, 정합성 검사 |
+| [gate-audit](.claude/skills/gate-audit/SKILL.md) | 검사 준수의 사후 감사와 산출물의 배경 감사 |
+| [단계 검사 엔진](.claude/skills/_stepgate/) | 작업자와 판정을 분리한 단계별 검사, 검사 기준표 |
+| [공용 스크립트](.claude/skills/_shared/) | 스킬 정합성 검사, 폴더 구조 읽기, 공용 스킬 링크 |
+
+실행 방법과 설정은 [모의투자 기술 문서](ai-trading-bot/README.md)와 [뉴스레터 처리 도구 기술 문서](gmail-newsletter-analyzer/README.md)에 정리했습니다. 테스트 실행 방법도 해당 문서에 있으며, 가상 사례의 코드 실행 부분은 `bash examples/run_trace.sh`로 재현할 수 있습니다. 스킬 사이의 관계는 `python3 .claude/skills/_shared/check_skill_integrity.py`(이름·검사 기준표·경로 정합)와 `python3 .claude/skills/_stepgate/test_stepgate_engine.py`(검사 엔진 테스트)로 확인할 수 있습니다.
 
 ## 공개 범위
 
-설계 설명, 공개용으로 정리한 스킬·코드, 가상 사례를 제공합니다. 개인 학습 노트, 구독 뉴스레터 원문, 실제 분석·매매 기록의 원본, 계좌 정보와 인증 정보는 포함하지 않습니다. 운영 사례는 설계 변경을 설명하는 데 필요한 범위로 요약했습니다.
+설계 설명, 공개용으로 정리한 스킬·코드, 가상 사례를 제공합니다. 개인 학습 노트, 구독 뉴스레터 원문, 실제 분석·매매 기록의 원본, 계좌 정보와 인증 정보는 포함하지 않습니다. 운영 사례는 설계 변경을 설명하는 데 필요한 범위로 요약했습니다. 컨설팅 스킬의 펌 이름, 고객사와 과제 이름, 인터뷰 대상과 전문가의 실명, 이메일은 일반어와 자리표시자로 바꿨고, 실제 회의록·서식 가이드·소속 조직의 운영 도구·브랜드 디자인 규격·검사 기록 파일은 제외했습니다.
 
 ## English
 
-I built and operate two Claude Code projects that turn financial newsletters into learning notes and paper-trading scenarios. This repository documents how I defined their objectives, evaluated their outputs, and used operational feedback to refine the rules and workflows. It includes design explanations, public code, and a synthetic walkthrough.
+I built and operate two Claude Code projects that turn financial newsletters into learning notes and paper-trading scenarios, plus a set of consulting-research skills that share the same verification method. This repository documents how I defined their objectives, evaluated their outputs, used operational feedback to refine the rules, and kept 17 skills consistent with one gate engine and explicit scope boundaries. It includes design explanations, public code, and a synthetic walkthrough.
 
 ## License
 
