@@ -1,23 +1,20 @@
-# 금융 뉴스레터를 학습과 투자에 활용하는 AI 시스템
+# 학습·투자·리서치에 활용하는 AI 시스템
 
-금융·경제 뉴스레터로 학습 노트를 작성하는 **world-study**와, 뉴스·시장 데이터를 분석해 모의투자를 진행하는 **trade-run**을 개발해 운영하고 있습니다.
+금융·경제 뉴스레터로 학습 노트를 작성하는 **world-study**, 뉴스·시장 데이터를 분석해 모의투자를 진행하는 **trade-run**, 자료 조사와 보고서 작성을 돕는 **컨설팅 리서치 스킬**을 개발하고 운영하고 있습니다.
 
-직접 쓰던 학습 노트의 작성 과정을 자동화하면서 시작한 프로젝트입니다. 저는 기존 기록을 바탕으로 작성 기준을 정하고, 생성된 노트를 읽으며 설명과 검증 방식을 보완했습니다. 모의투자로 범위를 넓힌 뒤에는 매매하지 않은 판단과 놓친 기회까지 평가하도록 했습니다. 운영 결과를 규칙 개선으로 연결하고, AI가 자동으로 적용할 변경과 제가 검토해 결정할 변경의 범위를 정했습니다.
+컨설팅 리서치에서 사용하던 출처 검증 방법과 작업 검사 절차를 학습 노트와 모의투자에도 적용했습니다. 저는 결과물의 설명이 부족하거나 필요한 절차가 누락된 부분을 지적하고, 같은 문제가 반복되면 원인을 분석해 스킬 자체를 고치도록 요구했습니다. 모의투자에서는 매매하지 않은 판단과 놓친 기회까지 평가하고, AI가 자동으로 적용할 변경과 제가 검토해 결정할 변경의 범위를 정했습니다.
 
-Claude Code에 작업 절차와 판단 기준을 정의하고, Python으로 자료 수집·검사·주문 처리를 구현했습니다. 이 저장소에는 개발 과정에서 발견한 문제와 설계를 바꾼 이유, 이를 구현한 스킬과 코드를 정리했습니다.
+Claude Code에 작업 절차와 판단 기준을 정의하고, Python으로 자료 수집·검사·주문 처리를 구현했습니다. 이 저장소에는 운영 중 발견한 문제와 설계를 바꾼 이유, 여러 업무에 공통으로 사용하는 검증 방법, 이를 구현한 스킬과 코드를 정리했습니다.
 
-## 두 프로젝트의 목적
+## 주요 활용 분야
 
-| 프로젝트 | 목적 | 주요 결과물 |
+| 분야 | 목적 | 주요 결과물 |
 |---|---|---|
-| **world-study** | 뉴스의 배경과 경제 개념을 이해할 수 있는 학습 노트 작성 | 선별한 뉴스, 원인과 개념 설명, 추가 설명의 출처 검증 결과 |
-| **trade-run** | 뉴스에서 투자 시나리오를 수립하고 모의매매 결과로 검증 | 투자 근거, 매수·매도 조건, 주문·체결 기록, 주간 평가 |
+| **학습 노트 — world-study** | 뉴스의 배경과 경제 개념을 이해할 수 있는 학습 노트 작성 | 선별한 뉴스, 원인과 개념 설명, 출처 검증 결과 |
+| **모의투자 — trade-run** | 뉴스에서 투자 시나리오를 수립하고 모의매매 결과로 검증 | 투자 근거, 매수·매도 조건, 주문·체결 기록, 주간 평가 |
+| **컨설팅 리서치** | 자료 조사와 출처 검증을 거쳐 보고서와 인터뷰 기록 작성 | 조사 결과와 출처, Word·Excel 보고서, 인터뷰 기록 |
 
-개발 배경과 기존 노트를 작성 규칙으로 정리한 과정은 [프로젝트 배경과 설계](docs/00_프로젝트_배경과_설계.md)에 담았습니다.
-
-## 같은 원칙을 여러 스킬에 적용한 과정
-
-작업이 컨설팅 리서치로 넓어지면서 스킬은 17개가 됐고, 문제는 개별 스킬보다 스킬 사이에서 생겼습니다. 고치다가 줄이 빠지고, 이름을 바꾸다가 검사가 멈추고, 같은 지적이 실행마다 되풀이됐습니다. 저는 새 스킬을 만들기 전에 스킬을 고치고 검사하는 절차부터 정했습니다. 편집은 되돌릴 수 있고 빠진 줄은 기계가 대조하며, 합격 기준은 작업자가 모르게 두되 파일에서 확인할 수 있는 항목은 언제나 다시 검증합니다. 감사는 작업을 막는 관문이 아니라 뒤에서 돌아가는 관측으로 두고, 같은 유형의 지적이 반복될 때만 검사 항목으로 올립니다. 일상과 컨설팅에 같은 방법을 쓰되 정본은 하나로 두고, 비슷한 스킬은 범위를 문장으로 못 박아 경계를 가르게 했습니다. 어떤 사건에서 이 기준이 나왔고 무엇이 한계로 남았는지는 [스킬 운영 원칙](docs/06_스킬_운영_원칙.md)에 정리했습니다.
+학습 노트와 모의투자의 개발 배경은 [프로젝트 배경과 설계](docs/00_프로젝트_배경과_설계.md)에, 여러 업무에 검증 방법을 재사용한 과정은 [스킬 운영 원칙](docs/06_스킬_운영_원칙.md)에 정리했습니다.
 
 ## 운영하면서 바꾼 기준과 설계
 
@@ -63,6 +60,14 @@ AI가 덧붙인 용어와 배경 설명에서 오류가 발견됐습니다. 학�
 
 [성과 평가 기준과 규칙 개선 사례](docs/05_성과_평가_기준.md)
 
+## 여러 업무에 검증 방법을 적용하고 보완한 과정
+
+컨설팅 리서치에서 사용하던 출처 검증 방법과 검사 엔진을 학습 노트와 모의투자에도 재사용했습니다. 공통으로 쓰는 자료와 코드는 한곳에서 관리하고, 업무별 스킬에는 담당 범위와 필요한 절차를 구분해 적었습니다. 감사 결과를 언제 기다리고 반영할지는 각 업무에 맞게 정했습니다.
+
+저는 반복되는 문제를 개별 결과물의 수정으로 끝내지 말고, 원인을 분석해 스킬과 검사 기준에 반영하도록 요구했습니다. 출처 검증에서 내용을 교정한 뒤에도 다른 문서에 이전 내용이 남는 문제가 계속되자, 시스템은 검사 질문을 추가한 데 이어 관련 문서를 직접 대조하는 프로그램을 보완했습니다. 이후 실행에서 제출 전 누락 3건을 발견했습니다. 스킬 편집과 검사 방식도 실제로 놓친 오류를 바탕으로 보완하고 있습니다.
+
+[검증 방법의 재사용과 반복 오류를 개선한 사례](docs/06_스킬_운영_원칙.md)
+
 ## 운영 현황
 
 *2026년 10월 16일 기준*
@@ -72,6 +77,7 @@ AI가 덧붙인 용어와 배경 설명에서 오류가 발견됐습니다. 학�
 - **주간 피드백:** 10월 3일 첫 피드백 이후 두 차례 진행했으며, 현재는 매주 토요일 예약 실행합니다. 놓친 상승, 매도 시점, 손실이 난 거래를 당시 기록과 대조해 검토하고 규칙 변경을 제안합니다. 매매 대상 선정 기준을 두 차례 수정했으며, 시가총액 하한 조정의 적용 이후 효과는 10월 17일 평가할 예정입니다.
 - **주문 근거 검증:** 주문 전에 매수 근거를 출처와 대조하고, 주문 후에도 판정 결과를 다시 점검합니다. 이 과정에서 매수 근거가 성립하지 않는 것으로 바뀌면 해당 매수분을 매도하도록 했습니다.
 - **실계좌 전환 준비:** 모의투자 주문안을 실계좌 잔고와 주문 규칙으로 다시 검사하고, 실행마다 점검표를 작성하고 있습니다. 이 점검에서는 실제 주문을 보내지 않습니다.
+- **컨설팅 리서치:** 자료 조사와 출처 검증, Word·Excel 보고서 작성, 인터뷰 기록 정리를 스킬로 구성했습니다. 이 과정에서 사용하던 검증 방법과 검사 엔진을 학습 노트와 모의투자에도 적용하고 있습니다.
 
 현재는 뉴스에서 도출한 시나리오가 적절한 종목 선정과 매매로 이어지는지, 그 결과 수익성이 있는지 검증하고 있습니다. 규칙 변경으로 이전에 제외됐던 종목이 매매 대상에 편입된 것은 확인했으며, 실제 매수와 수익성 개선으로 이어지는지는 아직 확인 중입니다. 실제 계좌 정보와 계좌 성과 수치는 공개하지 않습니다.
 
@@ -100,7 +106,7 @@ AI가 덧붙인 용어와 배경 설명에서 오류가 발견됐습니다. 학�
 
 | 스킬 | 역할 |
 |---|---|
-| [research-verified](.claude/skills/research-verified/SKILL.md) | 출처 검증을 강제하는 컨설팅 리서치, 검증 방법론 가이드의 정본 |
+| [research-verified](.claude/skills/research-verified/SKILL.md) | 출처 검증 절차와 결과 확인을 갖춘 컨설팅 리서치, 검증 방법론 가이드의 정본 |
 | [research-source-check](.claude/skills/research-source-check/SKILL.md) | 완성된 리서치 산출물의 링크·수치·인용 감리 |
 | [research-docx](.claude/skills/research-docx/SKILL.md) | 검증된 내용의 Word 보고서 조판 |
 | [research-organizer](.claude/skills/research-organizer/SKILL.md) | 정리된 리서치의 Excel 산출물 작성 |
@@ -113,9 +119,9 @@ AI가 덧붙인 용어와 배경 설명에서 오류가 발견됐습니다. 학�
 
 | 구성 요소 | 역할 |
 |---|---|
-| [skill-maintainer](.claude/skills/skill-maintainer/SKILL.md) | 스킬을 고칠 때의 절차: 백업, 무손실 대조, 코드 편집 검사, 정합성 검사 |
+| [skill-maintainer](.claude/skills/skill-maintainer/SKILL.md) | 스킬을 고칠 때의 절차: 백업, 편집 전후의 누락 대조, 코드 편집 검사, 정합성 검사 |
 | [gate-audit](.claude/skills/gate-audit/SKILL.md) | 검사 준수의 사후 감사와 산출물의 배경 감사 |
-| [단계 검사 엔진](.claude/skills/_stepgate/) | 작업자와 판정을 분리한 단계별 검사, 검사 기준표 |
+| [단계 검사 엔진](.claude/skills/_stepgate/) | 작업 지침과 판정 기준을 분리한 단계별 검사, 검사 기준표 |
 | [공용 스크립트](.claude/skills/_shared/) | 스킬 정합성 검사, 폴더 구조 읽기, 공용 스킬 링크 |
 
 실행 방법과 설정은 [모의투자 기술 문서](ai-trading-bot/README.md)와 [뉴스레터 처리 도구 기술 문서](gmail-newsletter-analyzer/README.md)에 정리했습니다. 테스트 실행 방법도 해당 문서에 있으며, 가상 사례의 코드 실행 부분은 `bash examples/run_trace.sh`로 재현할 수 있습니다. 스킬 사이의 관계는 `python3 .claude/skills/_shared/check_skill_integrity.py`(이름·검사 기준표·경로 정합)와 `python3 .claude/skills/_stepgate/test_stepgate_engine.py`(검사 엔진 테스트)로 확인할 수 있습니다.
@@ -126,7 +132,7 @@ AI가 덧붙인 용어와 배경 설명에서 오류가 발견됐습니다. 학�
 
 ## English
 
-I built and operate two Claude Code projects that turn financial newsletters into learning notes and paper-trading scenarios, plus a set of consulting-research skills that share the same verification method. This repository documents how I defined their objectives, evaluated their outputs, used operational feedback to refine the rules, and kept 17 skills consistent with one gate engine and explicit scope boundaries. It includes design explanations, public code, and a synthetic walkthrough.
+I develop and operate Claude Code workflows for consulting research, newsletter-based learning notes, and paper trading. I reused verification methods and workflow checks from consulting research in the learning and trading projects. This repository documents how I defined output standards, identified recurring problems, and required changes to the workflows and checks. It includes design explanations, public skills and code, and a synthetic walkthrough.
 
 ## License
 
