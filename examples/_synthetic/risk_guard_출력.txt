@@ -1,14 +1,25 @@
-# 생성: 2026-10-16 13:01 KST · examples/run_trace.sh · 입력은 전부 가상 데이터
-$ python3 risk_guard.py signals/signal_DEMO_kr.json --snapshot data/snapshot_DEMO_kr.json --out signals/approved_DEMO_kr.json
+# 생성: 2026-10-20 14:43 KST · examples/run_trace.sh · 입력은 전부 가상 데이터 · 저장소는 임시 폴더의 빈 SQLite
+$ python3 examples/_synthetic/seed_demo.py <작업 사본> examples/_synthetic 261012
+① 저장소 준비 — 감시 목록 KR 4종목 · 시장 지도 축 2개 · 논지 0건
+② 사실 등록 — order-900001 → F-000001 (order · T2)
+② 사실 등록 — policy-grid → F-000002 (policy · T1)
+② 사실 등록 — earnings-900002 → F-000003 (earnings · T2)
+② 사실 등록 — ir-900003 → F-000004 (disclosure · T2)
+③ 시그널 → 저장소 — 제안 3건 · 빠진 사실 0
+④ 주문 근거 판정 — 대기열 3건 · 일치 3건 · 판정 기록 검사 오류 0
+⑤ 주문 전 결정 — 통과 ['900001', '900002'] · 제외 ['900004'] · 감사 PENDING (종료 0)
 
+$ python3 risk_guard.py signals/signal_261012_kr.json --snapshot data/snapshot_261012_kr.json --out signals/approved_261012_kr.json
+
+  · 요인 상태 없음 — 1단 `market_map.py exposure --by driver --stamp`가 이 run을 재지 않았다(경고만)
   · 포트폴리오 자산을 **못 쟀다** — US 스냅샷이 없다 / 환율을 못 구했다(미국 스냅샷의 exchange_rate). 그 시장 자산으로 물러선다(더 작으므로 보수적).
   · ★ 반대편 스냅샷을 못 쟀다 — 이 시장 자산만으로 재므로 비중이 실제보다 크게 나온다(보수적). 반대편 run을 돌리면 정확해진다.
   · 900001 계좌 기여 0.54%p(크기 3.0% × 기대 상승 18%) · 이 시장 보유 평균 31.0%
-  · 배분 판단 — 목표 60% vs 투자비중 62.0% → gap 0.0%p(0) · 이 시장 현금 3,800,000 − 예약 0 = 쓸 수 있는 3,800,000 → 이번 run 필요 0 · 현금 명분: 하락 상태 — 새 논지는 첫 칸(e0)만 진입하고 나머지는 되돌림 사다리에 건다
+  · 배분 판단 — 목표 60% vs 투자비중 62.0% → gap 0.0%p(0) · 이 시장 현금 3,800,000 − 예약 0 = 쓸 수 있는 3,800,000 → 이번 run 필요 0 · 현금 명분: 하락 상태 — 새 논지는 첫 진입분만 사고 나머지는 되돌림 가격에 건다
   · 포트폴리오 자산을 **못 쟀다** — US 스냅샷이 없다 / 환율을 못 구했다(미국 스냅샷의 exchange_rate). 그 시장 자산으로 물러선다(더 작으므로 보수적).
-  · 배분 원장 기록 AL-261016-kr — 목표 60% · based_on None
-승인 1건 / 거부 2건 → signals/approved_DEMO_kr.json
+  · 배분 원장 기록 AL-261012-kr — 목표 60% · based_on None
+승인 1건 / 거부 2건 → signals/approved_261012_kr.json
   [제안] BUY  900001 한빛전선(가상) x12 @ 24,850.00
-  [거부] BUY  900002: 목표 여유 없음 — 1차 목표 12,300이 현재가 12,050 대비 +2.1% (< 바닥 10%) · 이미 오른 가격을 쫓는 제안(§0-b)이거나 노릴 수익이 바닥보다 작다 · 논지 재설정 후 재제안
+  [거부] BUY  900002: 목표 여유 없음 — 기준 수준 resistance_1 12,300이 현재가 12,050 대비 +2.1% (< 바닥 10%) · 바닥을 넘기려고 수준을 바꾸지 않는다
   [거부] BUY  900004: 유니버스 밖 종목 (watchlist 미등재·미보유). watchlist_candidates로 제안할 것
   · 미달 검사: 투자비중 62.0% ≥ 판단 목표 60% — 미달 아님

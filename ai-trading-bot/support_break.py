@@ -85,8 +85,8 @@ def zone_legs(t: dict) -> list:
 def scan(market: str, snapshot: dict, theses_rows: list = None) -> tuple:
     """(이탈 행, 종가를 못 잰 행, 구간 다리를 가진 보유 논지 수)."""
     if theses_rows is None:
-        import theses as th
-        theses_rows = th.load().get("theses") or []
+        import db                                        # 논지는 저장소(jd_thesis)에서
+        theses_rows = db.theses_all()
     m = market.upper()
     prices = snapshot.get("prices") or {}
     gen = snapshot.get("generated_at") or ""

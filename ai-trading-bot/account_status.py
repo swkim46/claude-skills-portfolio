@@ -7,7 +7,7 @@
 
 왜 있는가 (2026-09-17 사용자 지시): "항상 끝날 때마다 지금 계좌 현황(주식/현금 비율, 수익률)을
 정리해서 출력하라." 보고는 기억이 아니라 파일에서 나와야 하므로(`SKILL.md` 〈보고〉), 이 스크립트가
-`journal/equity_curve.jsonl`·`config/benchmark.json`·최신 스냅샷의 환율만 읽어 **시장별 + 포트폴리오
+자산 곡선(저장소 ex_equity_point — `journal/equity_curve.jsonl`은 그 렌더본)·최신 스냅샷의 환율만 읽어 **시장별 + 포트폴리오
 합산** 한 표를 찍고, 같은 내용을 `data/run_evidence/account_status_<stamp>_<mkt>.md`로 남긴다 —
 게이트(`execute`·`no_trade`)가 그 파일을 본다. 보고자는 이 출력을 **그대로** 옮긴다(재계산 금지).
 
@@ -16,7 +16,7 @@
   한쪽이 실패하면(잔고 TR 500 등) 그 시장은 마지막 행으로 물러서고 **★ 낡음**을 표에 찍는다.
 - 합산의 환율은 최신 US 스냅샷(`snapshot_<6자리>_us.json`의 `exchange_rate`)이다 — 파일명 정렬이
   아니라 `generated_at`으로 고른다(리허설 파일 오선택 방지, risk_guard와 같은 규칙).
-- 투자비중의 목표는 상수가 아니라 **배분 원장**(`journal/allocation.jsonl` 마지막 판단)에서 읽는다(2026-09-22).
+- 투자비중의 목표는 상수가 아니라 **배분 원장**(저장소 jd_allocation 마지막 판단)에서 읽는다(2026-09-22).
 """
 import argparse
 import json
@@ -25,6 +25,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import db
 from kis_client import same_account
 
 HERE = Path(__file__).parent
@@ -32,9 +33,6 @@ JOURNAL_DIR = HERE / "journal"
 CONFIG_DIR = HERE / "config"
 DATA_DIR = HERE / "data"
 EVID_DIR = DATA_DIR / "run_evidence"
-EQUITY_PATH = JOURNAL_DIR / "equity_curve.jsonl"
-BENCHMARK_PATH = CONFIG_DIR / "benchmark.json"
-LIMITS_PATH = CONFIG_DIR / "limits.json"
 KST = timezone(timedelta(hours=9))
 STALE_HOURS = 6   # 이보다 오래된 행은 '낡음'으로 표시한다(장 두 개가 6시간 넘게 떨어져 있다)
 
@@ -47,35 +45,19 @@ def _read_json(path: Path, default=None):
 
 
 def latest_rows() -> dict:
-    """시장별 **마지막** 행(파일 순서 = 기록 순서). 같은 날 여러 행이면 뒤의 것."""
+    """시장별 **마지막** 행(기록 순서). 같은 날 여러 행이면 뒤의 것."""
     out = {}
-    if not EQUITY_PATH.exists():
-        return out
-    for line in EQUITY_PATH.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            r = json.loads(line)
-        except Exception:        # noqa: BLE001
-            continue
+    for r in db.equity_rows():
         if r.get("equity", 0) and r.get("cash") is not None and same_account(r):   # 지금 계좌 계열만(2026-10-15)
             out[(r.get("market") or "").upper()] = r
     return out
 
 
 def latest_fx() -> tuple:
-    """(환율, as-of) — 최신 US 스냅샷의 `balance.exchange_rate`. 못 찾으면 (None, None)."""
-    best, best_at = None, ""
-    for f in DATA_DIR.glob("snapshot_*_us.json"):
-        if not re.fullmatch(r"snapshot_\d{6}_us\.json", f.name):
-            continue
-        d = _read_json(f, {}) or {}
-        at = d.get("generated_at") or ""
-        fx = (d.get("balance") or {}).get("exchange_rate")
-        if fx and at > best_at:
-            best, best_at = float(fx), at
-    return best, (best_at[:16].replace("T", " ") if best_at else None)
+    """(환율, as-of) — 지금 계좌 계열의 최근 관측(portfolio.fx_at · 2026-10-19 Codex R07). 못 찾으면 (None, None)."""
+    import portfolio
+    fx, at = portfolio.fx_at(None, portfolio.family())
+    return (float(fx), at[:16].replace("T", " ")) if fx else (None, None)
 
 
 def refresh(markets: list) -> dict:
@@ -120,19 +102,16 @@ def build(market: str, stamp: str, rows: dict, errs: dict) -> str:
     """읽는 사람 기준의 짧은 블록 — 시장마다 세 줄(자산·보유·수익률), 마지막에 합산 한 줄."""
     now = datetime.now(KST)
     # ★ 목표 주식 비율은 `limits.json` 상수가 아니라 배분 원장의 마지막 판단이다(2026-09-22).
-    try:
-        import allocation as _al
-        _last = _al.last()
-    except Exception:                                   # noqa: BLE001
-        _last = {}
+    _rows = db.allocation_rows()
+    _last = _rows[-1] if _rows else {}
     target = _last.get("target_invested_pct") if _last else None
     target_id = _last.get("id") if _last else None
     floor = None
     fx, fx_at = latest_fx()
     L = [f"■ 계좌 현황 — {now.strftime('%Y-%m-%d %H:%M')} KST (run {market.lower()}:{stamp})", ""]
-    krw_total = krw_inv = 0.0
+    import portfolio
     parts_ok = True
-    shared = {}                                          # 시장 → (ts, 현금 원화) — 통합증거금 공유 현금 대조용
+    nav_parts = {}                                       # 시장 → 조각(portfolio.nav가 공유 현금·합산을 한 규칙으로)
     for m, label, cur_fmt in (("US", "[미국 USD]", lambda v: f"{v:,.0f}"), ("KR", "[한국 KRW]", lambda v: f"{v:,.0f}")):
         r = rows.get(m)
         if not r:
@@ -166,23 +145,15 @@ def build(market: str, stamp: str, rows: dict, errs: dict) -> str:
             line += f" ({bench} {_pct(cb)} → 초과 {_pct(ex)}p)"
         L.append(line)
         L.append("")
-        if m == "US":
-            if fx:
-                krw_total += eq * fx; krw_inv += inv * fx
-                if r.get("cash_shared"):
-                    shared[m] = (str(r.get("ts") or ""), cash * fx)
-            else:
-                parts_ok = False
-        else:
-            krw_total += eq; krw_inv += inv
-            if r.get("cash_shared"):
-                shared[m] = (str(r.get("ts") or ""), cash)
-    shared_note = ""
-    if len(shared) == 2:
-        # ★ 통합증거금 실계좌(2026-10-12): 두 시장 행의 현금은 같은 원화 주머니를 각 통화로 잰 것이다 — 더 새 행만 센다.
-        old_m = min(shared, key=lambda k: shared[k][0])
-        krw_total -= shared[old_m][1]
-        shared_note = f" · 현금 공유(통합증거금) — {old_m} 행 현금 {shared[old_m][1]:,.0f}원은 같은 돈이라 뺐다"
+        nav_parts[m] = portfolio.part_from_row(r)
+        if m == "US" and not fx:
+            parts_ok = False
+    # ★ 통합증거금 실계좌(2026-10-12): 두 시장 행의 현금은 같은 원화 주머니를 각 통화로 잰 것이다 — 더 새 행만 센다.
+    #   규칙은 portfolio.nav 한 곳(2026-10-19 · Codex R06 — 예전엔 여기·costs·risk_guard가 서로 다르게 셌다).
+    n = portfolio.nav(nav_parts, fx, fx_at)
+    krw_total, krw_inv = (n.get("krw") or 0.0), (n.get("invested_krw") or 0.0)
+    shared_note = "".join(f" · 현금 공유(통합증거금) — {mm} 행 현금 {v['shared_cash_dropped'] * (fx if mm == 'US' else 1):,.0f}원은 같은 돈이라 뺐다"
+                          for mm, v in (n.get("parts") or {}).items() if v.get("shared_cash_dropped"))
     if parts_ok and krw_total:
         inv_pct = krw_inv / krw_total * 100
         tail = ""
@@ -197,7 +168,7 @@ def build(market: str, stamp: str, rows: dict, errs: dict) -> str:
         L.append("[합산(원화)]  못 쟀다 — 한 시장의 행 또는 환율이 없다('없음'이 아니라 '못 쟀다') · 주식:현금 = ?")
     try:
         import costs as _costs
-        _d = _costs.drag(30, equity_krw=krw_total or None)
+        _d = _costs.drag(30, portfolio.family(), equity_krw=krw_total or None)
         if _d.get("pct") is not None:
             L.append(f"  비용 추정(30일) {_d['cost_krw']:,}원 = 자산의 {_d['pct']:.2f}% — 수수료·국내 매도세·환전(요율 추정)")
     except Exception:                                   # noqa: BLE001 — 비용 줄 실패가 현황을 막지 않는다

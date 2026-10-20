@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-실전 전환 주간(2026-10-15) 테스트 — 매도 뒤 재투자 · 예약 계산 · 실계좌 최소 1주 · 잔고 함수 · 슬롯 · 점검표.
+실계좌 전환 준비 주간(2026-10-15) 테스트 — 매도 뒤 재투자 · 예약 계산 · 실계좌 최소 1주 · 잔고 함수 · 슬롯 · 점검표.
 
 왜: 10-14 미국 run은 매수 단계 뒤 손절·추적·소급 매도가 판 돈을 다시 쓰지 않아 투자비중이 95% → 79%로 떨어졌고(사용자 지적),
 예약 계산이 이번 run이 사는 종목의 첫 칸까지 묶어 회전 매도를 불렀다. 실계좌 그림자 점검에서는 칸이 1주보다 작아 매수가 전부 0건이었다.
-이 파일이 그 고친 동작을 고정한다. 실제 원장·시세·포인터는 건드리지 않는다(임시 폴더).
+이 파일이 그 고친 동작을 고정한다. 실제 저장소·시세·포인터는 건드리지 않는다 — 케이스마다 빈 임시 저장소(`testkit.db_case`)에
+필요한 행을 심고(seed) 산출 파일은 임시 폴더에 쓴다(2026-10-17).
 
     python3 test_realweek.py          # run_tests.py가 부른다
 """
@@ -23,6 +24,8 @@ sys.path.insert(0, str(HERE))
 
 import risk_guard as rg      # noqa: E402
 import allocation as al      # noqa: E402
+import db                    # noqa: E402
+from testkit import db_case, seed   # noqa: E402
 
 KST = timezone(timedelta(hours=9))
 PASS, FAIL = "PASS", "FAIL"
@@ -44,7 +47,8 @@ atexit.register(_halt_banner)
 def _safe(fn):
     _STATE["current"] = fn.__name__
     try:
-        fn()
+        with db_case():                      # 케이스마다 빈 저장소 — 앞 케이스가 쓴 행이 뒤 케이스에 새지 않는다
+            fn()
     except KeyboardInterrupt:
         raise
     except BaseException as e:               # noqa: BLE001
@@ -107,45 +111,50 @@ def t2_after_sells():
     report("(2) 매도 뒤 잔고 — 비회전 매도 대금은 현금으로, 보유는 줄인다", p)
 
 
+WATCHLIST_DOC = json.loads((HERE / "config" / "watchlist.json").read_text(encoding="utf-8"))   # 실제 감시 목록 렌더본 → 시험 저장소에 심는다
+
+
 def _guard(signal, snapshot, limits_patch=None, theses=None, ledger=None, discipline_only=False, refill=False):
+    with db_case():                          # 호출마다 빈 저장소(논지·배분 원장·감시 목록·고점·일정)
+        return _guard_in_store(signal, snapshot, limits_patch, theses, ledger, discipline_only, refill)
+
+
+def _guard_in_store(signal, snapshot, limits_patch=None, theses=None, ledger=None, discipline_only=False, refill=False):
+    seed(watchlist=WATCHLIST_DOC, theses=theses or [], allocation=ledger or [])
+    if len(db.theses_all()) != len(theses or []) or len(db.allocation_rows()) != len(ledger or []):
+        raise AssertionError("심은 논지·배분 원장이 저장소에서 안 보인다")
+    n_alloc = len(db.allocation_rows())
     tmp = Path(tempfile.mkdtemp(prefix="rw_"))
     cfg = tmp / "config"
     cfg.mkdir()
     limits = json.loads(rg.LIMITS_PATH.read_text(encoding="utf-8"))
     limits["fc_track1_required"] = False
+    limits["scenario_cond_required"] = False         # 형식 적용일은 그 형식을 재는 시험이 켠다
     limits.update(limits_patch or {})
     (cfg / "limits.json").write_text(json.dumps(limits), encoding="utf-8")
-    shutil.copy(rg.WATCHLIST_PATH, cfg / "watchlist.json")
     sp = tmp / "snapshot.json"
     sp.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
     sg = tmp / "signal_261015_kr.json"
     if signal is not None:
         sg.write_text(json.dumps(signal, ensure_ascii=False), encoding="utf-8")
     out = tmp / "approved.json"
-    saved = (rg.LIMITS_PATH, rg.WATCHLIST_PATH, rg.KILL_PATH, rg.SIGNALS_DIR, rg.PEAKS_PATH, rg.DATA_DIR,
-             rg.JOURNAL_DIR, rg.CALENDAR_PATH, al.JOURNAL_DIR)
-    rg.LIMITS_PATH, rg.WATCHLIST_PATH, rg.KILL_PATH = cfg / "limits.json", cfg / "watchlist.json", cfg / "KILL"
-    rg.SIGNALS_DIR, rg.PEAKS_PATH = tmp, tmp / "peaks.json"
+    saved = (rg.LIMITS_PATH, rg.KILL_PATH, rg.SIGNALS_DIR, rg.DATA_DIR, rg.JOURNAL_DIR)
+    rg.LIMITS_PATH, rg.KILL_PATH = cfg / "limits.json", cfg / "KILL"
+    rg.SIGNALS_DIR = tmp
     rg.DATA_DIR, rg.JOURNAL_DIR = tmp / "data", tmp / "journal"
     rg.DATA_DIR.mkdir()
     rg.JOURNAL_DIR.mkdir()
-    al.JOURNAL_DIR = rg.JOURNAL_DIR
-    rg.CALENDAR_PATH = rg.JOURNAL_DIR / "calendar.json"
-    (rg.JOURNAL_DIR / "theses.json").write_text(json.dumps({"theses": theses or []}), encoding="utf-8")
-    if ledger:
-        (rg.JOURNAL_DIR / "allocation.jsonl").write_text("".join(json.dumps(r) + "\n" for r in ledger), encoding="utf-8")
     buf = io.StringIO()
     try:
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
             code = rg.run(None if discipline_only else sg, sp, out, discipline_only=discipline_only, refill=refill)
         approved = json.loads(out.read_text(encoding="utf-8")) if out.exists() else {}
         if refill:
-            approved["_ledger_written"] = (rg.JOURNAL_DIR / "allocation.jsonl").exists()
+            approved["_ledger_written"] = len(db.allocation_rows()) > n_alloc
     except rg.Rejection as e:
         code, approved = 2, {"_rejection": str(e)}
     finally:
-        (rg.LIMITS_PATH, rg.WATCHLIST_PATH, rg.KILL_PATH, rg.SIGNALS_DIR, rg.PEAKS_PATH, rg.DATA_DIR,
-         rg.JOURNAL_DIR, rg.CALENDAR_PATH, al.JOURNAL_DIR) = saved
+        (rg.LIMITS_PATH, rg.KILL_PATH, rg.SIGNALS_DIR, rg.DATA_DIR, rg.JOURNAL_DIR) = saved
         shutil.rmtree(tmp, ignore_errors=True)
     return code, approved, buf.getvalue()
 
@@ -167,7 +176,8 @@ def _signal():
                            "reserved": [], "reserved_why": "테스트 — 예약 0", "based_on": None},
             "proposals": [{"ticker": "005930", "name": "삼성전자", "action": "BUY", "thesis": "테스트 논지", "weight_target_pct": 10.0,
                            "confidence": 0.7, "size_why": "테스트", "expected_upside_pct": 30.0,
-                           "evidence": [{"claim": "c", "source_url": "https://x.example/a", "verdict": "MATCH", "tier": "T1"}]}]}
+                           "concentration_why": "테스트 — 한 종목으로 gap을 채운다(손절 대금 재투자 시험 · 집중선은 test_risk_guard (64))",
+                           "facts": []}]}      # 근거 사실 없음 — 이 파일은 근거 규칙을 재지 않는다(test_track1·test_risk_guard)
 
 
 def t3_same_run_sell_refills():
@@ -225,8 +235,7 @@ def t5_real_one_share():
     bal = {"cash": 10_000_000.0, "currency": "KRW", "positions": []}
     sig = {"market": "KR", "proposals": [{"ticker": "005930", "name": "삼성전자", "action": "BUY", "weight_target_pct": 2.0,
                                           "confidence": 0.7, "size_why": "t", "expected_upside_pct": 30.0,
-                                          "evidence": [{"claim": "c", "source_url": "https://x.example/a",
-                                                        "verdict": "MATCH", "tier": "T1"}]}]}
+                                          "facts": []}]}
     saved = rg.portfolio_equity
     rg.portfolio_equity = lambda m, b: {"krw": 1e7, "cash_krw": 1e7, "invested_krw": 0.0, "ok": True,
                                         "asof": "t", "fx": 1.0, "parts": {}, "why": "t"}
@@ -298,9 +307,9 @@ def t7_record_refill_and_gate():
         with contextlib.redirect_stdout(io.StringIO()):
             ev = stops.record_refill("KR", "261015", name, {"refill_need": {"short": True, "gap_amt": 790_000,
                                                                            "target_invested_pct": 98, "why": "t"}})
-        rf = json.loads((tmp / "journal" / "refill_261015_kr.json").read_text(encoding="utf-8"))
+        rf = db.refill_get("261015", "kr") or {}
         if not ev or rf.get("status") != "open" or abs(rf["events"][0]["proceeds"] - (799_000 + 1_175_000)) > 1:
-            p.append(f"재투자 기록: {rf}")
+            p.append(f"재투자 기록(저장소 ex_refill): {rf}")
         with contextlib.redirect_stdout(io.StringIO()):
             none = stops.record_refill("KR", "261015", "approved_other.json", {"refill_need": {"short": True}})
         if none:
@@ -325,8 +334,10 @@ def t7_record_refill_and_gate():
         blk = stage.refill_block("kr", "261016")
         if "042700" not in blk or "시그널 나이" not in blk:
             p.append(f"다음 run 이어받기 절: {blk[:200]}")
-        if json.loads((tmp / "journal" / "refill_261015_kr.json").read_text(encoding="utf-8")).get("status") != "carried":
+        if (db.refill_get("261015", "kr") or {}).get("status") != "carried":
             p.append("이어받은 기록이 carried로 바뀌지 않았다")
+        if (db.run_get("261015", "kr") or {}).get("closed_at"):
+            p.append("재투자 미처리인데 close가 run을 닫았다(ex_run.closed_at)")
         if "없음" not in stage.refill_block("kr", "261017"):
             p.append("한 번 이어받은 대기를 다시 그렸다")
     finally:
@@ -339,10 +350,10 @@ def _refill_signal(age_min=250):
     sig = _signal()
     sig["generated_at"] = (datetime.now(KST) - timedelta(minutes=age_min)).isoformat()
     sig["proposals"].append({"ticker": "042700", "name": "한미반도체", "action": "SELL", "thesis": "테스트 매도", "confidence": 0.6,
-                             "weight_target_pct": 0.0, "evidence": [{"claim": "c", "verdict": "MATCH"}]})
+                             "weight_target_pct": 0.0, "facts": []})
     sig["refill_candidates"] = [{"ticker": "000660", "name": "SK하이닉스", "action": "BUY", "thesis": "테스트 후보 논지",
                                  "weight_target_pct": 10.0, "confidence": 0.6, "size_why": "테스트", "expected_upside_pct": 30.0,
-                                 "evidence": [{"claim": "c", "source_url": "https://x.example/b", "verdict": "MATCH", "tier": "T1"}]}]
+                                 "facts": []}]
     return sig
 
 
@@ -406,8 +417,9 @@ def t12_refill_script():
         cap = _snap()
         (refill.DATA / "snapshot_261015_kr.json").write_text(json.dumps(cap), encoding="utf-8")
         cap_bytes = (refill.DATA / "snapshot_261015_kr.json").read_bytes()
-        (refill.JOURNAL / "refill_261015_kr.json").write_text(json.dumps({"status": "open", "events": [{"proceeds": 800000}]}),
-                                                             encoding="utf-8")
+        seed(refill={("261015", "kr"): {"status": "open", "events": [{"proceeds": 800000}]}})
+        if (db.refill_get("261015", "kr") or {}).get("status") != "open":
+            p.append("심은 재투자 기록이 저장소에서 안 보인다")
         kis_client.balance_for = lambda c, m, w, with_fx=True, now=None: ({"currency": "KRW", "cash": 1_000_000.0, "positions": []}, "")
         ingest.collect_prices = lambda c, m, w, pos: ({"005930": {"price": 51_000.0}}, {})
 
@@ -444,7 +456,7 @@ def t12_refill_script():
              "fill": {"qty_before": 0, "qty_after": 3, "delta": 3, "requested": 3, "limit_price": 51_000.0, "verdict": "FILLED"}}]}),
             encoding="utf-8")
         rcd2, msgd2 = refill.done("kr", "261015", str(outp), now=now)
-        rf = json.loads((refill.JOURNAL / "refill_261015_kr.json").read_text(encoding="utf-8"))
+        rf = db.refill_get("261015", "kr") or {}
         if rcd2 != 0 or rf.get("status") != "consumed" or rf.get("spent") != 153_000.0:
             p.append(f"consumed 기록: {rcd2} {rf.get('status')} {rf.get('spent')}")
         grc, _ = stage.refill_gate("kr", "261015")
@@ -461,54 +473,58 @@ def t12_refill_script():
 
 
 def t13_track1_no_reextract():
-    """주문 근거 고정본 — 판정표가 생긴 뒤 다시 뽑기 거부 · `--append`는 새 번호로 덧붙이고 판정은 그 자리의 새 번호를 쓴다 · 후보도 고정."""
-    import fc_track1 as f1
+    """주문 근거 고정 번호 — 큐(track1)는 한 번 고정되면 다시 뽑지 않는다 · `--append`는 새 근거에만 새 번호 · 재채점은 같은 사실의
+    마지막 round가 판정이다 · 재투자 후보 근거도 고정된다. (옛 fc_track1 고정본·superseded_by 대신 저장소 ev_claim_ref · 2026-10-17)"""
+    import facts
     p = []
     tmp = Path(tempfile.mkdtemp(prefix="rwt_"))
-    saved = f1.HERE
     try:
-        f1.HERE = tmp
         (tmp / "signals").mkdir()
-        (tmp / "analysis").mkdir()
+        run = ("261015", "kr")
+        rid = db.run_id(*run)
+
+        def add(tk, n, **kw):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                return facts.add_fact({"kind": "earnings", "ticker": tk, "period": "2026Q3", "metric": f"M{n}", "actual": n,
+                                       "as_of": "2026-10-14", "url": f"https://x.example/{tk}-{n}", "tier": 1, "source": "t",
+                                       "quote": f"{tk} reported HBM revenue metric {n} for the quarter", **kw}, run)["id"]
+        f1, r1 = add("005930", 1), add("000660", 1)
         sig = _signal()
-        sig["proposals"][0]["evidence"][0]["claim"] = "HBM 매출 2배(원 문구)"
+        sig["proposals"][0]["facts"] = [{"id": f1, "role": "support", "support": "논지 — HBM 매출 2배(원 근거)"}]
         sig["refill_candidates"] = [{"ticker": "000660", "action": "BUY", "thesis": "t", "confidence": 0.6,
-                                     "evidence": [{"claim": "후보 근거 문구", "verdict": "MATCH"}]}]
-        P = f1.paths("261015", "kr")
-        P["signal"].write_text(json.dumps(sig, ensure_ascii=False), encoding="utf-8")
+                                     "facts": [{"id": r1, "role": "support", "support": "논지 — 후보 근거"}]}]
+        sp = tmp / "signals" / f"signal_{run[0]}_{run[1]}.json"
+        sp.write_text(json.dumps(sig, ensure_ascii=False), encoding="utf-8")
+        db.import_run_artifacts(*run, here=tmp)
+        rows, _ = facts.queue(*run, "track1")
+        first = [(r["fact_id"], r["n"]) for r in rows]
+        if first != [(f1, 1), (r1, 2)]:
+            p.append(f"첫 고정 또는 재투자 후보 고정 실패: {first}")
+        f2 = add("005930", 2)                          # 근거를 더한 시그널(교정 뒤 다시 쓴 근거)
+        sig["proposals"][0]["facts"].append({"id": f2, "role": "support", "support": "논지 — HBM 매출 2배 근처(교정 뒤 근거)"})
+        sp.write_text(json.dumps(sig, ensure_ascii=False), encoding="utf-8")
+        db.import_run_artifacts(*run, here=tmp)
+        again, _ = facts.queue(*run, "track1")
+        if [(r["fact_id"], r["n"]) for r in again] != first:
+            p.append(f"고정된 큐를 다시 뽑았다: {[(r['fact_id'], r['n']) for r in again]}")
+        app, _ = facts.queue(*run, "track1", append=True)
+        if [(r["fact_id"], r["n"]) for r in app] != first + [(f2, 3)]:
+            p.append(f"덧붙임 — 새 근거만 다음 번호(앞 번호 그대로): {[(r['fact_id'], r['n']) for r in app]}")
+        # 검증자는 큐 행의 판(그때의 지금 판)을 옮긴다(W03) — 교정 뒤 재채점은 고친 판을 본다
+        vr = lambda f, v, **k: {"fact_id": f, "verdict": v, "tier": 1, "batch": "track1", "run_id": rid,  # noqa: E731
+                                "fact_rev": db.q1("SELECT rev FROM ev_fact WHERE id=?", (f,))["rev"], **k}
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            rc1 = f1.cmd_extract("261015", "kr")
-        mp = json.loads(P["map"].read_text(encoding="utf-8"))
-        if rc1 != 0 or not any(i.get("ticker") == "000660" for i in mp["items"]):
-            p.append(f"첫 고정 또는 재투자 후보 고정 실패: rc={rc1} {[i.get('ref') for i in mp['items']]}")
-        P["verdict"].write_text("# 판정표\n", encoding="utf-8")
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            rc2 = f1.cmd_extract("261015", "kr")
-        if rc2 != 3:
-            p.append(f"판정표가 있는데 다시 뽑았다: rc={rc2}")
-        sig["proposals"][0]["evidence"][0]["claim"] = "HBM 매출 2배 근처(교정 뒤 문구)"
-        P["signal"].write_text(json.dumps(sig, ensure_ascii=False), encoding="utf-8")
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            rc3 = f1.cmd_extract("261015", "kr", append=True)
-        mp2 = json.loads(P["map"].read_text(encoding="utf-8"))
-        items = {it["n"]: it for it in mp2["items"]}
-        old = next(it for it in items.values() if it.get("text") == "HBM 매출 2배(원 문구)")
-        new = [it for it in items.values() if it.get("text") == "HBM 매출 2배 근처(교정 뒤 문구)"]
-        if rc3 != 0 or not new or old.get("superseded_by") != new[0]["n"]:
-            p.append(f"덧붙임: rc={rc3} old={old} new={new}")
-        if "HBM 매출 2배(원 문구)" not in P["claims"].read_text(encoding="utf-8"):
-            p.append("덧붙임이 옛 원 문구를 지웠다")
-        claim_ok = {k: (True, [(k, "MATCH", "T1", "https://x.example/ok")]) for k in items}
-        claim_ok[old["n"]] = (False, [(old["n"], "MISMATCH", "T1", "https://x.example/old")])
-        f1._grade(sig, items, claim_ok, "판정.md")
-        if sig["proposals"][0]["evidence"][0].get("verdict") != "MATCH":
-            p.append(f"판정이 새 번호를 쓰지 않는다(옛 번호의 MISMATCH가 붙었다): {sig['proposals'][0]['evidence'][0]}")
-        if sig["refill_candidates"][0]["evidence"][0].get("verdict") != "MATCH":
-            p.append(f"재투자 후보 근거가 판정되지 않았다: {sig['refill_candidates'][0]['evidence'][0]}")
+            facts.add_verdicts([vr(f1, "MISMATCH"), vr(r1, "MATCH"), vr(f2, "MATCH")])
+            facts.correct(f1, {"actual": "1.5"}, "원문 값")
+            facts.add_verdicts([vr(f1, "MATCH")])                # 재채점(round 2)
+        st = rg.fact_states([f1, r1, f2], rid)
+        if (st[f1]["t1"] or {}).get("verdict") != "MATCH" or (st[f1]["t1"] or {}).get("rows", [""])[0] == "":
+            p.append(f"판정이 마지막 round를 쓰지 않는다(옛 round의 MISMATCH가 붙었다): {st[f1]['t1']}")
+        if not (st[r1]["t1"] or {}).get("ok"):
+            p.append(f"재투자 후보 근거가 판정되지 않았다: {st[r1]['t1']}")
     finally:
-        f1.HERE = saved
         shutil.rmtree(tmp, ignore_errors=True)
-    report("(13) 주문 근거 고정본 — 판정 뒤 다시 뽑기 거부 · --append 새 번호 · 판정은 새 번호 · 재투자 후보도 고정", p)
+    report("(13) 주문 근거 고정 번호 — 다시 뽑기 거부 · --append 새 근거만 새 번호 · 판정은 마지막 round · 재투자 후보도 고정", p)
 
 
 def t14_mode_filter_other_market():
@@ -525,9 +541,10 @@ def t14_mode_filter_other_market():
                     "balance": {"currency": "USD", "cash": 1000.0, "exchange_rate": 1400.0,
                                 "positions": [{"ticker": "AAPL", "qty": 100, "eval_amt": 50_000.0}]}}
         (rg.DATA_DIR / "snapshot_261014_us.json").write_text(json.dumps(us_paper), encoding="utf-8")
-        (rg.JOURNAL_DIR / "equity_curve.jsonl").write_text(json.dumps(
-            {"market": "US", "ts": _now(), "cash": 1000.0, "account_mode": "paper", "currency": "USD",
-             "positions": [{"ticker": "AAPL", "eval_amt": 50_000.0}]}) + "\n", encoding="utf-8")
+        seed(equity=[{"market": "US", "ts": _now(), "cash": 1000.0, "account_mode": "paper", "currency": "USD",
+                      "positions": [{"ticker": "AAPL", "eval_amt": 50_000.0}]}])
+        if len(db.equity_rows("US")) != 1:
+            p.append("심은 자산 곡선 행이 저장소에서 안 보인다")
         kr = {"currency": "KRW", "cash": 10_000_000.0, "exchange_rate": 1400.0, "cash_shared": True, "positions": []}
 
         def pf_with(mode):
@@ -561,10 +578,7 @@ def t14_mode_filter_other_market():
 def t15_market_share():
     """시장 몫 — 구조 검사(합 100·why) · 직전과 다르면 change.why · 실계좌(현금 공유)는 몫 없으면 거부 · gap = 목표 × 몫 × 자산 − 이 시장 투자."""
     p = []
-    tmp = Path(tempfile.mkdtemp(prefix="rws_"))
-    saved_j = al.JOURNAL_DIR
     try:
-        al.JOURNAL_DIR = tmp
         base = {"target_invested_pct": 98, "regime": "테스트 20일 +1.0%", "reserved": [], "based_on": None}
         if al.validate(dict(base, market_share={"KR": 60, "US": 30, "why": "합이 90인 잘못된 몫"}), "AL-261015-kr") == []:
             p.append("합 100이 아닌 몫을 받았다")
@@ -573,18 +587,18 @@ def t15_market_share():
         ok_ms = {"KR": 60, "US": 40, "why": "국내 살아 있는 축 3 · 미국 2 — 테스트"}
         if al.validate(dict(base, market_share=ok_ms), "AL-261015-kr"):
             p.append(f"바른 몫을 거부했다: {al.validate(dict(base, market_share=ok_ms), 'AL-261015-kr')}")
-        (tmp / "allocation.jsonl").write_text(json.dumps({"id": "AL-261014-us", "target_invested_pct": 98, "cash_reason": None,
-                                                          "market_share": {"KR": 50, "US": 50, "why": "직전"}}) + "\n", encoding="utf-8")
+        seed(allocation=[{"id": "AL-261014-us", "target_invested_pct": 98, "cash_reason": None,
+                          "market_share": {"KR": 50, "US": 50, "why": "직전"}}])
         e = al.validate(dict(base, based_on="AL-261014-us", market_share=ok_ms), "AL-261015-kr")
         if not any("change.why" in x for x in e):
             p.append(f"직전 몫과 다른데 change.why 없이 받았다: {e}")
-        (tmp / "allocation.jsonl").write_text(json.dumps({"id": "AL-261014-us", "target_invested_pct": 98, "cash_reason": None}) + "\n",
-                                              encoding="utf-8")
+        db.allocation_record({"id": "AL-261014-us", "target_invested_pct": 98, "cash_reason": None})   # 같은 id 행을 바꾼다
+        if "market_share" in (db.allocation_rows()[-1] if db.allocation_rows() else {}):
+            p.append("배분 원장 행을 바꾸지 못했다(몫이 남았다)")
         if al.validate(dict(base, based_on="AL-261014-us", market_share=ok_ms), "AL-261015-kr"):
             p.append("직전 행에 몫이 없는데(첫 판단) change.why를 요구했다")
     finally:
-        al.JOURNAL_DIR = saved_j
-        shutil.rmtree(tmp, ignore_errors=True)
+        pass
     snap = _snap()
     snap["balance"]["cash"] = 1_000_000.0
     snap["balance"]["cash_shared"] = True
@@ -616,13 +630,12 @@ def t16_feedback_reads_real_check():
     saved = fb.HERE
     try:
         fb.HERE = tmp
-        ev = tmp / "data" / "run_evidence"
-        ev.mkdir(parents=True)
-        body = ("# 실전 점검표\n\n[실전점검] {st} KR · 통과 10/12 · ★ ② 매도 뒤 재투자\n\n| 항목 | 판정 | 결과 |\n|---|---|---|\n"
-                "| ② 매도 뒤 재투자 | ★ | 상태 open · 판 돈 {n} |\n| ③ 시각 | ✓ | 수집→전송 70분 |\n")
-        (ev / "real_check_261015_kr.md").write_text(body.format(st="261015", n="1,000"), encoding="utf-8")
-        (ev / "real_check_261016_us.md").write_text(body.format(st="261016", n="2,000"), encoding="utf-8")
-        (ev / "real_check_260901_kr.md").write_text(body.format(st="260901", n="9"), encoding="utf-8")
+        # 점검표 판정은 저장소 op_real_check 행이다(real_check.py가 run마다 쓴다) — 세 run을 심는다(하나는 창 밖)
+        for st_, mk_, n_ in (("261015", "kr", "1,000"), ("261016", "us", "2,000"), ("260901", "kr", "9")):
+            db.real_check_put(st_, mk_, [{"item": "② 매도 뒤 재투자", "status": "★", "note": f"상태 open · 판 돈 {n_}"},
+                                         {"item": "③ 시각", "status": "✓", "note": "수집→전송 70분"}])
+        if db.q1("SELECT COUNT(*) AS n FROM op_real_check")["n"] != 6:
+            p.append("심은 점검표 행이 저장소에서 안 보인다")
         r = fb.real_checks("261017")
         it = r["items"].get("② 매도 뒤 재투자") or {}
         if len(r["runs"]) != 2 or it.get("star") != 2 or (r["items"].get("③ 시각") or {}).get("star") != 0:
@@ -679,84 +692,88 @@ def t17_status_needs_close_in_real():
 
 def t18_quote_bound_sources():
     """[AI] 줄은 인용과 함께 — 새 T1 사실은 인용·URL 없으면 등록 거부 · 옛 사실 재인용은 경고 · 노트 검사가 출처 행 품질을 본다 ·
-    클레임 목록에 대조 줄(판정 기준 줄은 그대로)."""
-    import srcledger as sl
+    클레임 목록에 대조 줄(판정 기준 줄은 그대로). 2026-10-17: 옛 srcledger(sources.json)·extract_ai_claims 대신 facts.py(저장소)."""
+    import facts
     import note_lint as nl
-    import extract_ai_claims as ex
-    import types
     p = []
     tmp = Path(tempfile.mkdtemp(prefix="rwq_"))
-    saved = (sl.SHARED, sl.EVID)
+    run, old_run = ("261015", "us"), ("261001", "us")
+    cpi = {"kind": "release", "indicator_code": "US_CPI_CORE_MOM", "period": "2026-09", "actual": 0.33, "unit": "%",
+           "as_of": "2026-10-15", "url": "https://www.bls.gov/news.release/cpi.nr0.htm", "tier": 1, "source": "BLS"}
+
+    def rows(rs, r=run, minor=False):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as e:
+            rc, res = facts.add_rows(rs, r, minor=minor)
+        return rc, res, e.getvalue()
     try:
-        sl.SHARED, sl.EVID = tmp / "sources.json", tmp
-        A = lambda **k: types.SimpleNamespace(**{**dict(stamp="261015", market="us", fact="", as_of="2026-10-15", source="s",
-                                                       url="", quote="", tier=1, minor=False, batch=""), **k})
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            rc1 = sl.cmd_add(A(fact="CPI core +0.33% m/m", url="https://bls.gov/x"))
-            rc2 = sl.cmd_add(A(fact="CPI core +0.33% m/m", url="https://bls.gov/x", quote="core index rose 0.3 percent in September"))
-            rc3 = sl.cmd_add(A(fact="tool number", tier="data"))
-            rc4 = sl.cmd_add(A(fact="minor fact", minor=True))
+        rc1, _, _ = rows([cpi])
+        rc2, r2, _ = rows([{**cpi, "quote": "core index rose 0.3 percent in September"}])
+        rc3, _, _ = rows([{"kind": "level", "ticker": "AAPL", "level_kind": "support", "value": 250, "as_of": "2026-10-15"}])
+        rc4, r4, _ = rows([{**cpi, "indicator_code": "US_CPI_MOM", "actual": 0.4}], minor=True)
         if rc1 != 2 or rc2 != 0 or rc3 != 0 or rc4 != 0:
-            p.append(f"등록 규칙: 인용 없음 {rc1}(2여야) · 인용 있음 {rc2} · data {rc3} · 참고 {rc4}")
-        d = json.loads(sl.SHARED.read_text(encoding="utf-8"))
-        old = {"id": "SRC-0900", "fact": "old fact", "url": "https://x/old", "tier": "1", "as_of": "2026-10-01",
-               "retrieved": "2026-10-01 10:00", "runs": ["us:261001"]}
-        d["sources"].append(old)
-        sl.SHARED.write_text(json.dumps(d), encoding="utf-8")
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            rc5 = sl.cmd_add(A(fact="old fact", url="https://x/old"))
-        if rc5 != 0:
-            p.append("옛 사실 재인용을 거부했다(경고여야)")
-        sh = json.loads(sl.SHARED.read_text(encoding="utf-8"))["sources"]
-        new = next(r for r in sh if r["fact"].startswith("CPI"))
-        new_noq = dict(new, id="SRC-0901", fact="new no quote", quote="", retrieved="2026-10-15 23:00")
-        sh.append(new_noq)
-        note = ("x [AI] CPI [S1]\ny [AI] old [S2]\nz [AI] bad [S3]\n\n## §12 출처 원장\n\n| S | 사실 | 원문 인용 | as-of | retrieved | written | 출처 |\n|---|---|---|---|---|---|---|\n"
-                f"| S1 | CPI | q | 2026-10-15 | r | w | [s](u) (T1) · {new['id']} |\n| S2 | old | — | 2026-10-01 | r | w | [s](u) (T1) · SRC-0900 |\n"
-                "| S3 | bad | — | 2026-10-15 | r | w | [s](u) (T1) · SRC-0901 |\n")
-        errs, warns = nl.s_quality(note, sh)
-        if not errs or "S3" not in errs[0] or "S1" in errs[0] or not warns or "S2" not in warns[0]:
-            p.append(f"노트 출처 행 품질: errs={errs} warns={warns}")
-        src = ex.source_lines(note, sh)
-        if "core index rose 0.3 percent" not in src.get("S1", "") or "원문 인용 없음" not in src.get("S3", ""):
-            p.append(f"대조 줄 내용: {src}")
-        lines = ex.with_sources(["1. (L1) CPI rose [AI] [S1]", "2. (L2) other"], {"S1": "   ↳ 대조 S1 · u"})
-        if lines != ["1. (L1) CPI rose [AI] [S1]", "   ↳ 대조 S1 · u", "2. (L2) other"]:
-            p.append(f"대조 줄 배치: {lines}")
+            p.append(f"등록 규칙: 인용 없음 {rc1}(2여야) · 인용 있음 {rc2} · 도구(data) {rc3} · 참고(minor) {rc4}")
+        old = {**cpi, "indicator_code": "US_PPI_MOM", "actual": 0.2, "as_of": "2026-10-01", "url": "https://x.example/old"}
+        rows([old], r=old_run, minor=True)                                         # 옛 run의 사실(인용 없음)
+        rc5, r5, err5 = rows([old])                                                # 이번 run이 T1 근거로 재인용
+        if rc5 != 0 or not r5 or r5[0]["status"] != "재사용" or "옛 사실 재인용" not in err5:
+            p.append(f"옛 사실 재인용은 거부가 아니라 경고여야: rc={rc5} {r5[0]['status'] if r5 else '-'} {err5[:80]!r}")
+        if not (r2 and r4 and r5):
+            raise AssertionError("등록 결과가 비었다")
+        # 이전된 옛 행 흉내(load_bearing 칸이 빈 SRC- 행은 근거로 본다) — 옛 시점 사실 · 인용 없는 근거
+        db.connect().execute("UPDATE ev_fact SET retrieved='2026-10-01 10:00', load_bearing=NULL WHERE id=?", (r5[0]["id"],))
+        db.connect().execute("UPDATE ev_fact SET load_bearing=1 WHERE id=?", (r4[0]["id"],))                # 이전된 옛 행 흉내 — 인용 없는 근거
+        s_of = {r["fact_id"]: r["s_no"] for r in db.q("SELECT fact_id, s_no FROM ev_fact_run WHERE run_id=?", (db.run_id(*run),))}
+        s1, s2, s3 = s_of[r2[0]["id"]], s_of[r5[0]["id"]], s_of[r4[0]["id"]]
+        note = f"x [AI] CPI [S{s1}]\ny [AI] old [S{s2}]\nz [AI] bad [S{s3}]\n\n## §12 출처 원장\n"
+        errs, warns = nl.s_quality(note, None, *run)
+        if not errs or f"S{s3}" not in errs[0] or f"S{s1}(" in errs[0] or not warns or f"S{s2}" not in warns[0]:
+            p.append(f"노트 출처 행 품질(저장소 S 번호): errs={errs} warns={warns}")
+        for f in (r2[0]["id"], r5[0]["id"], r4[0]["id"]):          # 노트 §2의 [S n] — render-note가 다는 참조
+            facts.add_ref(f, run, "note", f"분석노트_{run[0]}_{run[1]}_v1_0.md", "§2", role="note")
+        out = tmp / "claims_A.md"
+        rc, _ = facts.render_claims(*run, "A", out_path=str(out))
+        txt = out.read_text(encoding="utf-8") if out.exists() else ""
+        lines = txt.splitlines()
+        sub = {ln.split()[2]: ln for ln in lines if ln.startswith("   ↳ 대조")}
+        if "core index rose 0.3 percent" not in sub.get(r2[0]["id"], "") or "원문 인용 없음" not in sub.get(r4[0]["id"], ""):
+            p.append(f"대조 줄 내용: {sub}")
         import re as _re
-        if any(_re.match(r"^\d+\.\s", l) for l in lines if l.startswith("   ↳")):
+        if any(_re.match(r"^\d+\.\s", ln) for ln in lines if ln.startswith("   ↳")):
             p.append("대조 줄이 판정 기준 줄로 읽힌다")
+        nums = [i for i, ln in enumerate(lines) if _re.match(r"^\d+\.\s", ln)]
+        if rc != 0 or not nums or not all(lines[i + 1].startswith("   ↳ 대조") for i in nums if i + 1 < len(lines)):
+            p.append(f"번호 줄 바로 아래에 대조 줄이 없다(rc={rc})")
     finally:
-        sl.SHARED, sl.EVID = saved
         shutil.rmtree(tmp, ignore_errors=True)
     report("(18) 인용 결속 — 새 T1 사실은 인용·URL 필수 · 옛 사실 재인용 경고 · 노트가 출처 행 품질을 본다 · 클레임 대조 줄", p)
 
 
 def t19_fetch_keeps_raw():
-    """fetch.py — 받은 본문 전체를 data/_raw_fc/에 보관하고 접속 기록에 raw_path(판정표 원문 대조의 입력) · 실패는 보관 안 함."""
+    """fetch.py(v3) — 받은 본문 전체를 본문 판(내용 해시 파일)으로 보관 · 출력은 잘라도 보관은 전체 · 실패는 판 없이 시도만 ·
+    시도 행에 본문이 실리지 않는다."""
     import fetch as fe
     import ingest
     p = []
-    tmp = Path(tempfile.mkdtemp(prefix="rwr2_"))
-    saved = (fe.HERE, fe.RAW_DIR, fe.FETCH_LOG, ingest._fetch_text_meta)
+    saved = ingest._fetch_text_meta
     try:
-        fe.HERE, fe.RAW_DIR, fe.FETCH_LOG = tmp, tmp / "data" / "_raw_fc", tmp / "journal" / "fetch_log.jsonl"
         long = "본문 " * 15000
         ingest._fetch_text_meta = lambda url: (long if "ok" in url else "", "" if "ok" in url else "403", {"kind": "html"})
         b, e = fe.fetch("https://x.example/ok", max_chars=100)
         fe.fetch("https://x.example/blocked")
-        rows = [json.loads(l) for l in fe.FETCH_LOG.read_text(encoding="utf-8").splitlines()]
-        rp = rows[0].get("raw_path")
-        if len(b) != 100 or not rp or len((tmp / rp).read_text(encoding="utf-8")) != len(long):
-            p.append(f"보관: 출력 {len(b)}자 · raw_path={rp}")
-        if rows[1].get("raw_path"):
-            p.append("실패한 열기도 보관했다")
-        if "full" in rows[0]:
-            p.append("접속 기록에 본문이 실렸다")
+        rows = db.fetch_rows()                                # 시도 기록(저장소 ev_fetch)
+        if len(rows) != 2:
+            p.append(f"시도 기록 {len(rows)}행(2행이어야)")
+            rows = (rows + [{}, {}])[:2]
+        vid = rows[0].get("version_id")
+        if len(b) != 100 or not vid or len(db.raw_text(vid) or "") != len(long):
+            p.append(f"보관: 출력 {len(b)}자 · 판 {vid}")
+        if rows[1].get("version_id"):
+            p.append("실패한 열기도 판을 만들었다")
+        if any(len(str(v)) > 1000 for v in rows[0].values()):
+            p.append("시도 기록에 본문이 실렸다")
     finally:
-        fe.HERE, fe.RAW_DIR, fe.FETCH_LOG, ingest._fetch_text_meta = saved
-        shutil.rmtree(tmp, ignore_errors=True)
-    report("(19) fetch.py 원문 보관 — 전체 본문을 data/_raw_fc/ · 접속 기록 raw_path · 실패는 보관 안 함", p)
+        ingest._fetch_text_meta = saved
+    report("(19) fetch.py 원문 보관(v3) — 전체 본문을 본문 판으로 · 출력만 자른다 · 실패는 판 없이 시도만", p)
 
 
 def t8_balance_for():
@@ -819,10 +836,10 @@ def t10_real_check():
         rc.LEDGER = tmp / "ledger.jsonl"
         for d in (rc.EVID, rc.JOURNAL, rc.SIGNALS, rc.ANALYSIS):
             d.mkdir()
-        (rc.JOURNAL / "refill_261015_kr.json").write_text(json.dumps({"status": "open", "events": [{"proceeds": 5}]}),
-                                                         encoding="utf-8")
-        (rc.JOURNAL / "push_log.jsonl").write_text(json.dumps({"stamp": "261015", "market": "kr", "sent": True,
-                                                               "at": "2026-10-15T11:00"}) + "\n", encoding="utf-8")
+        seed(refill={("261015", "kr"): {"status": "open", "events": [{"proceeds": 5}]}},
+             logs={"push_log": [{"stamp": "261015", "market": "kr", "sent": True, "at": "2026-10-15T11:00"}]})
+        if not db.refill_get("261015", "kr") or len(db.log_rows("push_log")) != 1:
+            p.append("심은 재투자·푸시 기록이 저장소에서 안 보인다")
         (rc.EVID / "real_shadow_261015_kr.md").write_text(
             "## 그림자 점검 — x\n\n- risk_guard 종료코드 0 · 승인 매수 2건 · 상한 초과 0건 · 미달 아니오\n", encoding="utf-8")
         head, md = rc.build("261015", "kr")

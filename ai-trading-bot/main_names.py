@@ -2,25 +2,25 @@
 # -*- coding: utf-8 -*-
 """메인 종목 목록 — 시가총액 상위를 **브로커 시세로 재서** 고른다.
 
-    python3 main_names.py --refresh          # 후보 풀의 시총을 조회해 config/main_names.json을 다시 쓴다
+    python3 main_names.py --refresh          # 후보 풀의 시총을 조회해 저장소의 시총 순위(dim_company.main_rank)를 다시 매긴다
     python3 main_names.py --show             # 현재 목록
 
 왜 있는가 (2026-10-02 사용자): "삼성전자 같은 메인 종목인데 그걸 캐치 못하는 게 말이 안 된다."
 아쉬움 감사는 유니버스와 지도가 아는 이름만 쟀다. 시총 상위가 유니버스 밖이면 아예 감시 밖이었다.
-그래서 국내·미국 각 상위 N을 **같이 잰다**(`regret.py --fetch`가 이 파일을 읽는다).
+그래서 국내·미국 각 상위 N을 **같이 잰다**(`regret.py --fetch`가 이 목록을 읽는다 — 옛 config/main_names.json은 저장소로 옮겼다).
 
 순위는 손으로 정하지 않는다 — 아래 후보 풀(넉넉한 상위)의 시가총액을 KIS 현재가 TR에서 읽어
 정렬한다(국내 `hts_avls` 억원 · 미국 `tomv` USD). 풀은 순위가 아니라 **그물**이다: 풀 밖에서 새 대형주가
 나오면 풀에 이름만 보탠다. 갱신은 분기마다 `trade-feedback`이 제안한다.
 """
 import argparse
-import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import db
+
 HERE = Path(__file__).resolve().parent
-OUT = HERE / "config" / "main_names.json"
 KST = timezone(timedelta(hours=9))
 TOP_N = 30
 
@@ -108,15 +108,27 @@ def refresh(top_n: int = TOP_N) -> dict:
            "source": "KIS 현재가 TR 시가총액 — 국내 inquire-price hts_avls(억원) · 미국 HHDFS76200200 tomv(USD)",
            "pool_size": {"KR": len(POOL_KR), "US": len(POOL_US)}, "top_n": top_n,
            "KR": kr[:top_n], "US": us[:top_n], "errors": errors}
-    OUT.write_text(json.dumps(doc, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    # 순위는 회사 행(dim_company.main_rank)에, 문서 머리(조회 시각·출처·풀 크기·실패)는 docmeta에 — 한 트랜잭션.
+    with db.tx():
+        for mk in ("KR", "US"):
+            db.main_names_refresh(mk, doc[mk], doc["as_of"], doc["source"])
+        db.docmeta_put("main_names", {k: v for k, v in doc.items() if k not in ("KR", "US")})
     return doc
 
 
+_UNIT = {"KR": "mcap_100m_krw", "US": "mcap_usd"}
+
+
 def load() -> dict:
-    try:
-        return json.loads(OUT.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {"KR": [], "US": []}
+    """옛 config/main_names.json 모양 {as_of, source, pool_size, top_n, KR, US, errors} — 저장소에서 다시 짓는다."""
+    meta = db.docmeta_get("main_names") or {}
+    doc = {k: meta[k] for k in ("as_of", "source", "pool_size", "top_n") if k in meta}
+    for mk in ("KR", "US"):
+        doc[mk] = [{"ticker": r["ticker"], "name": r["name"], **({"excd": r["excd"]} if mk == "US" else {}),
+                    _UNIT[mk]: r["main_mcap"]} for r in db.main_names(mk)]
+    if "errors" in meta:
+        doc["errors"] = meta["errors"]
+    return doc
 
 
 def main() -> int:

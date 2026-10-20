@@ -3,8 +3,8 @@
 결정론 리스크 레이어 — 시스템 전체의 안전이 걸린 단일 모듈.
 
 LLM은 제안만 하고, 집행 여부는 전부 여기서 결정된다. 이 파일에는 LLM 호출도,
-네트워크 호출도 없다. 입력은 파일뿐이고 판정은 순수 함수다 — 그래야 거부 케이스를
-오프라인에서 전건 테스트할 수 있다.
+네트워크 호출도 없다. 입력은 파일(시그널·스냅샷·한도)과 저장소(`db.py` — 논지·지도·고점·자산 곡선·감사 소급·감시 목록·근거 사실과 판정)뿐이고
+판정은 순수 함수다 — 그래야 거부 케이스를 오프라인에서 전건 테스트할 수 있다(테스트는 `testkit.db_case`로 임시 저장소를 연다).
 
 설계 근거(AI자동매매_공개사례_성능조사_v1_0.md):
 - TradeTrap: 단일 컴포넌트의 작은 교란이 에이전트 결정 루프를 타고 번져
@@ -29,38 +29,34 @@ from pathlib import Path
 
 # 거래소 규칙(호가단위)만 가져온다 — 순수 함수라 네트워크도 상태도 없다.
 # 이 모듈이 오프라인 순수 판정이라는 성질은 그대로다.
-import peaks as peaks_store
+# ★ 원장(논지·지도·고점·자산 곡선·감사 소급·감시 목록)은 저장소 하나에서 읽는다(2026-10-17 · `db.py`만 그 파일을 연다).
+#   예전에는 원장 JSON을 스크립트마다 통째로 읽어, 같은 run의 다른 스크립트가 고쳐 쓴 판과 엇갈릴 수 있었다.
+import db
+import portfolio                    # 통합자산(NAV) 한 곳 — 2026-10-19 Codex R06
 from kis_client import snap_kr_price, account_mode
 
 HERE = Path(__file__).parent
 CONFIG_DIR = HERE / "config"
-CALENDAR_PATH = HERE / "journal" / "calendar.json"
 
 
 DATA_DIR = HERE / "data"
-JOURNAL_DIR = HERE / "journal"
+JOURNAL_DIR = HERE / "journal"          # 그날 거래 기록(trades_*.json) — 파일로 남는 산출물이다(원장 아님)
 
 
 def _acct_family(mode) -> str:
-    """계좌 계열 — 'paper' 또는 'real'(real · real_readonly). 표시가 없는 옛 행·스냅샷은 모의다(실계좌 전환 전 기록)."""
-    return "paper" if str(mode or "paper") == "paper" else "real"
+    """계좌 계열 — 'paper' 또는 'real'(real · real_readonly). 표시가 없는 옛 행·스냅샷은 모의다(실계좌 전환 전 기록) · 정의는 db 한 곳."""
+    return db.acct_family_of(mode)
 
 
 def _latest_curve_row(market: str, family: str = None):
-    """`journal/equity_curve.jsonl`에서 이 시장의 마지막 행(없으면 None). 못 읽는 줄은 건너뛴다.
-    `family`(2026-10-15)를 주면 그 계좌 계열의 행만 — 실계좌 run이 모의 자산 행을 반대편으로 읽지 않게."""
-    path = JOURNAL_DIR / "equity_curve.jsonl"
-    if not path.exists():
-        return None
+    """저장소 자산 곡선(`db.equity_rows` — 옛 `journal/equity_curve.jsonl`)에서 이 시장의 마지막 행(없으면 None).
+    `family`(2026-10-15)를 주면 그 계좌 계열의 행만 — 실계좌 run이 모의 자산 행을 반대편으로 읽지 않게.
+    계열은 여기의 `_acct_family`로 가른다(real_readonly도 real 계열 — 저장소 쪽 family 거르기는 'real'만 real로 본다)."""
     last = None
-    for ln in path.read_text(encoding="utf-8").splitlines():
-        try:
-            r = json.loads(ln)
-        except json.JSONDecodeError:
-            continue
+    for r in db.equity_rows(market):
         if family and _acct_family(r.get("account_mode")) != family:
             continue
-        if str(r.get("market", "")).upper() == market.upper() and r.get("cash") is not None:
+        if r.get("cash") is not None:
             last = r
     return last
 
@@ -84,6 +80,8 @@ def _fx_stale(fx_at, hours: float = 8.0) -> str:
 
 # FB-261010-5 — 새 종목을 이 시장 보유 평균보다 작게 살 때 받아 주는 사유(그 밖은 '키우거나 사지 마라').
 SMALL_WHY_KINDS = ("stop_close", "binary_event", "one_share", "liquidity", "order_cap")
+# 확인된 축의 소액 보유를 작게 두는 사유(holds[].small_why · FB-261017-8) — ETF 소액으로 축을 표현 중(etf_expression)은 보유 전용
+HOLD_SMALL_WHY_KINDS = SMALL_WHY_KINDS + ("etf_expression",)
 
 
 def order_cap_cfg(limits: dict, mode: str = None) -> dict:
@@ -187,6 +185,8 @@ def portfolio_equity(this_market: str, balance: dict) -> dict:
                           "invested": sum(p.get("eval_amt", 0) or 0
                                           for p in (balance.get("positions") or [])),
                           "positions": balance.get("positions") or [],
+                          "cash_shared": bool(balance.get("cash_shared")),
+                          "ts": datetime.now(KST).isoformat(),        # 이번 run 잔고가 가장 새롭다(공유 현금은 이쪽 것을 센다)
                           "source": "이번 run 스냅샷"}
 
     other = "US" if this_market == "KR" else "KR"
@@ -196,8 +196,8 @@ def portfolio_equity(this_market: str, balance: dict) -> dict:
     # ① 날짜 스탬프(6자리) 파일만 후보로 받고 ② 파일 안의 `generated_at`으로 고른다.
     cands = [f for f in DATA_DIR.glob(f"snapshot_*_{other.lower()}.json")
              if re.fullmatch(r"snapshot_\d{6}_[a-z]{2}\.json", f.name)]
-    # ★ 계좌 계열로 거른다(2026-10-15 · 실계좌 전환) — 모의 미국 스냅샷(보유 약 $80k)을 실계좌 국내 run의 반대편으로 더하면
-    #   포트폴리오가 거의 찬 것으로 보여 첫 실전 run이 거의 안 산다. 표시 없는 옛 스냅샷은 모의다.
+    # ★ 계좌 계열로 거른다(2026-10-15 · 실계좌 전환 준비) — 모의 미국 스냅샷(보유 약 $80k)을 실계좌 국내 run의 반대편으로 더하면
+    #   포트폴리오가 거의 찬 것으로 보여 한 실행이 거의 안 산다. 표시 없는 옛 스냅샷은 모의다.
     try:
         fam = _acct_family(account_mode(json.loads(LIMITS_PATH.read_text(encoding="utf-8"))))
     except (OSError, json.JSONDecodeError):
@@ -231,7 +231,7 @@ def portfolio_equity(this_market: str, balance: dict) -> dict:
             if row and str(row.get("ts") or "") > str(s.get("generated_at") or ""):
                 ob = {"currency": row.get("currency") or ob.get("currency"),
                       "cash": row.get("cash"), "positions": row.get("positions") or [],
-                      "exchange_rate": ob.get("exchange_rate")}
+                      "exchange_rate": ob.get("exchange_rate"), "cash_shared": row.get("cash_shared")}
                 s = {"generated_at": row.get("ts")}
                 src_name = f"equity_curve {str(row.get('ts'))[:16]}"
             # 며칠 지난 잔고는 쓰되 **몇 일 지났는지 반드시 사유에 적는다.**
@@ -249,6 +249,8 @@ def portfolio_equity(this_market: str, balance: dict) -> dict:
                             "invested": sum(p.get("eval_amt", 0) or 0
                                             for p in (ob.get("positions") or [])),
                             "positions": ob.get("positions") or [],
+                            "cash_shared": bool(ob.get("cash_shared")),
+                            "ts": s.get("generated_at"),
                             "source": src_name}
             asof.append(f"{other} {s.get('generated_at', '?')[:16]}")
             if not fx and ob.get("exchange_rate"):
@@ -259,13 +261,7 @@ def portfolio_equity(this_market: str, balance: dict) -> dict:
 
     # ★ 통합증거금 실계좌(2026-10-12): 국내·미국 현금이 **한 주머니**다 — 국내 스냅샷의 원화 주문가능과 미국 스냅샷의
     #   달러 주문가능은 같은 돈을 두 통화로 잰 것이다. 둘 다 더하면 현금이 두 번 잡혀 자산이 부풀고 투자비중이 작게 나온다.
-    #   이번 run의 값(가장 새롭다)만 세고 반대편은 보유 평가액만 센다.
-    if balance.get("cash_shared") and other in parts:
-        op = parts[other]
-        op["shared_cash_dropped"] = op.get("cash") or 0
-        op["cash"] = 0
-        op["equity"] = op.get("invested") or 0
-        asof.append(f"현금 공유 — {other} 현금 {op['shared_cash_dropped']:,.2f} 제외(통합증거금)")
+    #   규칙은 portfolio.nav 한 곳(2026-10-19 · Codex R06): 어느 쪽이든 공유면 가장 새 조각(이번 run)의 현금만 세고 나머지는 보유만.
     if not fx:
         missing.append("환율을 못 구했다(미국 스냅샷의 exchange_rate)")
     if missing:
@@ -273,13 +269,12 @@ def portfolio_equity(this_market: str, balance: dict) -> dict:
                 "why": "포트폴리오 자산을 **못 쟀다** — " + " / ".join(missing)
                        + ". 그 시장 자산으로 물러선다(더 작으므로 보수적)."}
 
-    krw = cash_krw = inv_krw = 0.0
+    n = portfolio.nav(parts, fx, fx_at)
+    parts = n["parts"]
     for m, v in parts.items():
-        mult = fx if m == "US" else 1.0
-        v["krw"] = v["equity"] * mult
-        krw += v["krw"]
-        cash_krw += (v.get("cash") or 0) * mult
-        inv_krw += (v.get("invested") or 0) * mult
+        if v.get("shared_cash_dropped") is not None:
+            asof.append(f"현금 공유 — {m} 현금 {v['shared_cash_dropped']:,.2f} 제외(통합증거금)")
+    krw, cash_krw, inv_krw = n["krw"], n["cash_krw"], n["invested_krw"]
     return {"krw": krw, "cash_krw": cash_krw, "invested_krw": inv_krw,
             "ok": True, "asof": " · ".join(asof), "fx": fx, "parts": parts,
             "fx_at": fx_at,
@@ -335,16 +330,12 @@ def leverage_factor(name: str, ticker: str) -> tuple:
 def axis_index() -> dict:
     """ticker → 그 종목이 **양(+) 노출**을 갖는 축 id 목록.
 
-    출처는 `journal/market_map.json:axes[].names[]` — 이미 양 시장 종목을
+    출처는 지도 축(`db.market_map_load()["axes"][].names[]` — 옛 `journal/market_map.json`) — 이미 양 시장 종목을
     한 축에 담고 있는 **유일한 교차 시장 조인 키**다.
     `sign == "-"`(역노출)은 집중으로 세지 않는다 — 반대로 움직이는 보유를
     같은 축의 집중으로 더하면 헤지를 집중이라고 부르는 셈이 된다.
     """
-    try:
-        axes = (json.loads((JOURNAL_DIR / "market_map.json")
-                           .read_text(encoding="utf-8")) or {}).get("axes") or []
-    except (json.JSONDecodeError, OSError):
-        return {}
+    axes = db.market_map_load().get("axes") or []
     # ★ 부호를 **살려서** 담는다 — 예전엔 `sign "-"`를 빼서 헤지를 집중으로 안 셌는데, 인버스 ETF를
     #   허용하면서(2026-09-14) 역노출은 '안 세는 것'이 아니라 **음수로 세는 것**이 맞아졌다.
     #   SOXS를 사면 반도체 축 집중이 줄어야 한다. 값은 {ticker: [(axis_id, ±1), …]}.
@@ -382,16 +373,127 @@ def axis_exposure(pf: dict, market: str, idx: dict) -> dict:
     return exp
 
 
+# ── 집중 공개선(2026-10-19 · Codex R05) — 심사·gap 채우기·최종 묶음 세 자리가 **같은 노출 식 하나**를 쓴다.
+#   선은 상한이 아니라 '설명(concentration_why)이 붙어야 하는 선'이다(2026-09-22 사용자). 예전에는 심사 때 처음 크기로만 봐서
+#   gap 채우기가 수량을 키우면(10%→95% · 실계좌 15%+5%→25%) 아무도 다시 보지 않았다.
+
+def _held_value(balance: dict, ticker: str) -> float:
+    """이 시장 보유 평가액(이 시장 통화)."""
+    return sum(float(p.get("eval_amt") or 0) for p in (balance.get("positions") or [])
+               if str(p.get("ticker") or "").strip() == str(ticker).strip())
+
+
+def exposure_after(base_axes: dict, balance: dict, orders: list, idx: dict, equity: float) -> dict:
+    """주문 묶음 뒤 노출 — {"pos": {종목: %}, "axes": {축: %}}(포트폴리오 합산 자산 대비 · 이 시장 통화).
+    종목 = 이 시장 보유 평가액 + 이번 주문(매수 + · 매도 −). 축 = 양 시장 보유(`axis_exposure`) + 이번 주문 × 레버리지 배수 × 지도 부호."""
+    if not equity or equity <= 0:
+        return {"pos": {}, "axes": {}}
+    pos, axes = {}, dict(base_axes or {})
+    for o in orders:
+        tk = str(o.get("ticker") or "").strip()
+        if tk not in pos:
+            pos[tk] = _held_value(balance, tk)
+        amt = int(o.get("qty") or 0) * float(o.get("price") or 0)
+        amt = amt if str(o.get("action") or "").upper() == "BUY" else -amt
+        pos[tk] += amt
+        f, _inv = leverage_factor(o.get("name", ""), tk)
+        for aid, sign in idx.get(tk, []):
+            axes[aid] = axes.get(aid, 0.0) + amt * f * sign
+    return {"pos": {k: v / equity * 100 for k, v in pos.items()},
+            "axes": {k: v / equity * 100 for k, v in axes.items()}}
+
+
+def concentration_over(o: dict, exp: dict, idx: dict, limits: dict) -> list:
+    """매수 `o`가 노출 `exp`(그 주문을 포함한 묶음) 뒤 넘는 선 — ['종목 23.0%(선 20%)', '축 ax 41.2%(선 40%)'] · 없으면 []."""
+    disc = limits.get("concentration_disclose_pct") or {}
+    dp, da = disc.get("position"), disc.get("axis")
+    tk = str(o.get("ticker") or "").strip()
+    out = []
+    v = exp["pos"].get(tk)
+    if dp is not None and v is not None and v > float(dp) + 1e-9:
+        out.append(f"종목 {v:.1f}%(선 {float(dp):g}%)")
+    _f, inv = leverage_factor(o.get("name", ""), tk)
+    if da is not None and not inv:
+        for aid in axes_of(idx, tk):
+            av = exp["axes"].get(aid)
+            if av is not None and av > float(da) + 1e-9:
+                out.append(f"축 {aid} {av:.1f}%(선 {float(da):g}%)")
+    return out
+
+
+def concentration_cap(o: dict, others: list, base_axes: dict, balance: dict, idx: dict, equity: float,
+                      limits: dict) -> tuple:
+    """명분 없이 이 매수가 가질 수 있는 최대 수량 — 종목선·양(+) 축선 중 가장 빡빡한 것. (수량 | None, 선 설명).
+    `others` = 이 주문을 뺀 같은 묶음(앞서 정해진 매수·매도). 선 설정이 없거나 분모가 0이면 (None, "")."""
+    disc = limits.get("concentration_disclose_pct") or {}
+    dp, da = disc.get("position"), disc.get("axis")
+    px = float(o.get("price") or 0)
+    if not equity or equity <= 0 or px <= 0 or (dp is None and da is None):
+        return None, ""
+    exp = exposure_after(base_axes, balance, others, idx, equity)
+    tk = str(o.get("ticker") or "").strip()
+    caps = []
+    if dp is not None:
+        cur = exp["pos"].get(tk, _held_value(balance, tk) / equity * 100)
+        room = (float(dp) - cur) / 100 * equity
+        caps.append((max(0, int(room // px)) if room > 0 else 0, f"종목 {float(dp):g}%"))
+    f, inv = leverage_factor(o.get("name", ""), tk)
+    if da is not None and not inv:
+        for aid in axes_of(idx, tk):
+            cur = exp["axes"].get(aid, 0.0)
+            room = (float(da) - cur) / 100 * equity / max(float(f), 1e-9)
+            caps.append((max(0, int(room // px)) if room > 0 else 0, f"축 {aid} {float(da):g}%"))
+    if not caps:
+        return None, ""
+    return min(caps, key=lambda c: c[0])
+
+
+def concentration_final(final: list, limits: dict, balance: dict, market: str) -> tuple:
+    """★ 최종 묶음(gap 채우기·자금 조달·주문당 상한 뒤) 집중 재검사 — (남길 주문, 거부, 공개 블록).
+    명분 없이 선을 넘는 매수는 그 주문만 거부하고, 그 매수를 위한 회전 매도(source funding)도 같이 뺀다(쓸 곳 없는 매도 금지).
+    매수마다 `{pos_pct_after, axes_after, line_hit, why}`를 승인 파일 `concentration`에 남긴다(공개)."""
+    pf = portfolio_equity(market, balance)
+    equity = pf_local(pf, market, balance)["equity"]
+    idx = axis_index()
+    base = axis_exposure(pf, market, idx)
+    exp = exposure_after(base, balance, final, idx, equity)
+    block, rej, drop = {}, [], set()
+    for o in final:
+        if str(o.get("action") or "").upper() != "BUY":
+            continue
+        tk = str(o.get("ticker") or "").strip()
+        over = concentration_over(o, exp, idx, limits)
+        why_c = str((o.get("proposal") or {}).get("concentration_why") or "").strip()
+        _f, inv = leverage_factor(o.get("name", ""), tk)
+        block[tk] = {"pos_pct_after": round(exp["pos"].get(tk, 0.0), 2),
+                     "axes_after": {aid: round(exp["axes"].get(aid, 0.0), 2) for aid in (axes_of(idx, tk) if not inv else [])},
+                     "line_hit": over, "why": why_c or None}
+        if over and not why_c:
+            drop.add(tk)
+            rej.append({"ticker": tk, "action": "BUY",
+                        "why": f"최종 수량 집중 명분 없음 — 이번 주문 뒤 {' · '.join(over)}. concentration_why를 적어라"
+                               f"(상한이 아니라 설명이 붙어야 하는 선이다)"})
+    kept = []
+    for o in final:
+        if str(o.get("action") or "").upper() == "BUY" and str(o.get("ticker")) in drop:
+            continue
+        if o.get("source") == "funding" and str(o.get("funds")) in drop:
+            rej.append({"ticker": o.get("ticker"), "action": "SELL",
+                        "why": f"회전 매도 취소 — 자금 대상 {o.get('funds')} 매수가 집중 명분 없음으로 빠졌다(쓸 곳 없는 매도)"})
+            continue
+        kept.append(o)
+    return kept, rej, block
+
+
 # ★ 2026-09-22 — `allocation_multiplier`(미달 배수)·`halve_window`(이벤트 계수)·`other_market_reserve`(상수 예약)를
 #   지웠다. 주식 비율은 상수가 아니라 **모델이 이어받아 판단하는 상태**(`allocation.py` 원장)이고, 크기는 제안의
 #   `size_why`가 정하며, 판단한 비율에 못 미치면 `apply_run_limits`가 증분을 비례로 키워 채운다. 이벤트는 줄일 이유가
 #   아니라 베팅할 자리다(사용자 09-22).
 
 LIMITS_PATH = CONFIG_DIR / "limits.json"
-WATCHLIST_PATH = CONFIG_DIR / "watchlist.json"
 KILL_PATH = CONFIG_DIR / "KILL"
 SIGNALS_DIR = HERE / "signals"
-PEAKS_PATH = HERE / "journal" / "position_peaks.json"
+# 감시 목록(유니버스)·고점·달력은 저장소에서 읽는다 — `db.watchlist_doc()`·`db.peaks_for_market()`(2026-10-17).
 
 KST = timezone(timedelta(hours=9))
 SCHEMA_VERSION = "1.0"
@@ -440,6 +542,120 @@ def real_latch_needs_cap(limits: dict) -> str:
         return ""
     return ("실전 래치(`real_trading_enabled: true`)가 열렸는데 주문당 상한이 없다 — "
             "`order_cap.max_krw_per_order`(2026-10-12 사용자 결정: 100만 원)를 정하고 다시 돌려라")
+
+
+# ------------------------------------------------------ 근거 사실(facts) — 저장소 조회
+
+# ★ 2026-10-17 — 제안의 근거는 문장(`evidence[{claim, source_url, tier, verdict}]`)이 아니라 **사실 id**
+#   (`facts[{id, role, support}]` · `facts.py add`가 준 F-000731 · 이전된 옛 행 SRC-0012)다. 판정은 모델이 근거 행에 적은 값이
+#   아니라 저장소의 판정 행(`ev_verdict` — fact-check가 낸 것)과 사실의 검증 상태(`ev_fact.verified_status`)에서만 온다
+#   (10-13 VST: 모델이 도메인 루트 주소로 근거 행에 T1·MATCH를 스스로 적었다 — 그 자리가 구조적으로 사라진다).
+#   옛 `evidence`만 있는 제안은 받지 않는다 — 호환 경로 없음(새 run은 facts를 쓴다).
+FACT_ID_RX = re.compile(r"^(?:F-\d+|SRC-\d+)$")
+FACT_ROLES = ("support", "background", "against")
+_RUN_ID_RX = re.compile(r"^(\d{6})_(kr|us)$")
+
+
+def _tier_num(v):
+    """판정·사실 티어 → 1·2·3(그 밖은 None). 'T1'·'1'·1 모두 받는다."""
+    s = str(v if v is not None else "").strip().upper().lstrip("T")
+    return int(s) if s in ("1", "2", "3") else None
+
+
+def _verdict_grade(rows: list, value_rev=1) -> dict:
+    """한 사실의 판정 행(한 묶음의 마지막 round) → {ok, worst, verdict, tier, rows, stale_rev} — 규칙은 `facts.grade_rows` 하나다
+    (2026-10-19 · Codex R04: 값 판보다 앞 판을 본 행은 세지 않고, 셀 행이 없으면 REVERIFY). 판정 표기는 대문자로 맞춰 본다."""
+    import facts as _f
+    return _f.grade_rows(rows, value_rev)
+
+
+def run_id_of(sig: dict, given: str = None):
+    """판정 행을 찾을 run id('261016_us') — 넘겨받은 값(시그널 파일 이름에서) → 시그널 `run_id` 순. 형식이 아니면 None
+    (그때는 이번 run 판정 없이 사실의 검증 상태만 본다)."""
+    for v in (given, (sig or {}).get("run_id")):
+        m = _RUN_ID_RX.match(str(v or "").strip().lower())
+        if m:
+            return f"{m.group(1)}_{m.group(2)}"
+    return None
+
+
+def fact_states(ids, run_id: str = None) -> dict:
+    """사실 id → 저장소 상태 {id: {exists, status, vtier, version, t1, run, match12, mismatch}}.
+
+    - `t1`  = 이번 run 주문 근거 묶음(track1)의 마지막 round 판정 등급(없으면 None — 판정표에 없다)
+    - `run` = 이번 run의 판정 등급(track1이 있으면 그것, 없으면 A·B 묶음 중 가장 늦게 판정된 묶음의 마지막 round)
+    - `match12` = MATCH(T1/T2)로 확인됐나 — 이번 run 판정이 있으면 그것, 없으면 사실의 검증 상태(verified · T1/T2)
+    - `mismatch` = 이번 run 판정이 MISMATCH이거나 사실이 disputed(MISMATCH 뒤 T1/T2 MATCH로 다시 서지 않았다)
+    `run_id`가 없으면 이번 run 판정은 없는 것으로 본다."""
+    out = {}
+    for fid in dict.fromkeys(str(i) for i in ids if i):
+        f = db.q1("SELECT id, verified_status, verified_tier, rev, value_rev FROM ev_fact WHERE id=?", (fid,))
+        if not f:
+            out[fid] = {"exists": False, "status": None, "vtier": None, "version": None, "value_rev": None, "t1": None, "run": None,
+                        "match12": False, "mismatch": False, "reverify": False}
+            continue
+        groups = {}
+        if run_id:
+            for r in db.q("SELECT id, batch, round, verdict, tier, fact_rev FROM ev_verdict WHERE run_id=? AND fact_id=? ORDER BY id",
+                          (run_id, fid)):
+                groups.setdefault(r.get("batch") or "", []).append(r)
+        last = {}
+        for b, rs in groups.items():
+            top = max(int(r.get("round") or 0) for r in rs)
+            last[b] = [r for r in rs if int(r.get("round") or 0) == top]
+        vrev = f.get("value_rev") or 1
+        t1 = _verdict_grade(last["track1"], vrev) if last.get("track1") else None
+        other = max((b for b in last if b != "track1"), key=lambda b: max(r["id"] for r in last[b]), default=None)
+        run = t1 or (_verdict_grade(last[other], vrev) if other is not None else None)
+        status, vtier = f.get("verified_status"), _tier_num(f.get("verified_tier"))
+        match12 = run["ok"] if run else (status == "verified" and vtier in (1, 2))
+        reverify = bool(run and run["worst"] == "REVERIFY")
+        out[fid] = {"exists": True, "status": status, "vtier": vtier, "version": f.get("rev"), "value_rev": vrev, "t1": t1, "run": run,
+                    "match12": bool(match12), "reverify": reverify,
+                    "mismatch": bool((run and run["worst"] in ("MISMATCH", "REVERIFY")) or status == "disputed")}
+    return out
+
+
+def fact_refs(p: dict) -> list:
+    """제안의 근거 사실 [(id, role)] — 역할이 비면 support로 본다(스키마 검사가 역할을 요구한다)."""
+    return [(str(f.get("id")).strip(), str(f.get("role") or "support")) for f in (p.get("facts") or [])
+            if isinstance(f, dict) and f.get("id")]
+
+
+def _facts_record(p: dict, states: dict) -> list:
+    """승인 행에 싣는 근거 기록 — 시그널의 facts 칸 + 승인 시점의 상태(검증 상태·이번 run 판정·사실 판 번호).
+    trades 기록이 이것을 그대로 옮긴다(execute) — '무엇을 근거로 샀나'가 승인·체결 기록만으로 재구성되게."""
+    rec = []
+    for f in p.get("facts") or []:
+        if not isinstance(f, dict) or not f.get("id"):
+            continue
+        s = states.get(str(f["id"]).strip()) or {}
+        rec.append({"id": str(f["id"]).strip(), "role": f.get("role") or "support", "support": f.get("support") or "",
+                    "status": s.get("status"), "verdict": ((s.get("run") or {}).get("verdict")), "version": s.get("version"),
+                    "value_rev": s.get("value_rev")})
+    return rec
+
+
+def _validate_facts(tag: str, p: dict) -> None:
+    """제안·재투자 후보 하나의 근거 칸 — facts[{id, role, support}]만 받는다. 어긋나면 run 전체 거부(스키마)."""
+    facts = p.get("facts")
+    if p.get("evidence") and not facts:
+        raise Rejection(f"{tag}: 옛 evidence 칸만 있다 — 새 run은 근거를 사실 id로 쓴다"
+                        f"(facts: [{{id, role, support}}] · `facts.py add`가 준 id). evidence는 더 받지 않는다")
+    if facts is None:
+        return
+    if not isinstance(facts, list):
+        raise Rejection(f"{tag}: facts가 배열이 아니다")
+    for j, f in enumerate(facts):
+        if not isinstance(f, dict):
+            raise Rejection(f"{tag}.facts[{j}]가 객체가 아니다")
+        fid = str(f.get("id") or "").strip()
+        if not FACT_ID_RX.match(fid):
+            raise Rejection(f"{tag}.facts[{j}]: 사실 id 형식이 아니다(F-000731 · SRC-0012): {f.get('id')!r}")
+        if f.get("role") not in FACT_ROLES:
+            raise Rejection(f"{tag}.facts[{j}] {fid}: role은 {'|'.join(FACT_ROLES)} 중 하나: {f.get('role')!r}")
+        if f["role"] == "support" and not str(f.get("support") or "").strip():
+            raise Rejection(f"{tag}.facts[{j}] {fid}: 받치는 사실인데 support(제안의 어느 부분을 받치나)가 비었다")
 
 
 def validate_signal(sig: dict, limits: dict, now: datetime, this_id: str = None, max_age: float = None) -> None:
@@ -492,14 +708,9 @@ def validate_signal(sig: dict, limits: dict, now: datetime, this_id: str = None,
             raise Rejection(f"{tag}: confidence는 0~1 실수여야 한다: {p['confidence']!r}")
         if not str(p.get("thesis", "")).strip():
             raise Rejection(f"{tag}: thesis가 비어 있다 (근거 없는 제안은 받지 않는다)")
-        ev = p.get("evidence", [])
-        if not isinstance(ev, list):
-            raise Rejection(f"{tag}: evidence가 배열이 아니다")
-        for j, e in enumerate(ev):
-            if not isinstance(e, dict) or "verdict" not in e:
-                raise Rejection(f"{tag}.evidence[{j}]: verdict 없는 근거는 받지 않는다")
+        _validate_facts(tag, p)             # 근거는 사실 id(facts[{id, role, support}]) — 옛 evidence만 있으면 거부
 
-    # ★ 재투자 후보(2026-10-15) — "현금이 생기면 다음에 살 것" 순서 목록. 제안과 같은 검증을 받는다(근거·판정표·크기 사유).
+    # ★ 재투자 후보(2026-10-15) — "현금이 생기면 다음에 살 것" 순서 목록. 제안과 같은 검증을 받는다(근거 사실·판정·크기 사유).
     cands = sig.get("refill_candidates")
     if cands is not None:
         if not isinstance(cands, list):
@@ -517,9 +728,7 @@ def validate_signal(sig: dict, limits: dict, now: datetime, this_id: str = None,
                 raise Rejection(f"{tag}: confidence는 0~1 실수여야 한다: {p['confidence']!r}")
             if not str(p.get("thesis", "")).strip():
                 raise Rejection(f"{tag}: thesis가 비어 있다 (근거 없는 후보는 받지 않는다)")
-            ev = p.get("evidence", [])
-            if not isinstance(ev, list) or any(not isinstance(e, dict) or "verdict" not in e for e in ev):
-                raise Rejection(f"{tag}: evidence는 verdict가 있는 근거 배열이어야 한다")
+            _validate_facts(tag, p)
 
 
 # ------------------------------------------------------------- 규율 SELL 생성
@@ -568,23 +777,54 @@ def discipline_sells(positions: list, limits: dict, peaks: dict) -> list:
                 "qty": qty,
                 "price": price,
                 "source": "discipline",
+                # 손익·추적 손절 — 위험을 줄이는 매도(전송 직전 가격이 더 빠져도 보낸다 · 2026-10-19 사용자 결정 · R08)
+                "risk_reducing": True,
                 "reasons": reasons,
                 "exempt_from_count_limit": True,
             })
     return out
 
 
+def is_risk_reducing(o: dict) -> bool:
+    """**위험을 줄이는 매도**인가 — 손절·추적 손절·논지 무효(소급) 매도(2026-10-19 사용자 결정 · Codex R08).
+    이 주문은 전송 직전 시세가 승인가보다 더 빠져도 보내고(execute.refresh_limit), 체결 추적도 하한 없이 시세를 따른다(fill).
+    모델 매도(`llm` · full_exit 포함)·자금 조달(`funding`)·이익실현 다리(`leg_kind: target`)·모든 매수는 아니다 — ±2% 규칙 그대로.
+    승인 파일에 `risk_reducing`이 찍혀 있으면 그것을 쓰고, 찍히기 전 승인은 이 규칙으로 판정한다."""
+    if str(o.get("action") or "").upper() != "SELL":
+        return False
+    src = o.get("source")
+    return src == "audit_reversal" or (src == "discipline" and o.get("leg_kind") != "target")
+
+
+def reversals_pending(market: str) -> list:
+    """이 시장의 대기 중인 감사 소급 행 — 저장소 `ex_reversal_event`를 id별로 접은 현재 상태(`db.reversals_pending`).
+    옛 원장(`reversals.pending`)과 같게 id 없는 행은 빼고 상태 `pending`만 본다. stops·fill·이어받기도 이 규칙을 쓴다.
+    소급(buy_unsupported)인데 승인 파일(buy_ref)·판정 행(fc_rows)이 없는 행은 `decide --mode post`가 낸 것이 아니다 —
+    void로 닫고 돌려주지 않는다(판단으로 되팔지 않는다 · FB-261017-9)."""
+    out = []
+    for r in db.reversals_pending(market):
+        if not (r.get("id") and r.get("status") == "pending"):
+            continue
+        if (r.get("kind") or "buy_unsupported") == "buy_unsupported" and not (r.get("buy_ref") and r.get("fc_rows")):
+            db.reversal_mark(r["id"], "void", note="buy_unsupported인데 buy_ref·fc_rows 없음 — decide --mode post가 낸 행이 아니다(FB-261017-9)")
+            print(f"  ★ 감사 소급 {r['id']} {r.get('ticker', '')} void — 도구 출처 없음", file=sys.stderr)
+            continue
+        out.append(r)
+    return out
+
+
 def audit_reversal_sells(snapshot: dict, market: str, already: set = None) -> list:
     """**감사 소급 — 주문 뒤 감사가 매수 근거를 뒤집은 종목은 기계가 판다**(2026-10-13 사용자: "매매 의사결정을 바꿔야 하는
-    감사 결과가 나오면 소급 적용"). `journal/audit_reversals.jsonl`의 이 시장 대기 행마다 SELL — 수량은 남은 수량과 보유 중 작은 쪽,
-    보유가 0이면 행을 void로 닫는다. 같은 종목에 이미 규율 매도가 있으면 이번엔 건너뛴다(다음 run이 남은 수량을 본다).
-    체결 확정은 fill이 원장에 적는다(`reversals.settle_trade`). 원장이 깨져도 승인 전체를 막지 않는다."""
+    감사 결과가 나오면 소급 적용"). 저장소 감사 소급 기록(`ex_reversal_event` · 옛 `journal/audit_reversals.jsonl`)의 이 시장 대기 행마다
+    SELL — 수량은 남은 수량과 보유 중 작은 쪽, 보유가 0이면 행을 void로 닫는다. 같은 종목에 이미 규율 매도가 있으면 이번엔 건너뛴다
+    (다음 run이 남은 수량을 본다). 체결 확정은 fill이 저장소에 적는다(`fill._settle_reversal`). 기록을 못 읽어도 승인 전체를 막지 않는다."""
     already = already or set()
     try:
-        import reversals as rv
-        rows = rv.pending(market, JOURNAL_DIR)
-    except Exception as e:                       # noqa: BLE001 — 원장 오류가 규율 매도·승인을 막지 않게
-        print(f"  ★ 감사 소급 원장을 읽지 못했다 — {type(e).__name__}: {e}", file=sys.stderr)
+        rows = reversals_pending(market)
+    except db.TestGuard:                         # 테스트가 임시 저장소 없이 왔다 — 삼키지 않는다
+        raise
+    except Exception as e:                       # noqa: BLE001 — 저장소 오류가 규율 매도·승인을 막지 않게
+        print(f"  ★ 감사 소급 기록을 읽지 못했다 — {type(e).__name__}: {e}", file=sys.stderr)
         return []
     positions = {p["ticker"]: p for p in (snapshot.get("balance") or {}).get("positions", []) if p.get("ticker")}
     prices = snapshot.get("prices") or {}
@@ -596,7 +836,7 @@ def audit_reversal_sells(snapshot: dict, market: str, already: set = None) -> li
         pos = positions.get(tic)
         pq = int((pos or {}).get("qty") or 0)
         if pq <= 0:
-            rv.mark(r["id"], "void", JOURNAL_DIR, note="보유 0 — 이미 팔렸다(규율·사람)")
+            db.reversal_mark(r["id"], "void", note="보유 0 — 이미 팔렸다(규율·사람)")
             continue
         qty = min(pq, int(r.get("qty") or 0))
         if qty <= 0:
@@ -611,7 +851,7 @@ def audit_reversal_sells(snapshot: dict, market: str, already: set = None) -> li
             "source": "audit_reversal", "full_exit": qty >= pq,
             "thesis_id": r.get("thesis_id") or None, "trigger_id": "audit_reversal", "reversal_id": r["id"],
             # 미국 주간거래(stops.py --daytime)는 손절·추적만 판다 — 소급은 손절과 같은 급(근거가 무너졌다)
-            "leg_kind": "stop",
+            "leg_kind": "stop", "risk_reducing": True,
             "reasons": [f"감사 소급 {r['id']} — {str(r.get('why') or '')[:160]} "
                         f"(판정표 {', '.join(r.get('fc_rows') or []) or '재채점'}) — 근거가 무너진 매수를 되돌린다"],
             "exempt_from_count_limit": True,
@@ -630,13 +870,7 @@ def thesis_exit_sells(snapshot: dict, market: str, already: set = None) -> list:
     없다. 종가를 기다리지 않는다 — 장중 시세가 닿으면 그 run이 판다(`--live`로 시세를 다시 받는다).
     """
     already = already or set()
-    store = JOURNAL_DIR / "theses.json"
-    if not store.exists():
-        return []
-    try:
-        theses = json.loads(store.read_text(encoding="utf-8")).get("theses") or []
-    except (OSError, json.JSONDecodeError):
-        return []
+    theses = db.theses_all()                  # 논지 원장 — 저장소 행(`jd_thesis`)을 옛 dict 모양 그대로
     import theses as th                       # 지연 import — theses.py가 이 모듈을 import한다
     positions = {p["ticker"]: p for p in (snapshot.get("balance") or {}).get("positions", [])
                  if p.get("ticker")}
@@ -686,6 +920,7 @@ def thesis_exit_sells(snapshot: dict, market: str, already: set = None) -> list:
                 "thesis_id": t.get("id"), "trigger_id": trg.get("id"),
                 # 다리 종류 — 미국 주간거래는 손절·추적만 판다(2026-10-12 사용자 결정 · stops.py --daytime)
                 "leg_kind": "stop" if is_stop else ("trail" if is_trail else "target"),
+                "risk_reducing": bool(is_stop or is_trail),     # 손절·추적은 위험 축소 · 목표(이익실현)는 아니다(R08)
                 "reasons": [f"논지 {t.get('id')} {trg.get('id')} "
                             f"{'손절' if is_stop else ('추적' if is_trail else '목표')} `{expr}` "
                             f"(시세 {ctx.get('price')}) — 가격 조건은 모델 재량 없이 즉시 판다"],
@@ -911,32 +1146,119 @@ def _forbidden(name: str, ticker: str, patterns: list) -> str:
 
 
 def thesis_by_id(tid: str):
-    """원장(`JOURNAL_DIR/theses.json`)에서 논지 하나. 없으면 None."""
+    """논지 원장(저장소 `db.thesis_get`)에서 논지 하나. 없으면 None."""
     if not tid:
         return None
-    try:
-        data = json.loads((JOURNAL_DIR / "theses.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return next((t for t in data.get("theses") or [] if t.get("id") == tid), None)
+    return db.thesis_get(tid)
 
 
 def held_theses_of(ticker: str) -> list:
-    """그 종목의 닫히지 않은 논지들(원장 `JOURNAL_DIR/theses.json`)."""
-    try:
-        data = json.loads((JOURNAL_DIR / "theses.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    return [t for t in data.get("theses") or [] if t.get("ticker") == ticker and t.get("status") != "closed"]
+    """그 종목의 닫히지 않은 논지들(저장소 논지 원장)."""
+    return [t for t in db.theses_all() if t.get("ticker") == ticker and t.get("status") != "closed"]
+
+
+def _avg_holding_w(positions: list, equity: float):
+    """이 시장 보유 종목의 평균 크기(%) — 보유 평가금액 합 ÷ 분모(포트폴리오) ÷ 종목 수. 보유·분모가 없으면 None.
+    새 종목 첫 매수(FB-261010-5)와 확인된 축 소액 보유(FB-261017-8)가 같은 식을 쓴다."""
+    live = [q for q in positions or [] if float(q.get("qty") or 0) > 0 and float(q.get("eval_amt") or 0) > 0]
+    if not live or not equity or equity <= 0:
+        return None
+    return sum(float(q["eval_amt"]) for q in live) / equity * 100 / len(live)
 
 
 def _open_up_axes() -> set:
-    """방향 `+`인 열린 전망의 축 id — '축이 확인돼 오르는 쪽'을 가리는 데 쓴다."""
-    try:
-        axes = (json.loads((JOURNAL_DIR / "market_map.json").read_text(encoding="utf-8")) or {}).get("axes") or []
-    except (OSError, json.JSONDecodeError):
-        return set()
+    """방향 `+`인 열린 전망의 축 id — '축이 확인돼 오르는 쪽'을 가리는 데 쓴다(저장소 지도 축)."""
+    axes = db.market_map_load().get("axes") or []
     return {a.get("id") for a in axes if a.get("direction") == "+" and (a.get("status") or "open") == "open"}
+
+
+# ── 요인 판정 집행(FB-261017-7 · 2026-10-17 사용자: "꺾이면 요인을 찾아서 저점매수를 할지 손절을 할지를 생각해야지 무지성으로 방향을
+#    정할 게 아니라") — 꺾인 요인의 종목 매수는 시그널 factor_judgments[]의 그 종목 결정이 '저점매수'+사유일 때만 통과한다.
+FACTOR_DECISIONS = ("저점매수", "유지", "정리")
+
+
+def factor_context(sig: dict, market: str, rid: str = None) -> dict:
+    """1단이 저장소에 쓴 이 run의 요인 상태(`db.factor_state` — market_map.py exposure --stamp)와 시그널 `factor_judgments[]`.
+    반환 {state: missing|ok, run_id, fired{요인: 상태 행}, drv_of_axis{축: 요인}, members{요인: 종목 집합}, judged{요인: 판정},
+    decisions{(요인, 종목): 결정}}. 상태가 없으면 missing — 막지 않는다(규율 전용·재투자 pass·옛 픽스처 · dispatch 문항이 missing을 본다)."""
+    rid = run_id_of(sig, rid)
+    out = {"state": "missing", "run_id": rid, "market": market, "fired": {}, "drv_of_axis": {}, "members": {}, "judged": {},
+           "decisions": {}}
+    if not rid:
+        return out
+    rows = db.factor_state(rid)
+    if not rows:
+        return out
+    out["state"] = "ok"
+    out["fired"] = {r["driver"]: r for r in rows if r.get("fired")}
+    for a in db.market_map_load().get("axes") or []:
+        if not a.get("id"):
+            continue
+        d = str(a.get("driver") or "").strip() or a["id"]
+        out["drv_of_axis"][a["id"]] = d
+        if d in out["fired"] and (a.get("status") or "open") == "open":
+            mem = out["members"].setdefault(d, set())
+            for n in list(a.get("names") or []) + list(a.get("beneficiaries") or []):
+                if isinstance(n, dict) and n.get("ticker") and (n.get("sign") or "+") != "-":
+                    mem.add(str(n["ticker"]).strip())
+    for d, r in out["fired"].items():
+        out["members"].setdefault(d, set()).update(str(m["ticker"]) for m in r.get("members") or [])
+    for fj in (sig or {}).get("factor_judgments") or []:
+        if isinstance(fj, dict) and str(fj.get("driver") or "").strip() and fj.get("state") in ("intact", "broken", "unknown") \
+                and str(fj.get("cause") or "").strip():
+            d = str(fj["driver"]).strip()
+            out["judged"][d] = fj
+            for dd in fj.get("decisions") or []:
+                if isinstance(dd, dict) and str(dd.get("ticker") or "").strip():
+                    out["decisions"][(d, str(dd["ticker"]).strip())] = dd
+    return out
+
+
+def _factor_drivers_of(fc: dict, p: dict, ticker: str) -> set:
+    """제안 하나가 걸린 요인 — 제안 축(axis_id·forecast_id)과 제안·보유 논지의 축이 속한 요인 ∪ 꺾인 요인의 멤버(지도 names·수혜 · 바스켓)."""
+    dv = fc.get("drv_of_axis") or {}
+    axes = {p.get("axis_id"), p.get("forecast_id")}
+    th = thesis_by_id(p.get("thesis_id"))
+    if th:
+        axes.add(th.get("axis_id"))
+    axes |= {t.get("axis_id") for t in held_theses_of(ticker)}
+    out = {dv[a] for a in axes if a and a in dv}
+    out |= {d for d, mem in (fc.get("members") or {}).items() if ticker in mem}
+    return out
+
+
+def factor_summary(fc: dict, sig: dict, final: list, positions: list) -> dict:
+    """approved `factor` — 꺾인 요인마다 판정이 있나 · 판정된 요인의 보유 멤버마다 결정이 있나 · 정리 결정에 이 run의 SELL이 있나.
+    short = 판정 없는 꺾인 요인 · 결정 빠진 보유 · SELL 없는 정리 중 하나라도 — dispatch/no_trade 게이트가 막는다."""
+    if fc.get("state") != "ok":
+        return {"state": fc.get("state") or "missing", "short": False, "run_id": fc.get("run_id"),
+                "why": "요인 상태 없음 — 1단 `market_map.py exposure --by driver --stamp`가 이 run을 재지 않았다(경고만)"}
+    held = {str(q.get("ticker")) for q in positions or [] if float(q.get("qty") or 0) > 0}
+    sells = {str(o.get("ticker")) for o in final or [] if o.get("action") == "SELL"}
+    unjudged, undecided, sell_missing, decisions = [], [], [], []
+    for d, st in sorted(fc["fired"].items()):
+        if d not in fc["judged"]:
+            unjudged.append(d)
+            continue
+        for tk in sorted(held & (fc["members"].get(d) or set())):
+            dd = fc["decisions"].get((d, tk))
+            if not dd:
+                undecided.append(f"{d}:{tk}")
+                continue
+            decisions.append({"driver": d, "ticker": tk, "decision": dd.get("decision")})
+            if dd.get("decision") == "정리" and tk not in sells:
+                sell_missing.append(f"{d}:{tk}")
+    why = []
+    if unjudged:
+        why.append(f"판정 없는 꺾인 요인 {', '.join(unjudged)}")
+    if undecided:
+        why.append(f"결정 빠진 보유 {', '.join(undecided)}")
+    if sell_missing:
+        why.append(f"정리인데 SELL 없음 {', '.join(sell_missing)}")
+    return {"state": "ok", "run_id": fc.get("run_id"), "fired": sorted(fc["fired"]), "judged": sorted(fc["judged"]),
+            "unjudged": unjudged, "undecided": undecided, "sell_missing": sell_missing, "decisions": decisions,
+            "short": bool(why), "why": "; ".join(why) if why else
+            (f"꺾인 요인 {', '.join(sorted(fc['fired']))} — 전부 판정·결정" if fc["fired"] else "꺾인 요인 없음")}
 
 
 def rotation_candidates(positions: list, exclude: set) -> list:
@@ -987,6 +1309,144 @@ def tag_sell(p: dict) -> tuple:
     return tid, trg, None
 
 
+def first_stop(p: dict, thesis: dict = None):
+    """BUY 제안의 손절선 — 제안 `exits[]`와 논지 `exit_triggers[]`의 `price <= N`(또는 `<`) 중 최댓값(가장 먼저 걸리는 선). 없으면 None.
+    전송 직전 전제 재검사(execute.premise_check)가 쓴다(2026-10-19 · Codex J04)."""
+    import theses as th
+    vals = []
+    for trg in list(p.get("exits") or []) + list((thesis or {}).get("exit_triggers") or []):
+        m = th.COND.match(str(trg.get("check") or ""))
+        if m and m.group(1) == "price" and m.group(2) in ("<=", "<"):
+            vals.append(float(m.group(3)))
+    return max(vals) if vals else None
+
+
+def target_floor(limits: dict, market: str) -> float:
+    """수익 바닥(%) — 한도 파일 position_sizing.min_target_gap_pct, 실계좌면 시장별 세후 값. 심사와 전송 직전 재검사가 같은 바닥을 쓴다."""
+    sizing = limits.get("position_sizing") or {}
+    min_gap = float(sizing.get("min_target_gap_pct") or 0)
+    by_mkt = sizing.get("min_target_gap_pct_by_market") or {}
+    if account_mode(limits) != "paper" and isinstance(by_mkt, dict) and by_mkt.get(market):
+        min_gap = float(by_mkt[market])
+    return min_gap
+
+
+def format_required(limits: dict, today: str = "") -> bool:
+    """형식 적용일(limits.scenario_cond_required — 시나리오 cond·목표 기준·논지 구조가 같은 날부터 위반 · 그 전엔 경고). note_lint와 같은 규칙."""
+    val = limits.get("scenario_cond_required")
+    if isinstance(val, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", val.strip()):
+        return (today or datetime.now(KST).strftime("%Y-%m-%d")) >= val.strip()
+    return bool(val)
+
+
+_FLOOR_RX = re.compile(r"바닥|미달|문턱|하한|floor|min_target|넘기|맞추")
+_SRC_TOKEN_RX = re.compile(r"\[?S\d+\]?|F-\d{6}|R\d+-\d+|스윙 고점|구간")
+_CONF_K_RX = re.compile(r"기준\s*(\d+)\s*개\s*겹침")
+
+
+def least_arbitrary_level(levels: list, live: float):
+    """현재가 위 수준 중 임의성이 가장 낮은 것 — 겹침(confluence_n) 중 기준 개수가 가장 많은 것(같으면 가까운 것), 없으면 1차 저항. 없으면 None.
+    가격 수준 파일(price_levels.py)이 이미 '겹칠수록 임의성이 낮다'고 적는 기준이다(새 숫자 아님)."""
+    ups = [l for l in levels or [] if isinstance(l.get("value"), (int, float)) and float(l["value"]) > live]
+    conf = []
+    for l in ups:
+        if str(l.get("kind") or "").startswith("confluence_"):
+            m = _CONF_K_RX.search(str(l.get("method") or ""))
+            conf.append((int(m.group(1)) if m else 0, -float(l["value"]), l))
+    if conf:
+        return max(conf, key=lambda x: (x[0], x[1]))[2]
+    return next((l for l in ups if l.get("kind") == "resistance_1"), None)
+
+
+def chosen_reason_ok(text) -> bool:
+    """임의성 낮은 수준 대신 다른 수준을 고른 사유 — 20자 이상 · 출처 토큰(S번호·F-id·R행·스윙 고점·구간) · 바닥 문턱을 가리키지 않음."""
+    t = str(text or "").strip()
+    return len(t) >= 20 and not _FLOOR_RX.search(t) and bool(_SRC_TOKEN_RX.search(t))
+
+
+def base_rate_info(p: dict, market: str, ticker: str):
+    """이 제안 상태(이동평균 아래·급등 직후 …)와 시계에 맞는 조건부 기저율 행(co_base_rate · 마지막 계산) — 없으면 None(미측정 · 지어내지 않는다).
+    시계 = horizon_days 이하 중 가장 긴 HORIZONS 값(35일이면 20일로 표시)."""
+    import base_rates as br
+    try:
+        hz = int(p.get("horizon_days") or 20)
+    except (TypeError, ValueError):
+        hz = 20
+    window = max([h for h in br.HORIZONS if h <= hz] or [min(br.HORIZONS)])
+    try:
+        rows = db.bars(market.upper(), str(ticker))
+        code = br.state_of(list(reversed(rows)), db.base_rate_codes(market, ticker, window)) if rows else "all"
+        r = db.base_rate_latest(market, ticker, code, window) or (db.base_rate_latest(market, ticker, "all", window) if code != "all" else None)
+    except Exception:                                # noqa: BLE001 — 기저율은 보조 정보다(못 읽으면 미측정)
+        return None
+    if not r:
+        return None
+    return {"cond": r["condition"], "n": r.get("n"), "median_pct": r.get("median_ret"), "hit_pct": r.get("hit_rate"), "horizon_days": window,
+            "as_of": r.get("as_of"), "base_median_pct": r.get("base_median_ret"), "base_n": r.get("base_n")}
+
+
+def target_basis_check(p: dict, live_raw: float, market: str, limits: dict, required: bool) -> tuple:
+    """★ 목표 기준(2026-10-19 · Codex J01) — 노리는 상승폭의 닻을 문턱 검사 **전에** 고정한다. 반환 (거부 사유 | None, 정보 dict, 경고 | None).
+    ① target_basis{level_kind, level_price, level_source, chosen_reason}이 없으면 거부(적용일 전엔 경고) ② 목표까지 거리는 여기서 계산 ·
+    ③ 1차 고정 목표와 0.5% 넘게 다르면 불일치 ④ 기준 수준이 바닥 미만이면 '목표 여유 없음' ⑤ 임의성 낮은 수준(겹침 최다 → 1차 저항)이 아닌
+    수준을 골랐으면 선택 사유가 20자 이상·출처 토큰·바닥 문턱을 가리키지 않아야 ⑥ expected_upside_pct는 목표까지 거리를 넘을 수 없다(analyst·fixed 제외).
+    하나금융 사례: 1차 저항 +9.9%가 바닥(10.3%)에 못 미치자 사유 없이 2차 저항으로 옮겼다 — ⑤가 그 자리다. 바닥·최소 건수는 그대로."""
+    info = {}
+    tb = p.get("target_basis")
+    if not isinstance(tb, dict) or not tb.get("level_kind") or tb.get("level_price") in (None, ""):
+        msg = "목표 기준 없음 — target_basis{level_kind, level_price, level_source, chosen_reason}를 적어라(노리는 상승폭의 닻 · 문턱 전에 고정)"
+        return (msg, info, None) if required else (None, info, msg + " — 적용일 전이라 경고만")
+    kind = str(tb["level_kind"])
+    try:
+        price = float(tb["level_price"])
+    except (TypeError, ValueError):
+        return ("목표 기준 없음 — level_price가 숫자가 아니다", info, None)
+    up_to = (price / live_raw - 1) * 100 if live_raw > 0 else None
+    info.update({"level_kind": kind, "level_price": price, "level_source": tb.get("level_source"),
+                 "upside_to_target_pct": None if up_to is None else round(up_to, 2)})
+    fmt = ",.0f" if market == "KR" else ",.2f"
+    tgt = first_target(p, thesis_by_id(p.get("thesis_id")))
+    if tgt is not None and price > 0 and abs(tgt / price - 1) > 0.005:
+        return (f"목표 기준 불일치 — 1차 목표 {tgt:{fmt}} ≠ 기준 수준 {kind} {price:{fmt}}(0.5% 넘게 다르다) · 출구와 같은 수준을 닻으로 적어라", info, None)
+    if kind == "analyst" and not re.match(r"F-\d{6}", str(tb.get("level_source") or "")):
+        return ("목표 기준 불일치 — analyst 기준은 level_source가 그 목표가를 담은 사실 id(F-…)여야 한다", info, None)
+    min_gap = target_floor(limits, market)
+    if min_gap > 0 and up_to is not None and up_to < min_gap:
+        return (f"목표 여유 없음 — 기준 수준 {kind} {price:{fmt}}이 현재가 {live_raw:{fmt}} 대비 {up_to:+.1f}% (< 바닥 {min_gap:g}%) · "
+                f"바닥을 넘기려고 수준을 바꾸지 않는다", info, None)
+    try:
+        levels = db.levels_latest(market, str(p.get("ticker")))
+    except Exception:                                # noqa: BLE001
+        levels = []
+    la = least_arbitrary_level(levels, live_raw) if levels else None
+    info["least_arbitrary"] = {"kind": la.get("kind"), "price": la.get("value")} if la else None
+    if la and kind not in ("analyst", "fixed", la.get("kind")) and not chosen_reason_ok(tb.get("chosen_reason")):
+        la_up = (float(la["value"]) / live_raw - 1) * 100 if live_raw > 0 else 0
+        return (f"목표 기준 선택 사유 없음 — 임의성 낮은 기준 {la.get('kind')} {float(la['value']):{fmt}}({la_up:+.1f}%) 대신 {kind}를 골랐는데 "
+                f"사유가 비었거나 바닥 문턱을 가리킨다(20자 이상 · 출처 토큰 · '바닥·미달·문턱' 아닌 수준 자체의 근거)", info, None)
+    up = p.get("expected_upside_pct")
+    if up is not None and up_to is not None and kind not in ("analyst", "fixed") and float(up) > up_to + 0.2:
+        return (f"기대 상승폭 불일치 — expected_upside_pct {float(up):.1f}% > 목표까지 거리 {up_to:.1f}%({kind}) · 노리는 폭은 닻 수준을 넘을 수 없다",
+                info, None)
+    return None, info, None
+
+
+def target_line(info: dict, br_: dict, market: str) -> str:
+    """승인 주문의 목표 줄 — '목표까지 거리 +9.9%(resistance_1 134,650) · 조건부 중앙값 +7.04%(below_ma20 · n=115 · +20일) · 기준선 +2.70%(n=312)'.
+    서로 다른 시계(목표는 논지 시계 · 기저율은 +20일)를 같은 양으로 비교하지 않는다 — 시계를 함께 적는다."""
+    if not info.get("level_kind"):
+        return ""
+    fmt = ",.0f" if market == "KR" else ",.2f"
+    s_ = (f"목표까지 거리 {info['upside_to_target_pct']:+.1f}%({info['level_kind']} {info['level_price']:{fmt}})"
+          if info.get("upside_to_target_pct") is not None else f"목표 {info['level_kind']}")
+    if br_ and br_.get("median_pct") is not None:
+        s_ += (f" · 조건부 중앙값 {float(br_['median_pct']):+.2f}%({br_['cond']} · n={br_.get('n')} · +{br_['horizon_days']}일)"
+               + (f" · 기준선 {float(br_['base_median_pct']):+.2f}%(n={br_.get('base_n')})" if br_.get("base_median_pct") is not None else ""))
+    else:
+        s_ += " · 조건부 중앙값 미측정"
+    return s_
+
+
 def first_target(p: dict, thesis: dict = None):
     """BUY 제안의 **1차 목표** — 제안 `exits[]`와 논지 `exit_triggers[]`의 `price >= N`(또는 `>`) 중 최솟값.
     진입 트리거(`triggers[]` — 돌파 진입도 `price >=`다)·무효 조건은 보지 않는다. 없으면 None."""
@@ -999,11 +1459,158 @@ def first_target(p: dict, thesis: dict = None):
     return min(vals) if vals else None
 
 
+# ── 회차 기억 — 거부 회피 재실행은 그 제안만 막는다(2026-10-19) ─────────────────────────────────────────────
+#   거부를 피하려고 시그널을 고쳐 다시 돌리는 것은 금지다(stage5_decide.md). 예전에는 기계가 '어느 제안이 고쳐졌는가'를 몰라 전송 직전
+#   점검이 run 전체를 세웠고, 되돌린 뒤에도 깨끗한 주문까지 막혔다(261019 국내 — 하나금융 근거 사실 교체 → 승인 2건까지 미전송).
+#   이제 회차마다 제안의 판단 칸 지문·결과를 저장소 ex_screen에 남기고, 유효성 사유로 거부된 제안이 고쳐져 다시 오면 그 제안만
+#   '거부 회피 재실행'으로 거부한다. 같은 지문이면 회피가 아니다(그대로 다시 판정한다).
+# 트리거에서 빼는 유효성 사유 — 데이터 가용성(현재가)과 채우기 루프(요인 판정을 적어라)는 고쳐서 다시 내는 것이 정당하다.
+# '논지 근거 … 없다'도 뺀다 — 원장에 미리 적힌 그 논지의 근거 번호를 제안에 넣는 것은 새 근거를 골라 오는 것이 아니다(2026-10-19 연기 시험)
+TAINT_SKIP = ("현재가를 알 수 없다", "요인 판정 없음", "요인 판정에 이 종목이 없다", "요인 판정 저점매수인데 사유가 없다", "논지 근거",
+              "목표 기준 없음", "expected_upside_pct 없음")      # 빈 칸을 채우는 것은 정당한 고침(2026-10-19 · J01)
+# 제안을 안 고치고 바깥(유니버스)을 바꿔 뒤집는 사유 — 같은 run에 그 종목이 유니버스에 들어오면 회피로 본다
+TAINT_STICKY = ("유니버스 밖",)
+# 제안 밖(요인 판정 결정)을 바꿔 뒤집는 사유 — 그 결정을 같이 저장해 비교한다
+_TAINT_CTX_RX = re.compile(r"^요인 판정 (유지|정리)")
+# 지문에 넣는 판단 칸 — 근거 사실은 (id, 역할)로 따로 넣는다. `facts.py correct`는 id를 유지하므로 값 교정은 지문을 안 바꾼다
+SCREEN_FIELDS = ("action", "ticker", "qty", "weight_target_pct", "expected_upside_pct", "size_why", "increase_when", "entry",
+                 "exits", "thesis_id", "confidence", "concentration_why", "small_why", "horizon_days", "target_basis")
+
+
+def screen_canon(p: dict) -> dict:
+    """제안의 판단 칸(정렬한 JSON의 원천) — 지문과 '바뀐 칸' 표시에 쓴다."""
+    c = {k: p.get(k) for k in SCREEN_FIELDS if p.get(k) not in (None, "", [], {})}
+    c["facts"] = sorted([list(x) for x in fact_refs(p)])
+    ax = p.get("axis_id") or p.get("forecast_id")
+    if ax:
+        c["axis"] = ax
+    return c
+
+
+def screen_fp(canon: dict) -> str:
+    return hashlib.sha256(json.dumps(canon, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def screen_ctx(p: dict, ticker: str, factor: dict = None, price=None) -> dict:
+    """제안 밖에서 그 판정을 가르는 값 — 1차 목표(논지 원장의 목표 다리 포함) · 꺾인 요인의 이 종목 결정 · 목표 기준 수준(J01) ·
+    심사 때 현재가(J03 결과 표의 결정가)."""
+    factor = factor or {}
+    tgt = first_target(p, thesis_by_id(p.get("thesis_id"))) if p.get("action") == "BUY" else None
+    fac = []
+    for d in sorted(factor.get("fired") or {}):
+        dd = (factor.get("decisions") or {}).get((d, ticker))
+        if dd:
+            fac.append([d, dd.get("decision")])
+    tb = p.get("target_basis") if isinstance(p.get("target_basis"), dict) else {}
+    out = {"target": tgt, "factor": fac, "level_kind": tb.get("level_kind"), "level_price": tb.get("level_price")}
+    if price is not None:
+        out["price"] = price
+    return out
+
+
+def taint_of(prior: list, ticker: str, action: str, canon: dict, ctx: dict):
+    """이전 회차에서 유효성 사유로 거부된 같은 제안이 그 뒤 고쳐져 왔으면 거부 사유 문장, 아니면 None."""
+    for r in prior or []:
+        if (r.get("ticker"), r.get("action"), r.get("outcome"), r.get("why_class")) != (ticker, action, "rejected", "validity"):
+            continue
+        why = str(r.get("why") or "")
+        if any(k in why for k in TAINT_SKIP):
+            continue
+        head = f"거부 회피 재실행 — pass {r.get('pass_no')}에서 '{why[:60]}'로 거부된 뒤 "
+        tail = " (거부는 보고만 · 다음 run이 다시 본다)"
+        if any(k in why for k in TAINT_STICKY):
+            if ctx.get("in_universe"):
+                return head + "같은 run에 유니버스에 들어왔다" + tail
+            continue
+        if _TAINT_CTX_RX.match(why):
+            if (r.get("ctx") or {}).get("factor") != ctx.get("factor"):
+                return head + "요인 판정 결정이 바뀌었다" + tail
+            continue
+        if any(k in why for k in ("목표 여유 없음", "상승 여지 바닥 미달", "목표 기준", "기대 상승폭 불일치")):
+            oc = r.get("ctx") or {}
+            if (oc.get("level_kind"), oc.get("level_price")) != (ctx.get("level_kind"), ctx.get("level_price")):
+                return (head + f"목표 기준이 바뀌었다 {oc.get('level_kind')} {oc.get('level_price')} → "
+                        f"{ctx.get('level_kind')} {ctx.get('level_price')}" + tail)
+            if oc.get("target") != ctx.get("target"):
+                return head + "1차 목표가 바뀌었다" + tail
+            if "목표 여유 없음" in why:
+                continue
+        old = r.get("canon") or {}
+        if old != canon:
+            changed = sorted(k for k in set(old) | set(canon) if old.get(k) != canon.get(k))
+            return head + "·".join(changed) + "이(가) 바뀌었다" + tail
+    return None
+
+
+def _adopt_thesis_evidence(final: list, approved_name: str, now) -> list:
+    """번호 없는 옛 논지로 매수가 처음 승인되면 그 제안의 받치는 사실 번호를 논지 근거로 채택해 써 넣는다(2026-10-19 · 점진 통일).
+    원장 기록(corrections)을 남긴다. 실패는 승인 실패다(조용히 넘기면 논지가 계속 기계가 모르는 근거로 남는다). 채택한 논지 id 목록."""
+    done = []
+    for o in final or []:
+        tid = o.get("thesis_id")
+        if o.get("source") != "llm" or o.get("action") != "BUY" or not tid:
+            continue
+        th = thesis_by_id(tid)
+        if not th or any(isinstance(e, dict) and e.get("fact_id") for e in th.get("evidence") or []):
+            continue
+        sup = [str(f.get("id")) for f in o.get("facts") or [] if isinstance(f, dict) and f.get("id")
+               and (f.get("role") or "support") == "support"]
+        if not sup:
+            continue
+        day = now.strftime("%Y-%m-%d")
+
+        def fn(t, sup=sup):
+            t.setdefault("evidence", [])
+            for fid in sup:
+                t["evidence"].append({"fact_id": fid, "role": "support", "as_of": day, "added": f"approved {approved_name}",
+                                      "claim": _fact_line_safe(fid)})
+            t.setdefault("corrections", []).append({"ts": day, "what": "근거 채택 " + " ".join(f"+{x}" for x in sup) + " (승인 시 자동)",
+                                                    "why": "논지 근거에 사실 번호가 없었다 — 첫 승인 제안의 받치는 사실을 근거로 둔다"})
+            return t
+        try:
+            db.thesis_update(tid, fn)
+        except db.TestGuard:
+            raise
+        except Exception as e:                       # noqa: BLE001
+            raise Rejection(f"논지 근거 채택 실패({tid}) — {type(e).__name__}: {e}")
+        done.append(tid)
+    if done:
+        print(f"  · 논지 근거 채택(번호 없던 옛 논지) {', '.join(done)} — 승인 제안의 받치는 사실을 근거로 기록")
+    return done
+
+
+def _fact_line_safe(fid: str) -> str:
+    try:
+        import facts as _f
+        return _f.render_line(fid)[:120]
+    except Exception:                                # noqa: BLE001 — 한 줄 렌더 실패가 채택을 막지 않는다
+        return fid
+
+
+def _why_class(why: str) -> str:
+    w = str(why or "")
+    if w.startswith("거부 회피"):
+        return "taint"
+    return "validity" if any(k in w for k in VALIDITY_REJECTS) else "limit"
+
+
 def screen_proposals(sig: dict, limits: dict, watchlist: dict,
-                     balance: dict, prices: dict, sup_break: dict = None, post_bal: dict = None) -> tuple:
+                     balance: dict, prices: dict, sup_break: dict = None, post_bal: dict = None, run_id: str = None,
+                     factor: dict = None, prior: list = None) -> tuple:
     """proposal별 판정. 반환 (accepted, rejected). `sup_break` = {종목: 사유} — 지지 구간 종가 이탈(support_break.ticker_map).
-    `post_bal` = 같은 run의 규율·논지·소급 매도 뒤 잔고(`_after_sells`) — gap 채우기 여유(fill_room_pct)만 이것으로 잰다."""
+    `post_bal` = 같은 run의 규율·논지·소급 매도 뒤 잔고(`_after_sells`) — gap 채우기 여유(fill_room_pct)만 이것으로 잰다.
+    `run_id` = 판정 행을 찾을 run('261016_us' · 없으면 시그널 run_id) — 근거 사실의 이번 run 판정(`fact_states`).
+    `factor` = `factor_context` — 꺾인 요인의 종목 BUY는 그 종목의 요인 판정 결정이 '저점매수'+사유일 때만 통과(FB-261017-7).
+    `prior` = 이 run의 앞 회차 기록(`db.screen_rows`) — 유효성 사유로 거부된 제안이 고쳐져 오면 그 제안만 '거부 회피 재실행'으로 거부."""
     sup_break = sup_break or {}
+    factor = factor or {}
+    # 근거가 틀렸다고 판정된 논지(2026-10-19) — 고치거나(set-evidence) 닫기 전에는 그 논지의 매수를 받지 않는다
+    under_review = {r["id"]: r for r in db.theses_under_review()}
+    # 근거 사실 상태는 한 번에 읽는다(제안마다 저장소를 다시 열지 않게) — 사실 id가 없으면 저장소를 열지도 않는다
+    fstates = fact_states(
+        [fid for p in sig.get("proposals") or [] if isinstance(p, dict) for fid, _ in fact_refs(p)],
+        run_id_of(sig, run_id),
+    )
     rules = limits.get("reject_rules", {})
     market = sig["market"]
     positions = balance.get("positions", [])
@@ -1020,12 +1627,9 @@ def screen_proposals(sig: dict, limits: dict, watchlist: dict,
     pfl = pf_local(pf, market, balance)
     equity = pfl["equity"]
     ax_idx = axis_index()
-    ax_exp = axis_exposure(pf, market, ax_idx)
+    ax_base = axis_exposure(pf, market, ax_idx)      # 양 시장 보유의 축 노출 — 이번 주문은 exposure_after가 더한다
     # ★ 집중은 상한이 아니라 **명분이 붙어야 하는 선**이다(2026-09-22 사용자: "무지성 상수 제한 말고 판단").
-    #   이번 주문 뒤 종목·축 비중이 이 선을 넘기는 제안은 `concentration_why`가 있어야 한다.
-    disc = limits.get("concentration_disclose_pct") or {}
-    disc_pos = disc.get("position")
-    disc_axis = disc.get("axis")
+    #   이번 주문 뒤 종목·축 비중이 이 선(`concentration_disclose_pct`)을 넘기는 제안은 `concentration_why`가 있어야 한다.
 
     accepted, rejected = [], []
     notes = [pf["why"]]
@@ -1046,14 +1650,22 @@ def screen_proposals(sig: dict, limits: dict, watchlist: dict,
                      if equity > 0 else 0.0)
     real_shares = account_mode(limits) != "paper"   # 실계좌는 주 단위 최소 1주(2026-10-15 사용자 결정)
 
-    def reject(p, why):
-        rejected.append({"ticker": p.get("ticker", "?"), "action": p.get("action", "?"), "why": why})
+    def reject(p, why, **extra):
+        rejected.append({"ticker": p.get("ticker", "?"), "action": p.get("action", "?"), "why": why, **extra})
 
     for p in sig["proposals"]:
         ticker = p["ticker"]
         action = p["action"]
         if action == "HOLD":
             continue
+
+        # 회차 기억(2026-10-19) — 원본 제안으로 잰다(아래에서 p를 small_why 자동 사유로 바꾸기 전에)
+        if prior:
+            why_t = taint_of(prior, ticker, action, screen_canon(p),
+                             {**screen_ctx(p, ticker, factor), "in_universe": ticker in universe})
+            if why_t:
+                reject(p, why_t, why_class="taint")
+                continue
 
         # 예수금을 모르면 매수 규모를 계산할 수도, 현금 하한을 지킬 수도 없다.
         # 미확인을 0으로 뭉개면 엉뚱한 사유로 거부되어 원인 추적이 어려워진다.
@@ -1078,45 +1690,116 @@ def screen_proposals(sig: dict, limits: dict, watchlist: dict,
             reject(p, f"지지 구간 종가 이탈 — {sup_break[ticker]} · 이 run은 무효 조건 재판정만(추가 매수 없음 · 이어받기 '## 지지 이탈')")
             continue
 
+        # 논지 재검토(2026-10-19) — 근거 사실이 틀렸다고 판정된 논지의 매수는 받지 않는다. 출구는 주문을 고쳐 다시 내는 것이 아니라
+        #   논지를 처리하는 것이다(theses.py set-evidence로 근거를 다시 세우거나 set-status closed) — 새 근거의 매수는 다음 run.
+        if action == "BUY" and under_review:
+            tids = [p.get("thesis_id")] if p.get("thesis_id") else [t.get("id") for t in held_theses_of(ticker)]
+            hit = next((under_review[t] for t in tids if t in under_review), None)
+            if hit:
+                reject(p, f"논지 재검토 중 — {hit['id']}의 근거 {', '.join(f['fact_id'] for f in hit['facts'])} MISMATCH · "
+                          f"`theses.py set-evidence`로 근거를 다시 세우거나 `set-status closed`로 닫아라(새 근거의 매수는 다음 run)")
+                continue
+
+        # 요인 판정(FB-261017-7) — 꺾인 요인의 종목은 원인·상태·종목별 결정을 적기 전에는 사지 않고, 결정이 '저점매수'+사유일 때만 산다.
+        #   방향을 미리 정하지 않는다 — 저점매수·유지·정리는 run이 그때 판정한다(사람에게 묻지 않는다).
+        if action == "BUY" and factor.get("fired"):
+            why_f = None
+            for d in sorted(_factor_drivers_of(factor, p, ticker) & set(factor["fired"])):
+                st_f = factor["fired"][d]
+                trig = " · ".join(x for x in (
+                    f"바스켓 고점 대비 {st_f.get('drawdown_pct')}% ≤ −{st_f.get('band3_pct')}%" if st_f.get("fired_dd") else "",
+                    f"지난 세션 규칙 매도 {st_f.get('sells_n')}건({', '.join(st_f.get('sells_tickers') or [])})" if st_f.get("fired_sell") else "")
+                    if x)
+                dd = factor["decisions"].get((d, ticker))
+                if d not in factor["judged"]:
+                    why_f = (f"요인 판정 없음 — 요인 `{d}`가 꺾였다({trig}) · 시그널 factor_judgments[]에 원인·상태·종목별 결정"
+                             f"(저점매수|유지|정리)을 적기 전에는 이 요인의 매수·추가를 받지 않는다(노트 §7 [요인 판정])")
+                elif not dd:
+                    why_f = f"요인 판정에 이 종목이 없다 — 요인 `{d}`의 factor_judgments[].decisions[]에 {ticker}(저점매수|유지|정리 · 사유)를 적어라"
+                elif dd.get("decision") != "저점매수":
+                    why_f = f"요인 판정 {dd.get('decision')} — 요인 `{d}`가 꺾인 동안 {ticker} 매수는 결정 '저점매수'+사유일 때만 통과한다"
+                elif not str(dd.get("why") or "").strip():
+                    why_f = f"요인 판정 저점매수인데 사유가 없다 — 요인 `{d}` {ticker} decisions[].why"
+                else:
+                    notes.append(f"{ticker} 요인 `{d}` 꺾임 — 판정 저점매수: {str(dd.get('why'))[:100]}")
+                    continue
+                break
+            if why_f:
+                reject(p, why_f)
+                continue
+
         min_conf = rules.get("min_confidence")
         if min_conf is not None and p["confidence"] < min_conf:
             reject(p, f"confidence {p['confidence']:.2f} < {min_conf}")
             continue
 
-        verdicts = [str(e.get("verdict", "")).upper() for e in p.get("evidence", [])]
-        if rules.get("reject_if_any_mismatch", True) and "MISMATCH" in verdicts:
-            reject(p, "근거에 MISMATCH 포함 (fact-check 불일치)")
+        # ★ 근거는 사실 id다(2026-10-17) — 판정은 저장소(`ev_verdict`·`ev_fact.verified_status`)에서만 읽는다(`fact_states`).
+        #   역할 규칙은 `facts.decide`(track1 pass·drop)와 같다: 제안이 기대는 사실(support·background)은 저장소에 있어야 하고
+        #   MISMATCH가 없어야 한다 · 미검증(UNVERIFIED_T1)과 MATCH(T1/T2) 요구는 받치는 사실(support)만 본다 — 배경·반대 사실 하나가
+        #   T1이라고 매수가 서지 않는다 · 반대 사실(against)은 통과·제외를 바꾸지 않는다(틀린 반대 근거가 매수를 막을 이유는 없다).
+        refs = fact_refs(p)
+        sup_ids = [fid for fid, role in refs if role == "support"]
+        lean_ids = [fid for fid, role in refs if role != "against"]
+        sup_note = f" — 받치는 사실 {', '.join(sup_ids)}" if sup_ids else " — 받치는 사실(role=support) 0개"
+        if action == "BUY":
+            gone = [fid for fid in lean_ids if not fstates.get(fid, {}).get("exists")]
+            if gone:
+                reject(p, f"근거 사실 없음 — 저장소에 없는 사실 id {', '.join(gone)} "
+                          f"(`facts.py add`가 준 id만 · `db.py import`가 missing으로 알린다)")
+                continue
+        # ★ 주문은 논지의 근거 위에 선다(2026-10-19) — 제안의 받치는 사실 = 그 논지의 받치는 근거(더 많지도 적지도 않게). 받치는 사실이
+        #   틀리면 곧 논지가 틀린 것이 되어 재검토 → 논지 처리로 이어진다(제안에만 있던 틀린 사실 때문에 부족 검사가 run을 몰아붙인 261019
+        #   국내의 교착을 막는다). 새 받치는 사실은 theses.py set-evidence로 논지에 먼저 넣는다. 번호 없는 옛 논지는 건너뛴다
+        #   (그 논지로 매수가 처음 승인될 때 제안 근거를 채택해 써 넣는다 — run() 끝).
+        if action == "BUY" and p.get("thesis_id"):
+            th_need = {str(e.get("fact_id")) for e in ((thesis_by_id(p.get("thesis_id")) or {}).get("evidence") or [])
+                       if isinstance(e, dict) and e.get("fact_id") and (e.get("role") or "support") == "support"}
+            lack, extra = sorted(th_need - set(sup_ids)), sorted(set(sup_ids) - th_need)
+            if th_need and (lack or extra):
+                reject(p, f"논지 근거와 제안의 받치는 사실이 다르다 — 주문은 논지 {p.get('thesis_id')}의 근거 위에 선다"
+                          + (f" · 빠짐 {', '.join(lack)}" if lack else "") + (f" · 논지에 없음 {', '.join(extra)}" if extra else "")
+                          + " (새 받치는 사실은 theses.py set-evidence로 논지에 먼저 넣는다)")
+                continue
+        def _srev(fid):
+            return ((fstates.get(fid, {}).get("run") or {}).get("stale_rev") or {})
+        rever = [fid for fid in lean_ids if fstates.get(fid, {}).get("reverify")]
+        fixed_wrong = [fid for fid in rever if _srev(fid).get("worst") == "MISMATCH"]     # 틀린 값을 고쳤다 — 고친 값은 아직 판정 전
+        mism = [fid for fid in lean_ids if fstates.get(fid, {}).get("mismatch") and fid not in rever]
+        if rules.get("reject_if_any_mismatch", True) and (mism or fixed_wrong):
+            reject(p, "근거에 MISMATCH 포함 (fact-check 불일치) — " + ", ".join(
+                mism + [f"{fid}(교정됨 rev {_srev(fid).get('value_rev')} — 고친 값으로 재판정 필요)" for fid in fixed_wrong]))
+            continue
+        if rules.get("reject_if_any_mismatch", True) and rever:
+            # ★ 값이 판정 뒤에 바뀐 근거(2026-10-19 · Codex R04) — 옛 MATCH는 세지 않는다. 지금 값을 다시 판정해야 선다.
+            reject(p, "재판정 필요 — " + "; ".join(
+                f"{fid} 판정은 rev {_srev(fid).get('verdict_rev')} 기준, 값은 rev {fstates[fid].get('value_rev')}에서 바뀌었다"
+                for fid in rever) + " (`facts.py verdict`로 지금 값을 다시 판정)")
             continue
 
         # ★ 갈래 ① 주문 근거 검증(2026-10-13 사용자: "주문·보유 조건 근거 fact-check는 주문 전에 무조건 pass") —
-        #   근거 판정은 모델이 적은 값이 아니라 `fc_track1.py decide`가 판정표에서 옮겨 쓴 값만 인정한다. 감사까지 통과하지 못한
-        #   제안(7회 뒤에도 FAIL)은 decide가 drop에 넣는다. 예전에는 근거 행에 모델이 'MATCH'를 스스로 적었고(VST: ferc.gov
-        #   루트 주소만으로 T1·MATCH), `require_match_t1t2_for_buy`는 꺼져 있었다.
+        #   통과·제외는 `facts.py decide --mode pre`가 판정 행(ev_verdict · 묶음 track1)으로 정해 시그널 파일의 `track1` 블록에 쓴다.
+        #   여기서는 그 블록과 함께 사실마다 이번 run track1 판정을 저장소에서 다시 본다(이중 검사). 예전에는 근거 행에 모델이
+        #   'MATCH'를 스스로 적었고(VST: ferc.gov 루트 주소만으로 T1·MATCH), `require_match_t1t2_for_buy`는 꺼져 있었다.
         if action == "BUY" and limits.get("fc_track1_required"):
             t1 = sig.get("track1") or {}
             if not t1:
-                reject(p, "주문 근거 검증 기록이 없다 — fc_track1.py extract → fact-check(감사 PASS) → decide를 먼저 돌려라")
+                reject(p, "주문 근거 검증 기록이 없다 — `facts.py queue --batch track1` → fact-check 판정(`facts.py verdict`·`lint`) → "
+                          "`facts.py decide --mode pre --signal <시그널>`을 먼저 돌려라")
                 continue
             if ticker in (t1.get("drop") or []):
                 reject(p, f"주문 근거 검증 미통과 — 감사 {t1.get('audit')}·판정에서 근거가 서지 않았다(논지는 armed 유지 · 다음 run이 다시 본다)")
                 continue
-            ev = p.get("evidence") or []
-            if any(str(e.get("verdict", "")).upper() == "UNVERIFIED_T1" for e in ev):
-                reject(p, "주문 근거 검증 미통과 — 근거 행이 판정표에 없거나 감사를 통과하지 못했다(UNVERIFIED_T1)")
+            unv = [fid for fid in sup_ids if (fstates.get(fid, {}).get("t1") or {}).get("verdict", "UNVERIFIED_T1") == "UNVERIFIED_T1"]
+            if unv:
+                reject(p, f"주문 근거 검증 미통과 — 근거 행이 판정표에 없거나 감사를 통과하지 못했다(UNVERIFIED_T1) — {', '.join(unv)}")
                 continue
-            if not any(e.get("track1") == "PASS" and str(e.get("verdict", "")).upper() == "MATCH"
-                       and str(e.get("tier", "")).upper() in ("T1", "T2") for e in ev):
-                reject(p, "주문 근거 검증 미통과 — 판정표에서 MATCH(T1/T2)로 확인된 근거가 하나도 없다")
+            if not any((fstates.get(fid, {}).get("t1") or {}).get("ok") for fid in sup_ids):
+                reject(p, "주문 근거 검증 미통과 — 판정표에서 MATCH(T1/T2)로 확인된 근거가 하나도 없다" + sup_note)
                 continue
 
         if action == "BUY" and rules.get("require_match_t1t2_for_buy", True):
-            ok = any(
-                str(e.get("verdict", "")).upper() == "MATCH"
-                and str(e.get("tier", "")).upper() in ("T1", "T2")
-                for e in p.get("evidence", [])
-            )
-            if not ok:
-                reject(p, "BUY에 MATCH(T1/T2) 근거가 없다")
+            if not any(fstates.get(fid, {}).get("match12") for fid in sup_ids):
+                reject(p, "BUY에 MATCH(T1/T2) 근거가 없다" + sup_note)
                 continue
 
         price = (prices.get(ticker, {}) or {}).get("price") or held.get(ticker, {}).get("price") or 0
@@ -1146,7 +1829,7 @@ def screen_proposals(sig: dict, limits: dict, watchlist: dict,
                 "ticker": ticker, "name": pos.get("name", ""), "market": market,
                 "excd": p.get("excd") or pos.get("excd"),
                 "action": "SELL", "qty": qty, "price": price,
-                "source": "llm", "proposal": p, "exempt_from_count_limit": False,
+                "source": "llm", "proposal": p, "facts": _facts_record(p, fstates), "exempt_from_count_limit": False,
                 # ★ 2026-10-01: 제안이 논지·트리거를 가리키면 그 id를 행에 싣는다(판정은 그대로) — 없으면 `fill`이
                 #   다리 소진·논지 종료를 못 해 6단이 원장을 손으로 맞췄다(09-30·10-01). 장중 터치 파일
                 #   (`stops.py --intraday`)의 매도 행에 id가 실려 있으니 5단은 그대로 옮겨 적는다.
@@ -1162,12 +1845,16 @@ def screen_proposals(sig: dict, limits: dict, watchlist: dict,
         #   → 논지는 armed 유지, 다음 run이 새 과거 고정 기준으로 목표를 다시 건다(`theses.py set-trigger`).
         # ★★ 2026-10-03 사용자: "1~2% 벌 거면 벌지 마 — 최소 10%는 하한이지 목표가 아니다." 바닥을 3% → 10%로 올렸다.
         #   1차 고정 목표가 없으면(추적 매도만 건 논지) 제안의 `expected_upside_pct`(상한 없음)로 같은 바닥을 판정한다.
-        sizing = limits.get("position_sizing") or {}
-        min_gap = float(sizing.get("min_target_gap_pct") or 0)
-        # ★ 실계좌(조회 전용 포함)는 바닥 10%를 **세후 순수익**으로 맞춘 시장별 값을 쓴다(2026-10-12 · 국내 10.3 · 미국 11.5).
-        by_mkt = sizing.get("min_target_gap_pct_by_market") or {}
-        if account_mode(limits) != "paper" and isinstance(by_mkt, dict) and by_mkt.get(market):
-            min_gap = float(by_mkt[market])
+        sizing = limits.get("position_sizing") or {}      # 아래 작은 진입·평균 크기 검사가 쓴다
+        # ★ 실계좌(조회 전용 포함)는 바닥 10%를 **세후 순수익**으로 맞춘 시장별 값을 쓴다(2026-10-12 · 국내 10.3 · 미국 11.5) — target_floor 한 곳.
+        min_gap = target_floor(limits, market)
+        # ★ 목표 기준(J01)을 문턱 검사 **전에** 본다 — 닻 수준이 정해진 뒤에야 바닥과 견준다(수준을 바닥에 맞춰 고르지 않게).
+        why_tb, tb_info, tb_warn = target_basis_check(p, live_raw, market, limits, format_required(limits))
+        if why_tb:
+            reject(p, why_tb)
+            continue
+        if tb_warn:
+            notes.append(f"{ticker} {tb_warn}")
         if min_gap > 0:
             tgt = first_target(p, thesis_by_id(p.get("thesis_id")))
             if tgt is not None and live_raw > 0:
@@ -1217,9 +1904,8 @@ def screen_proposals(sig: dict, limits: dict, watchlist: dict,
         one_share_pct = (price / equity * 100) if (real_shares and price > 0 and equity > 0) else 0.0
         eff_pct = max(delta_pct, one_share_pct)
         if sizing.get("new_entry_vs_avg_holding") and ticker not in held and lev == 1 and equity > 0:
-            live = [q for q in positions if float(q.get("qty") or 0) > 0 and float(q.get("eval_amt") or 0) > 0]
-            if live:
-                avg_w = sum(float(q["eval_amt"]) for q in live) / equity * 100 / len(live)
+            avg_w = _avg_holding_w(positions, equity)
+            if avg_w is not None:
                 # 주문당 상한이 평균 크기보다 작으면 평균 이상으로 키울 길이 없다 — 상한을 자동 사유(small_why order_cap)로 본다.
                 _cap = order_cap_cfg(limits)
                 _mult = 1.0 if market == "KR" else float(pf.get("fx") or balance.get("exchange_rate") or 0)
@@ -1254,19 +1940,14 @@ def screen_proposals(sig: dict, limits: dict, watchlist: dict,
             delta_pct = one_share_pct
             rounded_up = True
 
-        current_val = held.get(ticker, {}).get("eval_amt", 0) or 0
-        current_pct = (current_val / equity * 100) if equity else 0
-        after_pos = current_pct + delta_pct
-        # 집중 공개선 — 종목·축이 선을 넘기면 명분이 있어야 한다(없으면 그 제안만 거부).
-        hit = axes_of(ax_idx, ticker) if not lev_inv else []
-        after_axes = {aid: (ax_exp.get(aid, 0.0) + equity * delta_pct / 100 * lev) / equity * 100
-                      for aid in hit} if equity > 0 else {}
-        over_pos = disc_pos is not None and after_pos > float(disc_pos)
-        over_axes = {aid: v for aid, v in after_axes.items() if disc_axis is not None and v > float(disc_axis)}
-        if over_pos or over_axes:
+        # 집중 공개선 — 종목·축이 선을 넘기면 명분이 있어야 한다(없으면 그 제안만 거부). 식은 `exposure_after` 하나 —
+        #   gap 채우기(apply_run_limits)·최종 묶음(concentration_final)이 같은 식으로 다시 본다(R05). 앞서 받은 매수도 포함한다.
+        cand = {"ticker": ticker, "name": name, "action": "BUY", "qty": 1,
+                "price": (equity * delta_pct / 100) if equity > 0 else 0.0}       # 금액 = 이번 증분(1단위 × 금액)
+        over = concentration_over(cand, exposure_after(ax_base, balance, accepted + [cand], ax_idx, equity), ax_idx, limits)
+        if over:
             why_c = str(p.get("concentration_why") or "").strip()
-            desc = ((f"종목 {after_pos:.1f}%" + (f"(선 {float(disc_pos):.0f}%)" if over_pos else ""))
-                    + ("".join(f" · 축 {aid} {v:.1f}%(선 {float(disc_axis):.0f}%)" for aid, v in over_axes.items())))
+            desc = " · ".join(over)
             if not why_c:
                 reject(p, f"집중 명분 없음 — 이번 주문 뒤 {desc} 예상. concentration_why를 적어라(상한이 아니라 설명이 붙어야 하는 선이다)")
                 continue
@@ -1286,15 +1967,18 @@ def screen_proposals(sig: dict, limits: dict, watchlist: dict,
                       f"주가 {price:,.2f})")
             continue
 
-        for aid, sign in ax_idx.get(ticker, []):
-            ax_exp[aid] = ax_exp.get(aid, 0.0) + qty * price * lev * sign
+        br_ = base_rate_info(p, market, ticker)
         accepted.append({
             "ticker": ticker, "name": name, "market": market,
             "excd": p.get("excd"),
             "action": "BUY", "qty": qty, "price": price, "increment_pct": round(delta_pct, 3),
-            "source": "llm", "proposal": p, "exempt_from_count_limit": False,
+            "source": "llm", "proposal": p, "facts": _facts_record(p, fstates), "exempt_from_count_limit": False,
             "thesis_id": p.get("thesis_id"), "trigger_id": p.get("trigger_id"),
             **({"rounded_up_to_1": True} if rounded_up else {}),
+            # 목표 기준·기저율(J01) — 결과 표(J03)와 노트 §7이 읽는다 · 기저율이 없으면 미측정
+            "target_basis": p.get("target_basis") if isinstance(p.get("target_basis"), dict) else None,
+            "upside_to_target_pct": tb_info.get("upside_to_target_pct"), "base_rate": br_,
+            "target_line": target_line(tb_info, br_, market),
         })
 
     for n in notes:
@@ -1303,6 +1987,28 @@ def screen_proposals(sig: dict, limits: dict, watchlist: dict,
 
 
 # ------------------------------------------------------------------ run 게이트
+
+def _today_trade_files(market: str, today: str = None) -> tuple:
+    """그날(이 run 스탬프) 그 시장 거래 기록 중 지금 계좌 계열의 것 → ([내용…], 건너뛴 다른 계열 파일 수). 2026-10-19 · Codex R07 —
+    같은 날 다른 계열 기록이 있으면(전환 예행 등) 그 지출을 이 계좌 한도에서 깎지 않는다(R09가 같은 날 계열 섞임을 막지만 읽기도 거른다)."""
+    import sessions as _ss
+    today = today or _ss.run_stamp(market.lower())
+    try:                                             # 한도 파일의 계좌 모드(portfolio_equity와 같은 읽기 — 시험·전환 점검이 LIMITS_PATH를 바꾼다)
+        fam = _acct_family(account_mode(json.loads(LIMITS_PATH.read_text(encoding="utf-8"))))
+    except (OSError, json.JSONDecodeError):
+        fam = _acct_family(account_mode())
+    used, other = [], 0
+    for path in sorted(JOURNAL_DIR.glob(f"trades_{today}_{market.lower()}*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue          # 못 읽는 파일은 건너뛴다 — 다른 파일까지 버릴 이유는 없다
+        if portfolio.file_family(data) != fam:
+            other += 1
+            continue
+        used.append(data)
+    return used, other
+
 
 def spent_today(market: str, currency: str) -> tuple:
     """오늘 이 시장에서 이미 전송한 매수 금액·건수. 반환 (금액, 건수).
@@ -1318,11 +2024,7 @@ def spent_today(market: str, currency: str) -> tuple:
     # `.corrupt_*.json`으로 밀려나며 새 파일이 생기는 경우가 있다(execute.merge_day_record).
     # 그때 한 파일만 보면 이미 나간 주문이 상한 계산에서 통째로 빠진다.
     amount, count = 0.0, 0
-    for path in sorted(JOURNAL_DIR.glob(f"trades_{today}_{market.lower()}*.json")):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue          # 못 읽는 파일은 건너뛴다 — 다른 파일까지 버릴 이유는 없다
+    for data in _today_trade_files(market, today)[0]:
         for t in data.get("trades", []):
             amt = sent_amount(t)
             if amt is None:
@@ -1341,7 +2043,8 @@ def sent_amount(t: dict):
     *실사례(2026-09-16): 9/15 세션이 `status`를 손수 FILLED로 바꿔, SENT만 세던 예전 코드는
     그날 미국 매수 4,252달러를 상한 계산에서 빠뜨렸다.*
     """
-    if t.get("action") != "BUY" or t.get("status") == "FAILED":
+    # 접수 0(거절·미전송·옛 FAILED)만 뺀다 — PENDING·UNKNOWN(접수됐을 수 있다)은 센다(2026-10-19 · R01).
+    if t.get("action") != "BUY" or t.get("status") in ("FAILED", "REJECTED", "UNSENT"):
         return None
     f = t.get("fill") or {}
     v = f.get("verdict")
@@ -1427,18 +2130,53 @@ def apply_run_limits(orders: list, limits: dict, balance: dict,
                               "increment_pct": round(float(o.get("increment_pct") or 0) * k, 3),
                               "scaled_from_qty": int(o["qty"])})
             buys = grown
+            # ★ 집중 공개선(R05) — 명분(concentration_why) 없는 매수는 키우되 **선에서 멈춘다**(심사가 받아 준 크기 아래로는 안 내린다).
+            #   멈춘 금액은 한도 원인이 아니다 — 미달 사유에 "집중 선에서 멈춤"으로 남아 run이 명분을 적거나 다른 종목을 낸다.
+            #   식은 심사·최종 검사와 같은 `exposure_after`(제안 순서대로 · 앞서 정해진 매수와 이 묶음의 매도를 넣고 잰다).
+            ax_idx = axis_index()
+            ax_base = axis_exposure(pf, market, ax_idx)
+
+            def _no_why(o):
+                return not str((o.get("proposal") or {}).get("concentration_why") or "").strip()
+            held_lines = []
+            for i, o in enumerate(buys):
+                if not _no_why(o):
+                    continue
+                # 뒤 제안의 자리를 남긴다 — 명분 없는 뒤 매수는 심사 크기 아래로 안 내려가므로 그 크기로, 명분 있는 뒤 매수는 키운 크기로 센다.
+                #   (앞 제안이 축선까지 다 먹으면 뒤 제안이 심사 크기만으로 선을 넘겨 최종 검사에서 둘 다 빠진다 — 10-19 시험 (64)-g)
+                later = [{**x, "qty": int(x.get("scaled_from_qty") or x["qty"])} if _no_why(x) else x for x in buys[i + 1:]]
+                cap, line = concentration_cap(o, sells + buys[:i] + later, ax_base, balance, ax_idx, equity, limits)
+                if cap is None or int(o["qty"]) <= cap:
+                    continue
+                to_q = max(int(cap), int(o.get("scaled_from_qty") or 0))
+                if to_q < int(o["qty"]):
+                    held_lines.append({"ticker": o["ticker"], "from_qty": int(o["qty"]), "to_qty": to_q, "line": line,
+                                       "amt": round((int(o["qty"]) - to_q) * float(o["price"]), 2)})
+                    buys[i] = {**o, "qty": to_q, "held_at_line": {"from_qty": int(o["qty"]), "to_qty": to_q, "line": line,
+                                                                   "why": f"집중 공개선 {line} — concentration_why 없음 · gap 채우기를 선에서 멈췄다"}}
+
+            def _fits(i, q):                         # 명분 없는 매수들이 한 주 더 사도 선 안인가(공유 축 포함)
+                trial = buys[:i] + [{**buys[i], "qty": q}] + buys[i + 1:]
+                exp = exposure_after(ax_base, balance, sells + trial, ax_idx, equity)
+                return all(not concentration_over(x, exp, ax_idx, limits) for x in trial if _no_why(x))
             # 비례로 키운 뒤 내림으로 남는 자투리를 제안 순서대로 1주씩 돌려 채운다(2026-10-15 — 미달 검사가 '가장 싼 1주'로 센다)
+            #   — 선에서 멈춘 매수는 건너뛰고, 한 주 더해 명분 없는 매수가 선을 넘게 되면 넣지 않는다.
             left = need - sum(int(o["qty"]) * float(o["price"]) for o in buys)
             added = True
             while added and left > 0:
                 added = False
                 for i, o in enumerate(buys):
                     px = float(o["price"])
-                    if 0 < px <= left:
-                        buys[i] = {**o, "qty": int(o["qty"]) + 1}
-                        left -= px
-                        added = True
+                    if o.get("held_at_line") or not (0 < px <= left) or not _fits(i, int(o["qty"]) + 1):
+                        continue
+                    buys[i] = {**o, "qty": int(o["qty"]) + 1}
+                    left -= px
+                    added = True
+            if held_lines:
+                alloc_ctx["conc_held"] = held_lines
+                alloc_ctx["conc_held_amt"] = round(sum(h["amt"] for h in held_lines), 2)
             scaled = {"k": round(k, 3), "before": before, "after": [(o["ticker"], o["qty"]) for o in buys],
+                      **({"held_at_line": held_lines} if held_lines else {}),
                       "why": (f"gap 채우기 — 제안 합 {buy_sum:,.0f} {currency} < 필요 {need:,.0f}"
                               f"(gap {float(alloc_ctx.get('gap_amt') or 0):,.0f} · 쓸 수 있는 현금 "
                               f"{float(alloc_ctx.get('deployable') or 0):,.0f}) → 증분 ×{k:.2f}")}
@@ -1531,30 +2269,92 @@ def apply_run_limits(orders: list, limits: dict, balance: dict,
 
 # 제안이 **애초에 성립하지 않는** 거부 사유 — 이런 제안은 미달 건수에 세지 않는다.
 # (한도·현금·축 상한 거부는 가드의 몫이라 센다 — 제안자는 할 일을 한 것이다.)
-VALIDITY_REJECTS = ("유니버스 밖", "MISMATCH", "weight_target_pct", "현재가를 알 수 없다",
+VALIDITY_REJECTS = ("유니버스 밖", "MISMATCH", "재판정 필요", "weight_target_pct", "현재가를 알 수 없다",
                     "금지 패턴", "confidence", "MATCH(T1/T2)", "미보유 종목 SELL", "목표 여유 없음",
-                    "주문 근거 검증")
+                    "주문 근거 검증", "근거 사실 없음", "요인 판정", "거부 회피", "논지 재검토", "논지 근거",
+                    # ★ 2026-10-19 · Codex J01 — 상승폭·목표 기준 거부는 제안이 성립하지 않는 것(최소 건수에 안 셈 · 회피 기억에 잡힘)
+                    "상승 여지 바닥 미달", "expected_upside_pct 없음", "목표 기준", "기대 상승폭 불일치")
 
 
 def deficit_check(sig: dict, limits: dict, market: str, invested_pct: float,
-                  rejected: list, today: str, alloc_ctx: dict = None, final: list = None) -> dict:
+                  rejected: list, today: str, alloc_ctx: dict = None, final: list = None,
+                  positions: list = None, equity: float = None, hold_check: bool = True) -> dict:
     """판단한 비율(`allocation.target_invested_pct`) 아래일 때 **이 run이 채웠는가**를 기계로 센다.
 
     ① 승인 BUY 합 ≥ need(= min(gap, 쓸 수 있는 현금)) — 못 채웠고 그 원인이 한도가 아니면 short
     ② BUY 제안 ≥ `min_proposals_below_target[market]` ③ 서로 다른 축 ≥ `min_distinct_axes_below_target`
     ④ 오늘 새로 `armed`된 이 시장 논지마다 BUY 제안(e0). ②~④는 2026-09-16 사용자 결정(폭 강제)이다.
+
+    ⑤ 확인된 축의 소액 보유(FB-261017-8 · 2026-10-17 사용자 승인) — 투자비중 미달과 무관하게 같은 입력으로 잰다(`out["undersized"]`):
+    열린 `+` 전망 축의 논지가 있고 현재가 > 평균가인 보유(회전 매도가 자금원에서 빼는 것과 같은 정의)의 비중이
+    이 시장 보유 평균 × `position_sizing.confirmed_axis_min_vs_avg_ratio`보다 작으면 둘 중 하나가 있어야 한다 —
+    이 run의 증액 BUY(증분 뒤 그 선 이상 또는 `increase_when.to_pct` ≥ 그 선) · 또는 `holds[].small_why{kind, why, expected_upside_pct}`
+    (계좌 기여 = 비중 × 기대 상승폭). 둘 다 없으면 `undersized.short` — dispatch·no_trade 게이트가 막는다. 0.5는 자동 크기가 아니라
+    판정을 요구하는 선이다(0이면 끔).
     """
     alloc_ctx = alloc_ctx or {}
+    und = {"ratio": None, "avg_w": None, "line": None, "rows": [], "short": False, "why": ""}
+    ratio = float((limits.get("position_sizing") or {}).get("confirmed_axis_min_vs_avg_ratio") or 0)
+    und["ratio"] = ratio
+    avg_w = _avg_holding_w(positions, equity) if positions is not None else None
+    if not hold_check:
+        und["why"] = "규율 전용·재투자 pass"
+    elif ratio <= 0:
+        und["why"] = "꺼짐(position_sizing.confirmed_axis_min_vs_avg_ratio = 0)"
+    elif avg_w is None:
+        und["why"] = "보유 없음 — 잴 것이 없다"
+    else:
+        line = avg_w * ratio
+        und["avg_w"], und["line"] = round(avg_w, 2), round(line, 2)
+        up_axes = _open_up_axes()
+        sold = {o.get("ticker") for o in (final or []) if o.get("action") == "SELL"}
+        buys = {}
+        for o in final or []:
+            if o.get("action") == "BUY":
+                buys[o.get("ticker")] = buys.get(o.get("ticker"), 0.0) + int(o.get("qty") or 0) * float(o.get("price") or 0)
+        props = {p.get("ticker"): p for p in (sig.get("proposals") or []) if p.get("action") == "BUY"}
+        holds = {h.get("ticker"): h for h in (sig.get("holds") or []) if isinstance(h, dict)}
+        bad = []
+        for q in positions:
+            tk = q.get("ticker")
+            if not tk or tk in sold or float(q.get("qty") or 0) <= 0 or float(q.get("eval_amt") or 0) <= 0:
+                continue
+            price, avg_px = float(q.get("price") or 0), float(q.get("avg_price") or 0)
+            ths = [t for t in held_theses_of(tk) if t.get("axis_id") in up_axes]
+            if not ths or avg_px <= 0 or price <= avg_px:
+                continue
+            w = float(q["eval_amt"]) / equity * 100
+            if w >= line:
+                continue
+            inc = buys.get(tk, 0.0) / equity * 100
+            to_pct = ((props.get(tk) or {}).get("increase_when") or {}).get("to_pct") if tk in buys else None
+            increase = tk in buys and (w + inc >= line or (to_pct is not None and float(to_pct) >= line))
+            sw = (holds.get(tk) or {}).get("small_why")
+            sw_ok = (isinstance(sw, dict) and sw.get("kind") in HOLD_SMALL_WHY_KINDS and str(sw.get("why") or "").strip()
+                     and sw.get("expected_upside_pct") is not None)
+            contrib = round(w * float(sw["expected_upside_pct"]) / 100, 2) if sw_ok else None
+            ok = bool(increase or sw_ok)
+            und["rows"].append({"ticker": tk, "axis_id": ths[0].get("axis_id"), "weight_pct": round(w, 2), "avg_w": round(avg_w, 2),
+                                "line": round(line, 2), "increase": bool(increase), "small_why": sw if sw_ok else None,
+                                "contribution_pp": contrib, "ok": ok})
+            if not ok:
+                bad.append(f"확인된 축 보유 {tk}({ths[0].get('axis_id')}) {w:.2f}% < 보유 평균 {avg_w:.2f}%×{ratio:g}={line:.2f}% — "
+                           f"이 run의 BUY(증액 뒤 ≥{line:.2f}% 또는 increase_when.to_pct ≥{line:.2f}%) 또는 "
+                           f"holds[].small_why{{kind, why, expected_upside_pct}}(계좌 기여)가 없다")
+        und["short"] = bool(bad)
+        und["why"] = "; ".join(bad) if bad else (f"확인된 축 소액 보유 {len(und['rows'])}건 — 전부 증액 또는 사유" if und["rows"]
+                                                 else f"확인된 축 보유 가운데 보유 평균×{ratio:g}={line:.2f}% 미만 없음")
+    out_und = und
     tgt = alloc_ctx.get("target_invested_pct")
     need_map = limits.get("min_proposals_below_target") or {}
     need_n = need_map.get(market.upper()) if isinstance(need_map, dict) else None
     need_axes = limits.get("min_distinct_axes_below_target")
     out = {"invested_pct": round(invested_pct, 2), "target": tgt, "required": need_n,
            "required_axes": need_axes, "counted": 0, "distinct_axes": 0, "tickers": [],
-           "e0_missing": [], "gap_pct": round(float(alloc_ctx.get("gap_pct") or 0), 2),
+           "e0_missing": [], "basis_review": [], "rebased_today": [], "gap_pct": round(float(alloc_ctx.get("gap_pct") or 0), 2),
            "gap_amt": round(float(alloc_ctx.get("gap_amt") or 0)), "deployable": round(float(alloc_ctx.get("deployable") or 0)),
            "need": round(float(alloc_ctx.get("need") or 0)), "approved_buy": 0, "covered_pct": None,
-           "short": False, "why": ""}
+           "short": False, "why": "", "undersized": out_und}
     if tgt is None:
         out["why"] = "검사 꺼짐(allocation 판단 없음)"
         return out
@@ -1585,16 +2385,30 @@ def deficit_check(sig: dict, limits: dict, market: str, invested_pct: float,
             axes.add(free)
     out["counted"], out["distinct_axes"], out["tickers"] = len(counted), len(axes), counted
 
-    store = JOURNAL_DIR / "theses.json"
-    try:
-        theses = (json.loads(store.read_text(encoding="utf-8")).get("theses") or []) if store.exists() else []
-    except (OSError, json.JSONDecodeError):
-        theses = []
-    for th in theses:
+    # 오늘 세운 논지의 첫 매수(e0) — 그 e0가 유효성 사유로 거부됐거나 논지 근거가 틀렸으면(재검토) 주문을 다시 내라는 것이 아니라 **논지를
+    #   처리하라**를 요구한다(2026-10-19 · 한 실행에서 거부된 e0를 '제안 없음'으로 세어 run을 몰아붙였고 그 압박이 근거 바꿔치기로
+    #   이어졌다 — 같은 run에서 고쳐 내면 거부 회피다). 처리 = 근거·조건을 원장에서 고침(set-evidence·set-trigger) 또는 닫기. 오늘 고친
+    #   논지의 첫 매수는 다음 run 몫이다(rebased_today).
+    review = {r["id"]: r for r in db.theses_under_review()}
+    why_bad = {}
+    for r in rejected:
+        if r.get("action") == "BUY" and any(k in str(r.get("why", "")) for k in VALIDITY_REJECTS):
+            why_bad.setdefault(str(r.get("ticker")), str(r.get("why") or ""))
+    for th in db.theses_all():
         if (th.get("status") == "armed" and str(th.get("market", "")).upper() == market.upper()
                 and str(th.get("created", "")).startswith(today)
                 and th.get("ticker") not in counted):
-            out["e0_missing"].append(th.get("ticker"))
+            fixed = any(("(set-evidence)" in str(c.get("what") or "") or "(set-trigger)" in str(c.get("what") or ""))
+                        and str(c.get("ts") or "").startswith(today) for c in th.get("corrections") or [])
+            if fixed and th.get("id") not in review:
+                out["rebased_today"].append(th.get("ticker"))
+            elif th.get("id") in review:
+                out["basis_review"].append(f"{th.get('ticker')}({th.get('id')}) 근거 "
+                                           + ", ".join(f["fact_id"] for f in review[th["id"]]["facts"]) + " MISMATCH")
+            elif str(th.get("ticker")) in why_bad:
+                out["basis_review"].append(f"{th.get('ticker')}({th.get('id')}) e0 거부 — {why_bad[str(th.get('ticker'))][:60]}")
+            else:
+                out["e0_missing"].append(th.get("ticker"))
 
     reasons = []
     # "채웠다" = 남은 필요액으로 승인된 종목 중 어느 것도 한 주 더 살 수 없다(반올림 잔여는 미달이 아니다).
@@ -1606,12 +2420,20 @@ def deficit_check(sig: dict, limits: dict, market: str, invested_pct: float,
     if unfilled:
         reasons.append(f"승인 매수 {approved_buy:,.0f} < 필요 {need:,.0f}({out['covered_pct']:.0f}%) — 한도가 아니라 제안이 모자라다"
                        + (" (BUY 제안 0건)" if not counted else ""))
+        held = alloc_ctx.get("conc_held") or []
+        if held:
+            out["conc_held"] = held
+            reasons.append("집중 선에서 멈춤 — " + "; ".join(f"{h['ticker']} {h['line']}(명분 없음) {h['amt']:,.0f}" for h in held)
+                           + ": concentration_why를 적거나 다른 종목을 내라")
     if need_n is not None and len(counted) < int(need_n):
         reasons.append(f"BUY 제안 {len(counted)}건 < 요구 {int(need_n)}건")
     if need_axes is not None and len(axes) < int(need_axes):
         reasons.append(f"서로 다른 축 {len(axes)}개 < 요구 {int(need_axes)}개")
     if out["e0_missing"]:
         reasons.append(f"오늘 세운 논지에 e0 제안 없음: {', '.join(out['e0_missing'])}")
+    if out["basis_review"]:
+        reasons.append(f"오늘 논지 처리 안 됨: {'; '.join(out['basis_review'])} — 같은 run에서 주문을 고쳐 내는 것이 아니라(거부 회피) "
+                       f"원장에서 고치거나(`theses.py set-evidence`·`set-trigger` — 매수는 다음 run) `set-status closed`로 닫는다")
     out["short"] = bool(reasons)
     out["why"] = (f"투자비중 {invested_pct:.1f}% < 판단 목표 {float(tgt):.0f}%(gap {out['gap_pct']:.1f}%p) — "
                   + ("; ".join(reasons) if reasons else
@@ -1620,6 +2442,59 @@ def deficit_check(sig: dict, limits: dict, market: str, invested_pct: float,
 
 
 # ---------------------------------------------------------------------- main
+
+def _git_commit():
+    """지금 코드의 커밋(읽기만 · .git/HEAD → ref) — 못 읽으면 None. 작업 공간(.git 파일)도 따라간다."""
+    try:
+        d = HERE.resolve()
+        for _ in range(4):
+            g = d / ".git"
+            if g.exists():
+                break
+            d = d.parent
+        else:
+            return None
+        if g.is_file():
+            m = re.match(r"gitdir:\s*(.+)", g.read_text(encoding="utf-8").strip())
+            g = (d / m.group(1)).resolve() if m else g
+        head = (g / "HEAD").read_text(encoding="utf-8").strip()
+        if not head.startswith("ref:"):
+            return head[:40]
+        ref = head.split(":", 1)[1].strip()
+        common = (g / "commondir")
+        roots = [g] + ([(g / common.read_text(encoding="utf-8").strip()).resolve()] if common.exists() else [])
+        for r in roots:
+            f = r / ref
+            if f.exists():
+                return f.read_text(encoding="utf-8").strip()[:40]
+            pk = r / "packed-refs"
+            if pk.exists():
+                for ln in pk.read_text(encoding="utf-8").splitlines():
+                    if ln.endswith(" " + ref):
+                        return ln.split(" ", 1)[0][:40]
+    except OSError:
+        return None
+    return None
+
+
+def decision_ids(signal_path, snapshot_path, watchlist: dict) -> dict:
+    """★ 판단 재현 식별자(2026-10-19 · Codex J03) — 승인 머리에 싣는다: 읽은 시그널·스냅샷 바이트 해시 · 유니버스(저장소 감시 목록 정규 JSON) ·
+    그 run 재료 파일 · 코드 커밋 · 코드 해시(*.py 해시를 정렬해 다시 해시). 나중에 '그때 무엇을 보고 정했나'를 다시 찾는 열쇠다."""
+    def fsha(path_):
+        try:
+            return hashlib.sha256(Path(path_).read_bytes()).hexdigest() if path_ and Path(path_).exists() else None
+        except OSError:
+            return None
+    mat = None
+    m = re.search(r"snapshot_(\d{6})_([a-z]{2})\.json$", str(snapshot_path or ""))
+    if m:
+        mat = DATA_DIR / f"material_{m.group(1)}_{m.group(2)}.md"
+    code = hashlib.sha256("".join(f"{f.name}:{hashlib.sha256(f.read_bytes()).hexdigest()}\n"
+                                  for f in sorted(HERE.glob("*.py")) if not f.name.startswith("_")).encode("utf-8")).hexdigest()
+    return {"signal_sha256": fsha(signal_path), "snapshot_sha256": fsha(snapshot_path),
+            "universe_sha256": hashlib.sha256(json.dumps(watchlist, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest(),
+            "material_sha256": fsha(mat), "code_commit": _git_commit(), "code_sha": code}
+
 
 def run(signal_path: Path, snapshot_path: Path, out_path: Path,
         discipline_only: bool = False, live: bool = False, refill: bool = False) -> int:
@@ -1637,17 +2512,23 @@ def run(signal_path: Path, snapshot_path: Path, out_path: Path,
     if limits.get("halt_all"):
         print("limits.halt_all=true — 주문 0건으로 종료.")
         return 0
-    watchlist = _read_json(WATCHLIST_PATH, "watchlist")
+    # 감시 목록(유니버스)은 저장소가 원본이다(`dim_company` · config/watchlist.json은 렌더본). 행이 하나도 없으면
+    # 옛 '파일 없음'과 같다 — 유니버스를 잴 수 없으니 run 전체를 거부한다(fail-closed).
+    watchlist = db.watchlist_doc()
+    if not (watchlist.get("KR") or watchlist.get("US")):
+        raise Rejection("감시 목록이 저장소에 없다(dim_company 감시 목록 0행) — 유니버스를 잴 수 없다")
     snapshot = _read_json(snapshot_path, "snapshot")
+    ids_ = decision_ids(signal_path, snapshot_path, watchlist)
+    sig_sha = ids_["signal_sha256"]
 
     balance = snapshot.get("balance") or {}
     prices = snapshot.get("prices") or {}
     day_pnl_pct = snapshot.get("day_pnl_pct")
     # ★ 시장을 먼저 정한다 — 고점 원장이 시장별로 나뉘어 있고, 예전에는 평평한 dict를
-    #   그대로 읽어 **다른 시장의 고점으로 이 시장을 판정할 수** 있었다. 표기 규칙은
-    #   `peaks.py` 하나에만 둔다(쓰는 쪽 journal과 갈리지 않게).
+    #   그대로 읽어 **다른 시장의 고점으로 이 시장을 판정할 수** 있었다. 고점은 저장소 한 표
+    #   (`ex_position_peak` — 시장·종목 키)에 있고, 쓰는 쪽(journal·stops)과 읽는 쪽이 같은 함수를 쓴다.
     market = snapshot.get("market", "KR")
-    peaks = peaks_store.for_market(market, PEAKS_PATH)
+    peaks = db.peaks_for_market(market)
 
     live_notes = []
     if live:
@@ -1663,14 +2544,27 @@ def run(signal_path: Path, snapshot_path: Path, out_path: Path,
     rejected = []
 
     alloc_ctx, alloc_out, sig = {}, None, None
+    fc = {"state": "n/a"}
+    rid, prior, pass_no, screen_mode, screened = None, [], 0, None, False
+    lim_sha = sha256_of(LIMITS_PATH)
     if not discipline_only:
         import allocation as _al
         sig = _read_json(signal_path, "signal")
         m_id = re.search(r"_(\d{6})_(kr|us)", str(signal_path))
         this_id = _al.make_id(m_id.group(1), m_id.group(2)) if m_id else _al.make_id(now.strftime("%y%m%d"), str(sig.get("market") or market))
+        this_rid = f"{m_id.group(1)}_{m_id.group(2)}" if m_id else None    # 근거 사실의 이번 run 판정(ev_verdict.run_id)
         validate_signal(sig, limits, now, this_id,  # 실패 시 Rejection → run 전체 거부
                         max_age=(float(limits.get("refill_max_age_minutes", 300)) if refill else None))
         market = sig["market"]
+        # 회차 기억(2026-10-19) — 이 run의 앞 회차 · 첫 회차의 한도 해시. 한도를 run 중간에 고쳐 거부를 뒤집지 않는다(stage5_decide.md)
+        rid = run_id_of(sig, this_rid)
+        prior = db.screen_rows(rid) if rid else []
+        pass_no = (max(int(r["pass_no"]) for r in prior) + 1) if prior else 1
+        screen_mode = "refill" if refill else ("live" if live else "main")
+        first_sha = next((r.get("limits_sha") for r in prior if r.get("limits_sha")), None)
+        if first_sha and first_sha != lim_sha:
+            raise Rejection(f"한도가 run 중간에 바뀌었다 — 첫 회차 한도 {first_sha[:12]} ≠ 지금 {lim_sha[:12]} · 한도 변경은 다음 run부터"
+                            f"(되돌리면 계속 돈다)")
         rule_post, _ = _after_sells(balance, [o for o in orders if o.get("action") == "SELL"])
         screen_sig = sig
         if refill:
@@ -1690,7 +2584,13 @@ def run(signal_path: Path, snapshot_path: Path, out_path: Path,
                 print(f"  · 지지 이탈 판정 실패({type(e).__name__}: {str(e)[:80]}) — 이 run은 그 거부 없이 간다")
             if sup:
                 print(f"  · 지지 이탈 {len(sup)}종목 — 이 run 추가 매수 거부: {', '.join(sup)}")
-            acc, rej = screen_proposals(screen_sig, limits, watchlist, balance, prices, sup_break=sup, post_bal=rule_post)
+            fc = factor_context(sig, market, this_rid)
+            if fc.get("fired"):
+                print(f"  · 꺾인 요인 {', '.join(sorted(fc['fired']))} — 판정 {', '.join(sorted(fc['judged'])) or '없음'} "
+                      f"(판정·결정 '저점매수' 없는 그 요인 매수는 거부)")
+            acc, rej = screen_proposals(screen_sig, limits, watchlist, balance, prices, sup_break=sup, post_bal=rule_post,
+                                        run_id=this_rid, factor=fc, prior=prior)
+            screened = True
             # 규율 SELL과 겹치는 종목은 규율 쪽을 남긴다(더 보수적).
             disc_tickers = {o["ticker"] for o in orders}
             orders += [o for o in acc if o["ticker"] not in disc_tickers]
@@ -1717,6 +2617,13 @@ def run(signal_path: Path, snapshot_path: Path, out_path: Path,
     for n in cap_notes:
         print(f"  · {n}")
     cap_cfg = order_cap_cfg(limits)
+    # ★ 최종 묶음 집중 재검사(R05) — 심사·gap 채우기 뒤에도 명분 없이 선을 넘는 매수가 남았으면 그 주문만 거부(안전망).
+    conc_block = {}
+    if any(o.get("action") == "BUY" for o in final):
+        final, conc_rej, conc_block = concentration_final(final, limits, balance, market)
+        rejected += conc_rej
+        for r in conc_rej:
+            print(f"  · {r['ticker']} {r['why'][:120]}")
 
     # ★ 미달 강제 — 판단한 비율 아래인데 이 run이 못 채웠으면(한도 원인 제외) `deficit_short: true`. 주문은 그대로
     #   승인한다(막는 것은 게이트다 — 이 run은 4·5단으로 돌아가 제안을 채우고 다시 돈다).
@@ -1727,12 +2634,53 @@ def run(signal_path: Path, snapshot_path: Path, out_path: Path,
         pfl = pf_local(portfolio_equity(market, pb), market, pb)
         inv_d = (alloc_ctx["invested_pct_eff"] if alloc_ctx.get("market_share") is not None   # 실계좌: 이 시장 몫 대비 투자비중
                  else pfl["invested_pct"])
+        _pf_now = pf_local(portfolio_equity(market, balance), market, balance)
+        # '오늘'은 이 run의 **세션 날짜**다 — 논지 created·교정 ts가 세션 날짜로 적힌다(theses._run_day · 2026-10-14). 벽시계
+        #   날짜로 대조하면 KST 자정을 넘긴 미국 run·장 마감 뒤 국내 실행에서 오늘 세운 논지를 못 알아본다(2026-10-19 발견).
+        import sessions as _ss
         deficit = deficit_check(sig, limits, market, inv_d, rejected,
-                                now.strftime("%Y-%m-%d"), alloc_ctx, final)
+                                _ss.run_date(market.lower()).isoformat(), alloc_ctx, final,
+                                positions=balance.get("positions") or [], equity=_pf_now["equity"], hold_check=not refill)
     elif snapshot.get("kind") in ("stops", "stops_daytime"):
         # 장중 고가·저가로 판정만 하는 pass(stops_intraday_*)는 극값이라 세지 않는다 — 실제 시세로 판 pass만
         refill_need = _refill_need(market, balance, final)
 
+    if discipline_only or refill:
+        factor_sum = {"state": "n/a", "short": False, "why": "규율 전용·재투자 pass"}
+    else:
+        if fc.get("state") == "n/a":                  # no_trade 시그널 — 매수 심사는 없어도 보유의 요인 판정은 본다
+            fc = factor_context(sig, market, this_rid)
+        factor_sum = factor_summary(fc, sig, final, balance.get("positions") or [])
+    for r in rejected:
+        r.setdefault("why_class", _why_class(r.get("why")))
+    screen_now, screen_blk = [], None
+    if rid and not discipline_only:
+        if screened:
+            acc_keys = {(str(o.get("ticker")), o.get("action")) for o in final if o.get("source") == "llm"}
+            rej_by = {}
+            for r in rejected:
+                rej_by.setdefault((str(r.get("ticker")), r.get("action")), r)
+            for p in screen_sig.get("proposals") or []:
+                if not isinstance(p, dict) or p.get("action") not in ("BUY", "SELL"):
+                    continue
+                key = (str(p.get("ticker")), p.get("action"))
+                canon = screen_canon(p)
+                if key in acc_keys:
+                    outcome, why, cls = "accepted", "", None
+                elif key in rej_by:
+                    outcome, why, cls = "rejected", rej_by[key].get("why"), rej_by[key].get("why_class")
+                else:
+                    outcome, why, cls = "rejected", "승인 목록에 없다(규율 매도와 겹침 등)", "limit"
+                screen_now.append({"run_id": rid, "pass_no": pass_no, "ts": now.isoformat(timespec="seconds"), "mode": screen_mode,
+                                   "ticker": key[0], "action": key[1], "fingerprint": screen_fp(canon), "canon": canon,
+                                   "ctx": screen_ctx(p, key[0], fc, (prices.get(key[0]) or {}).get("price") if isinstance(prices, dict) else None),
+                                   "outcome": outcome, "why_class": cls, "why": why,
+                                   "limits_sha": lim_sha, "approved_path": out_path.name, "signal_sha": sig_sha})
+        screen_blk = {"pass": pass_no, "mode": screen_mode, "prior_passes": max(0, pass_no - 1),
+                      "tainted": [{"ticker": r.get("ticker"), "action": r.get("action"), "why": r.get("why")}
+                                  for r in rejected if r.get("why_class") == "taint"],
+                      "limits_sha_first": next((r.get("limits_sha") for r in prior if r.get("limits_sha")), lim_sha),
+                      "rows": len(screen_now)}
     approved = {
         "schema_version": SCHEMA_VERSION,
         "market": market,
@@ -1740,6 +2688,7 @@ def run(signal_path: Path, snapshot_path: Path, out_path: Path,
         "signal_ref": str(signal_path) if signal_path else None,
         "snapshot_ref": str(snapshot_path),
         "limits_sha256": sha256_of(LIMITS_PATH),
+        **ids_,                                      # 판단 재현 식별자(J03) — 시그널·스냅샷·유니버스·재료·코드
         "orders": final,
         "rejected": rejected,
         "shaved": [{**o["shaved"], "ticker": o["ticker"]} for o in final if o.get("shaved")],
@@ -1748,8 +2697,16 @@ def run(signal_path: Path, snapshot_path: Path, out_path: Path,
         "live_prices": live_notes,
         "allocation": alloc_out,
         "scaled_up": scaled,
+        # 집중 공개(R05) — 매수마다 최종 수량 뒤 종목·축 비중 · 넘은 선 · 명분(없으면 그 주문은 이미 거부됐다)
+        "concentration": conc_block,
         "deficit": deficit,
         "deficit_short": bool(deficit.get("short")),
+        # 확인된 축 소액 보유(FB-261017-8) — 증액 BUY도 small_why(계좌 기여)도 없으면 true · dispatch/no_trade 게이트가 막는다
+        "undersized": deficit.get("undersized") or {"short": False, "why": "규율 전용·재투자 pass"},
+        "undersized_short": bool((deficit.get("undersized") or {}).get("short")),
+        # 요인 판정(FB-261017-7) — 꺾인 요인 판정 없음 · 결정 빠진 보유 · 정리인데 SELL 없음이면 true(dispatch/no_trade 게이트)
+        "factor": factor_sum,
+        "factor_short": bool(factor_sum.get("short")),
         # 실계좌 전환(2026-10-12): 이 승인이 어느 계좌 모드에서 나왔고 주문당 상한을 어떻게 걸었나 — execute가 대조한다.
         "account_mode": account_mode(limits),
         "order_cap": ({**cap_cfg, "fx": cap_fx if market != "KR" else 1.0, "trimmed_amt": round(cap_trimmed, 2)}
@@ -1763,6 +2720,18 @@ def run(signal_path: Path, snapshot_path: Path, out_path: Path,
         "refill": bool(refill),
         "refill_of": snapshot.get("refill_of") if refill else None,
     }
+    if screen_blk is not None:
+        approved["screen"] = screen_blk
+    if not discipline_only and not refill:
+        approved["evidence_adopted"] = _adopt_thesis_evidence(final, out_path.name, now)
+    if screen_now:
+        # 기록 실패는 승인 실패다 — 기억이 조용히 죽으면 다음 회차의 회피를 못 잡는다
+        try:
+            db.screen_put(screen_now)
+        except db.TestGuard:
+            raise
+        except Exception as e:                       # noqa: BLE001
+            raise Rejection(f"회차 기억(ex_screen)을 남기지 못했다 — {type(e).__name__}: {e}")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(approved, ensure_ascii=False, indent=2), encoding="utf-8")
     if alloc_out and not refill:
@@ -1773,6 +2742,15 @@ def run(signal_path: Path, snapshot_path: Path, out_path: Path,
         except Exception as e:                       # noqa: BLE001 — 원장 쓰기 실패가 승인을 막지 않는다
             print(f"  · 배분 원장 기록 실패({type(e).__name__}: {e})", file=sys.stderr)
 
+    if approved["factor_short"]:
+        print(f"★ 요인 판정 미완 — factor_short=true: {factor_sum.get('why')} · 노트 §7 [요인 판정] 블록과 시그널 factor_judgments[]"
+              f"(정리면 그 run의 SELL)를 채우고 다시 돌려라 — dispatch/no_trade 게이트가 막는다", file=sys.stderr)
+    elif factor_sum.get("state") == "missing":
+        print(f"  · {factor_sum.get('why')}", file=sys.stderr)
+    if approved["undersized_short"]:
+        print(f"★ 확인된 축 소액 보유 — undersized_short=true: {approved['undersized'].get('why')} · "
+              f"이 run의 증액 BUY 또는 holds[].small_why{{kind, why, expected_upside_pct}}를 채우고 다시 돌려라 — dispatch/no_trade 게이트가 막는다",
+              file=sys.stderr)
     print(f"승인 {len(final)}건 / 거부 {len(rejected)}건 → {out_path}")
     for o in final:
         src = "규율" if o["source"] == "discipline" else ("감사 소급" if o["source"] == "audit_reversal" else "제안")
@@ -1781,7 +2759,10 @@ def run(signal_path: Path, snapshot_path: Path, out_path: Path,
         for r in o.get("reasons", []):
             print(f"         └ {r}")
     for r in rejected:
-        print(f"  [거부] {r['action']:4} {r['ticker']}: {r['why']}")
+        print(f"  [거부{'·회피' if r.get('why_class') == 'taint' else ''}] {r['action']:4} {r['ticker']}: {r['why']}")
+    if screen_blk and screen_blk["tainted"]:
+        print(f"★ 거부 회피 재실행 {len(screen_blk['tainted'])}건 — 그 제안만 거부했다(나머지는 그대로 승인) · §11에 사유 그대로 적는다 · "
+              f"되살리지 않는다(다음 run이 다시 본다)", file=sys.stderr)
     if deficit.get("short") and refill:
         print(f"  · 재투자 뒤에도 미달: {deficit['why']} — 남은 몫은 `stage.py refill-defer`로 다음 run에 넘긴다")
     elif deficit.get("short"):

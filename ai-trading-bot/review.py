@@ -25,13 +25,14 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import db
 from kis_client import KisClient, KisError, same_account
 
 HERE = Path(__file__).parent
 JOURNAL = HERE / "journal"
 SIGNALS = HERE / "signals"
 CONFIG = HERE / "config"
-REVIEWS = JOURNAL / "reviews.jsonl"
+REVIEWS_NAME = "reviews.jsonl"        # 회고 기록은 저장소(op_review)에 쌓인다 — 출력 문구의 옛 이름
 KST = timezone(timedelta(hours=9))
 
 
@@ -80,26 +81,27 @@ def trade_rows(market: str, session: str):
             " ".join(str(r.get("signal_ref") or "") for r in (rec.get("runs") or []))
         if f"_{stamp}_" not in refs:
             return None
+        if not _same_family(rec):
+            return None
         rows = [t for t in (rec.get("trades") or [])
                 if f"_{stamp}_" in str((t.get("proposal") or {}).get("signal_ref") or refs)]
         return rows or (rec.get("trades") or [])
-    return (_read(p, {}) or {}).get("trades") or []
+    rec = _read(p, {}) or {}
+    if not _same_family(rec):
+        return None                                  # 다른 계좌 계열의 기록 — 이 계좌의 회고 재료가 아니다(2026-10-19 · R07)
+    return rec.get("trades") or []
+
+
+def _same_family(rec: dict) -> bool:
+    import portfolio
+    from kis_client import acct_family
+    return portfolio.file_family(rec) == acct_family()
 
 
 def equity_rows(market: str) -> list:
-    rows = []
-    path = JOURNAL / "equity_curve.jsonl"
-    if not path.exists():
-        return rows
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            r = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if r.get("market") == market and same_account(r):     # 지금 계좌 계열만(2026-10-15)
-            rows.append(r)
+    """자산 곡선(저장소 ex_equity_point) — 그 시장 · 지금 계좌 계열 · 날짜마다 마지막 행."""
+    rows = [r for r in db.equity_rows()
+            if r.get("market") == market and same_account(r)]     # 지금 계좌 계열만(2026-10-15)
     keep = {}
     for r in rows:                       # 같은 날 여러 기록이면 마지막만
         keep[r["date"]] = r
@@ -154,16 +156,14 @@ def review_without_signal(market: str, session: str, record: bool = False) -> in
     print("   → 유효하면 오늘 시그널에 잇고, 아니면 왜 접는지 적는다.")
     if record:
         # 기록하지 않으면 이 run은 영원히 '미회고'로 남고, 게이트가 매번 같은 것을 요구한다.
-        REVIEWS.parent.mkdir(parents=True, exist_ok=True)
-        with REVIEWS.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "ts": datetime.now(KST).isoformat(), "market": market, "session": session,
-                "signal": None, "no_trade": None, "proposals": [], "executed": [],
-                "outcome": {"reached_decision": False,
-                            "left_artifacts": left,
-                            "note": "판단 없음 — 시그널 미발행. run 자체를 회고했다."},
-            }, ensure_ascii=False) + "\n")
-        print(f"\n기록: {REVIEWS.name} (판단 없음 회고)")
+        db.log_append("reviews", {
+            "ts": datetime.now(KST).isoformat(), "market": market, "session": session,
+            "signal": None, "no_trade": None, "proposals": [], "executed": [],
+            "outcome": {"reached_decision": False,
+                        "left_artifacts": left,
+                        "note": "판단 없음 — 시그널 미발행. run 자체를 회고했다."},
+        })
+        print(f"\n기록: {REVIEWS_NAME} (판단 없음 회고)")
     return 0
 
 
@@ -265,21 +265,19 @@ def review(market: str, session: str, record: bool) -> int:
             print(f"   · {g[:150]}")
 
     if record:
-        REVIEWS.parent.mkdir(parents=True, exist_ok=True)
-        with REVIEWS.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "ts": datetime.now(KST).isoformat(), "market": market, "session": session,
-                "signal": sig_path.name, "no_trade": bool(sig.get("no_trade")),
-                "proposals": [{"ticker": p.get("ticker"), "action": p.get("action"),
-                               "weight_target_pct": p.get("weight_target_pct"),
-                               "confidence": p.get("confidence")} for p in props],
-                "executed": [{"ticker": t.get("ticker"), "action": t.get("action"),
-                              "qty": t.get("qty"), "price": t.get("price"),
-                              "verdict": (t.get("fill") or {}).get("verdict", "UNKNOWN")}
-                             for t in (executed or [])],
-                "outcome": outcome,
-            }, ensure_ascii=False) + "\n")
-        print(f"\n기록: {REVIEWS.name}")
+        db.log_append("reviews", {
+            "ts": datetime.now(KST).isoformat(), "market": market, "session": session,
+            "signal": sig_path.name, "no_trade": bool(sig.get("no_trade")),
+            "proposals": [{"ticker": p.get("ticker"), "action": p.get("action"),
+                           "weight_target_pct": p.get("weight_target_pct"),
+                           "confidence": p.get("confidence")} for p in props],
+            "executed": [{"ticker": t.get("ticker"), "action": t.get("action"),
+                          "qty": t.get("qty"), "price": t.get("price"),
+                          "verdict": (t.get("fill") or {}).get("verdict", "UNKNOWN")}
+                         for t in (executed or [])],
+            "outcome": outcome,
+        })
+        print(f"\n기록: {REVIEWS_NAME}")
     return 0
 
 
@@ -287,7 +285,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="직전 세션의 판단을 되짚는다")
     ap.add_argument("--market", choices=["kr", "us"], required=True)
     ap.add_argument("--session", required=True, help="회고할 세션 날짜 YYYY-MM-DD")
-    ap.add_argument("--record", action="store_true", help="journal/reviews.jsonl에 남긴다")
+    ap.add_argument("--record", action="store_true", help="회고 기록(저장소 op_review)에 남긴다")
     args = ap.parse_args()
     return review(args.market.upper(), args.session, args.record)
 

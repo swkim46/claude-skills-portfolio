@@ -18,12 +18,19 @@
 사용:
     python3 verify_numbers.py analysis/분석노트_260908_kr_v4_0.md \
         --source data/material_260908_kr.md --source data/snapshot_260908_kr.json
+    python3 verify_numbers.py <노트> --run 261019 kr      # 이 run의 표준 출처 파일 + 저장소 말뭉치
+
+말뭉치(2026-10-17): `--run`이면 파일 목록에 더해 저장소 텍스트를 같이 본다 — 이번 run의 사실(종류별 한 줄 `facts.render_line` ·
+옛 이전 행은 옛 문장 · 원문 인용) · 이번 run 재료(발행분 본문 mat_issue.body · 링크 한 홉 원문 mat_link.body) · 판단 원장
+(논지·시나리오·지도·배분·고점 — 예전 journal/*.json 파일 자리). 노트의 값 자리 표식(`<!--F:F-000731-->`)과 사실 id는 숫자로 세지 않는다.
 """
 import argparse
 import json
 import re
 import sys
 from pathlib import Path
+
+import db
 
 HERE = Path(__file__).parent
 
@@ -38,8 +45,12 @@ URL = re.compile(r"https?://\S+")
 # 헤더·표 구분선·인용블록은 주장이 아니다. 인용블록(`>`)은 이 노트에서 판본 메모로 쓰인다.
 SKIP_LINE = re.compile(r"^\s*(?:#{1,6}\s|\||>)")
 DATE_LIKE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}/\d{1,2}\b|\b2\d{5}\b|\bv\d+_\d+\b")
-# 라벨을 '쓴' 줄만 — 백틱으로 감싼 `[AI]`는 표기 규칙을 설명한 것이다(extract_ai_claims와 동일 규칙).
+# 라벨을 '쓴' 줄만 — 백틱으로 감싼 `[AI]`는 표기 규칙을 설명한 것이다(옛 extract_ai_claims와 동일 규칙).
 AI_TAG = re.compile(r"(?<!`)\[AI\](?!`)")
+BULLET = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+")
+HEADER = re.compile(r"^\s*#{1,6}\s")
+# 노트의 사실 값 자리 표식·사실 id — 숫자가 아니다(F-000731의 000731을 주장으로 세지 않는다). 값 자체는 남긴다.
+FACT_MARKUP = re.compile(r"<!--/?F(?::[^>]*)?-->|\{\{(?:F-\d{6}|SRC-\d+)(?:\.\w+)?\}\}|\b(?:F-\d{6}|SRC-\d+)\b")
 
 
 def parse_number(tok: str):
@@ -151,24 +162,82 @@ def unit_ok(tok: str, value: float, haystack: set) -> bool:
     return any(abs(h - value) <= tol for h in haystack if isinstance(h, (int, float)) and h)
 
 
+def ai_claims(note: Path) -> list:
+    """`[AI]` 클레임 [(줄번호, 본문)] — 줄바꿈으로 이어진 항목은 합친다(옛 extract_ai_claims.extract와 같은 경계 규칙:
+    빈 줄·헤더·새 불릿·새 클레임에서 끊고, 들여쓰기 규칙은 불릿 항목에만 — 문단형 클레임의 둘째 줄을 자르지 않는다)."""
+    lines = note.read_text(encoding="utf-8").splitlines()
+    claims, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        if not AI_TAG.search(line):
+            i += 1
+            continue
+        lineno, is_bullet = i + 1, bool(BULLET.match(line))
+        body = AI_TAG.sub("", BULLET.sub("", line), count=1).strip()
+        indent = len(line) - len(line.lstrip())
+        j = i + 1
+        while j < len(lines):
+            nxt = lines[j]
+            if not nxt.strip() or HEADER.match(nxt) or BULLET.match(nxt) or AI_TAG.search(nxt):
+                break
+            if is_bullet and len(nxt) - len(nxt.lstrip()) <= indent:
+                break
+            body += " " + nxt.strip()
+            j += 1
+        body = re.sub(r"\s+", " ", body).strip()
+        if body:
+            claims.append((lineno, body))
+        i = j
+    return claims
+
+
 def declared_external(note: Path) -> set:
     """`[AI]`로 선언한 클레임에 등장하는 수치들.
 
     한 번 "이건 재료 밖 사실"이라고 선언하고 fact-check(5-C)로 보낸 숫자는, 본문 다른
     곳에서 다시 언급할 때마다 태그를 달 필요가 없다. 줄 단위로만 면제하면 여러 줄로
     이어진 클레임의 뒷줄과 그 사실을 되짚는 문장이 전부 걸려 잡음이 된다.
-    클레임 경계는 `extract_ai_claims`와 같은 규칙(빈 줄·헤더·새 불릿·들여쓰기)으로 잡는다.
+    클레임 경계는 `ai_claims`(옛 extract_ai_claims와 같은 규칙: 빈 줄·헤더·새 불릿·들여쓰기)로 잡는다.
     """
+    return {n for _, body in ai_claims(note) for n in numbers_in(FACT_MARKUP.sub(" ", body))}
+
+
+def db_corpus(stamp: str, mkt: str) -> str:
+    """이 run의 저장소 말뭉치 — 사실(한 줄·옛 문장·원문 인용) · 재료(발행분 본문·링크 원문) · 판단 원장(논지·시나리오·지도·배분·고점).
+    저장소를 못 읽으면 빈 문자열(파일 출처만으로 대조 — 호출자가 그 사실을 알린다)."""
+    rid = db.run_id(stamp, mkt)
+    parts = []
     try:
-        from extract_ai_claims import extract
-    except ImportError:
-        return set()
-    return {n for _, body in extract(note) for n in numbers_in(body)}
+        import facts as _f
+        for r in db.q("SELECT f.id, f.kind, f.legacy_text, f.quote FROM ev_fact_run r JOIN ev_fact f ON f.id=r.fact_id"
+                      " WHERE r.run_id=? ORDER BY r.s_no", (rid,)):
+            parts.append(r["legacy_text"] if r["kind"] == "legacy" else _f.render_line(r["id"]))
+            if r.get("quote"):
+                parts.append(r["quote"])
+        iids = db.material_issues_for_run(rid) or [r["id"] for r in db.q(
+            "SELECT id FROM mat_issue WHERE run_id=? OR first_run=?", (rid, rid))]
+        for iid in iids:
+            r = db.q1("SELECT subject, body FROM mat_issue WHERE id=?", (iid,))
+            if r:
+                parts += [r.get("subject") or "", r.get("body") or ""]
+            for ln in db.q("SELECT id, title FROM mat_link WHERE issue_id=? AND (version_id IS NOT NULL OR body IS NOT NULL)", (iid,)):
+                lb, _e = db.link_body(ln["id"])        # 마지막으로 성공한 판(v3) · 옛 행은 옛 body · 실패 사유는 본문이 아니다
+                parts += [ln.get("title") or "", lb or ""]
+        for name, val in (("theses", db.theses_all()), ("scenarios", db.scenarios_all()), ("market_map", db.market_map_load()),
+                          ("allocation", db.allocation_rows()), ("position_peaks", db.peaks_all())):
+            parts.append(json.dumps(val, ensure_ascii=False, default=str))
+    except db.TestGuard:
+        raise
+    except Exception as e:                       # noqa: BLE001 — 말뭉치가 비면 파일 출처만으로 본다
+        print(f"  (저장소 말뭉치를 못 읽었다: {type(e).__name__}: {str(e)[:100]})", file=sys.stderr)
+    return "\n".join(p for p in parts if p)
 
 
-def check(note: Path, sources: list) -> list:
-    """반환: [(줄번호, 숫자문자열, 줄내용)] — 재료에서 못 찾은 것들."""
+def check(note: Path, sources: list, texts: tuple = ()) -> list:
+    """반환: [(줄번호, 숫자문자열, 줄내용)] — 재료에서 못 찾은 것들. texts = 파일이 아닌 출처 텍스트(저장소 말뭉치)."""
     haystack = declared_external(note)
+    for t in texts:
+        haystack |= numbers_in(t)
     for s in sources:
         try:
             raw = s.read_text(encoding="utf-8")
@@ -193,7 +262,7 @@ def check(note: Path, sources: list) -> list:
         # 검증은 fact-check(5-C)가 맡는다. 그 줄에 등장한 수치는 haystack에 미리 넣어두었다.
         if AI_TAG.search(line):
             continue
-        scrubbed = DATE_LIKE.sub(" ", URL.sub(" ", line))
+        scrubbed = DATE_LIKE.sub(" ", URL.sub(" ", FACT_MARKUP.sub(" ", line)))
         for m in NUM.finditer(scrubbed):
             tok = m.group(1)
             v = parse_number(tok)
@@ -242,9 +311,11 @@ def run_sources(stamp: str, mkt: str, window_days: int = 3) -> list:
     add(HERE / "analysis" / f"AI클레임_{stamp}_{mkt}_판정.md")
     for p in sorted((HERE / "analysis").glob(f"AI클레임_{stamp}_{mkt}_[AB]_판정.md")):   # 배경 묶음 판정표(2026-10-14)
         add(p)
+    for p in sorted((HERE / "data" / "run_evidence").glob(f"research_branch*_{stamp}_{mkt}*.md")):   # 리서치 갈래 파일
+        add(p)
     add(HERE / "journal" / f"carry_{stamp}_{mkt}.md")
-    for n in ("sources.json", "market_map.json", "scenarios.json", "theses.json",
-              "equity_curve.jsonl", "allocation.jsonl", "position_peaks.json"):
+    # 원장은 저장소 말뭉치(db_corpus)가 본다 — 남은 렌더본(sources·market_map·theses·자산 곡선)도 있으면 같이 넣는다
+    for n in ("sources.json", "market_map.json", "theses.json", "equity_curve.jsonl"):
         add(HERE / "journal" / n)
     for k in ("signal", "approved"):
         add(HERE / "signals" / f"{k}_{stamp}_{mkt}.json")
@@ -277,8 +348,12 @@ def main() -> int:
         print(f"분석노트 없음: {note}", file=sys.stderr)
         return 2
     sources = run_sources(args.run[0], args.run[1].lower()) if args.run else []
+    texts = ()
     if args.run:
         print(f"표준 출처 {len(sources)}개(--run {args.run[0]} {args.run[1]})", file=sys.stderr)
+        corpus = db_corpus(args.run[0], args.run[1].lower())
+        texts = (corpus,) if corpus else ()
+        print(f"저장소 말뭉치 {len(corpus):,}자(이번 run 사실·재료 본문·판단 원장)", file=sys.stderr)
     for s in args.source:
         p = Path(s)
         if not p.is_absolute():
@@ -289,7 +364,7 @@ def main() -> int:
         if p not in sources:
             sources.append(p)
 
-    misses = check(note, sources)
+    misses = check(note, sources, texts)
     if not misses:
         print(f"전사 검증 OK — {note.name}의 수치가 모두 재료에서 확인됨")
         return 0

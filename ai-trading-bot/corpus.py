@@ -13,6 +13,10 @@
 **파이프라인을 단계로 쪼개면서 이 구멍이 커졌다** — 단계마다 문맥을 새로 열면 "어제 그 파일을
 받았다"는 기억이 사라진다. 기억을 없앤 대가로 **파일 경로를 만들어야** 하고, 이 스크립트가 그것이다.
 
+저장소(2026-10-17): 사실·재료는 파일이 아니라 저장소(`journal/trading.db`)에 있다 — 색인·검색은 파일에 더해 저장소 텍스트를
+같이 본다: 사실 원장(종류별 한 줄 · 옛 문장 · 원문 인용 — `db:ev_fact`) · 뉴스레터 발행분 본문(`db:mat_issue/<id>`) ·
+링크 한 홉 원문(`db:mat_link/<id>`). 출력 형식은 파일과 같다(`── <출처>  (n건)` · `L<줄>`).
+
 사용:
     python3 corpus.py index                        # 무엇을 가지고 있나 (캡처 파일에 넣는다)
     python3 corpus.py search 리밸런싱 정기변경        # 전문 검색 (OR)
@@ -29,6 +33,9 @@ from datetime import datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+import db  # noqa: E402
 # 누적 자산이 쌓이는 곳. data/는 과거 재료도 포함한다(오늘 것만 보면 그저께 사건을 놓친다).
 ROOTS = ["_raw_sources", "analysis", "journal", "data"]
 TEXT_EXT = {".md", ".txt", ".json", ".jsonl", ".csv", ".html", ".htm", ".pdf"}
@@ -89,6 +96,43 @@ def walk() -> list:
     return out
 
 
+def db_docs() -> list:
+    """저장소 텍스트 문서 [(이름, 본문, 날짜)] — 사실 원장 한 덩어리(행마다 한 줄) · 발행분마다 · 받은 링크 원문마다.
+    못 읽으면 읽기 실패 원장에 남긴다(빈 목록은 '없음'이 아니다)."""
+    out = []
+    try:
+        lines = []
+        try:
+            import facts as _f
+            line_of = _f.render_line
+        except Exception:                                     # noqa: BLE001
+            line_of = None
+        for r in db.q("SELECT id, kind, as_of, legacy_text, quote FROM ev_fact ORDER BY rid"):
+            text = r["legacy_text"] if r["kind"] == "legacy" or line_of is None else line_of(r["id"])
+            q = f' · 인용 "{r["quote"][:200]}"' if r.get("quote") else ""
+            lines.append(f"{r['id']} [{r['kind']}] as-of {r['as_of'] or '미확인'} · {text or ''}{q}")
+        if lines:
+            out.append(("db:ev_fact (사실 원장)", "\n".join(lines), ""))
+        for r in db.q("SELECT id, source, sender, day, subject, body FROM mat_issue ORDER BY day, id"):
+            out.append((f"db:mat_issue/{r['id']} {r.get('source') or r.get('sender') or ''} {r.get('day') or ''}".rstrip(),
+                        f"{r.get('subject') or ''}\n{r.get('body') or ''}", str(r.get("day") or "")))
+        # 링크 본문 = 마지막으로 성공한 판(v3 · db.link_body — 옛 행은 옛 body 칸)
+        for r in db.q("SELECT l.id, l.url, l.title, i.day FROM mat_link l LEFT JOIN mat_issue i ON i.id=l.issue_id"
+                      " WHERE l.version_id IS NOT NULL OR (l.fetched=1 AND l.body IS NOT NULL AND l.body<>'') ORDER BY l.id"):
+            lb, _e = db.link_body(r["id"])
+            if lb:
+                out.append((f"db:mat_link/{r['id']} {r.get('url') or ''}".rstrip(), f"{r.get('title') or ''}\n{lb}",
+                            str(r.get("day") or "")))
+    except db.TestGuard:
+        raise
+    except Exception as e:                                    # noqa: BLE001 — 저장소를 못 읽으면 실패로 남긴다
+        rec = ("db:journal/trading.db", f"{type(e).__name__}: {e}"[:160])
+        if rec not in READ_FAILURES:
+            READ_FAILURES.append(rec)
+        print(f"  [읽기 실패] 저장소: {type(e).__name__}", file=sys.stderr)
+    return out
+
+
 def title_of(p: Path) -> str:
     """첫 헤더 또는 첫 의미 있는 줄. 무엇이 담긴 파일인지 한눈에 보이게 한다."""
     t = read_text(p)[:4000]
@@ -120,6 +164,13 @@ def cmd_index(a) -> int:
             print(f"     {when}  {st.st_size:>8,}B  {p.relative_to(HERE)}", file=buf)
             if a.titles:
                 print(f"                          └ {title_of(p)}", file=buf)
+    docs = db_docs()
+    n_fact = sum(d[1].count("\n") + 1 for d in docs if d[0].startswith("db:ev_fact"))
+    iss = [d for d in docs if d[0].startswith("db:mat_issue/")]
+    lnk = [d for d in docs if d[0].startswith("db:mat_link/")]
+    print(f"  ── db(저장소)/  (사실 {n_fact}행 · 발행분 {len(iss)}통 · 링크 원문 {len(lnk)}건 — `corpus.py search`가 같이 뒤진다)", file=buf)
+    for name, _body, day in (sorted(iss, key=lambda d: d[2], reverse=True)[:30] if brief else iss):
+        print(f"     {name}", file=buf)
     if READ_FAILURES:            # --titles가 읽기를 시도했다면 실패도 여기 실린다
         print(f"\n  ★ 읽지 못한 파일 {len(READ_FAILURES)}개 — 이 파일들은 검색에도 안 걸린다:",
               file=buf)
@@ -140,12 +191,16 @@ def cmd_search(a) -> int:
         print("검색어를 하나 이상 주어라.", file=sys.stderr)
         return 2
     files = walk()
+    docs = db_docs()
     buf = io.StringIO()
-    print(f"■ 코퍼스 검색 — {', '.join(kws)}  ({len(files)}개 파일 대상)", file=buf)
+    print(f"■ 코퍼스 검색 — {', '.join(kws)}  ({len(files)}개 파일 + 저장소 문서 {len(docs)}개 대상)", file=buf)
     print(f"  실행 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n", file=buf)
     total_hits, hit_files = 0, 0
-    for p in files:
-        t = read_text(p)
+    for p in [*files, *docs]:
+        if isinstance(p, tuple):
+            label, t = p[0], p[1]
+        else:
+            label, t = str(p.relative_to(HERE)), read_text(p)
         if not t:
             continue
         lines = t.splitlines()
@@ -157,7 +212,7 @@ def cmd_search(a) -> int:
             continue
         hit_files += 1
         total_hits += len(hits)
-        print(f"  ── {p.relative_to(HERE)}  ({len(hits)}건)", file=buf)
+        print(f"  ── {label}  ({len(hits)}건)", file=buf)
         for i, line in hits[:a.max_per_file]:
             print(f"     L{i:<5} {line}", file=buf)
         if len(hits) > a.max_per_file:

@@ -22,16 +22,33 @@
     python3 base_rates.py 005930 --days 500 --up2 5.0   # 조건을 직접 지정
 """
 import argparse
+import re
+import sqlite3
 import statistics
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from kis_client import KisClient, KisError, drop_incomplete_session
+import db
+from kis_client import KisClient, KisError
 
 HERE = Path(__file__).parent
 KST = timezone(timedelta(hours=9))
 HORIZONS = (1, 3, 5, 10, 20)
+KR_WINDOW_DAYS = 150      # 국내 일봉 한 번 조회 창(달력일) — 아래 fetch의 한 쪽 크기와 같다
+
+
+def kr_daily(client, ticker: str, start: str, end: str) -> list:
+    """국내 일봉 — `client.domestic_daily(ticker, start, end)`와 같은 반환(최신순 · date=YYYYMMDD).
+
+    일봉은 저장소(mk_bar)에 한 번 받아 두고 같은 조회는 표에서 준다(`db.domestic_daily`). 그런데 그 재사용은 **조회 구간이
+    같을 때만** 걸린다 — 가격 수준(90일)·놓친 급등(22일)·기저율(150일 쪽)이 같은 종목을 저마다 다른 구간으로 물으면 한 run에서
+    같은 일봉을 세 번 받는다. 그래서 끝 날짜가 같으면 150일 창 하나로 묻고 필요한 앞부분만 잘라 쓴다(반환은 원래 구간 그대로).
+    150일보다 긴 구간은 그대로 묻는다."""
+    s0 = (datetime.strptime(end, "%Y%m%d") - timedelta(days=KR_WINDOW_DAYS)).strftime("%Y%m%d")
+    if start < s0:
+        return db.domestic_daily(client, ticker, start, end)
+    return [r for r in db.domestic_daily(client, ticker, s0, end) if r["date"] >= start]
 
 
 def fetch(client: KisClient, ticker: str, market: str, excd: str, days: int) -> list:
@@ -45,7 +62,7 @@ def fetch(client: KisClient, ticker: str, market: str, excd: str, days: int) -> 
         floor = end - timedelta(days=days)
         while end > floor:
             start = max(floor, end - timedelta(days=150))
-            page = client.domestic_daily(ticker, start.strftime("%Y%m%d"), end.strftime("%Y%m%d"))
+            page = kr_daily(client, ticker, start.strftime("%Y%m%d"), end.strftime("%Y%m%d"))
             page = [r for r in page if r["date"] not in seen]
             if not page:
                 break
@@ -56,7 +73,7 @@ def fetch(client: KisClient, ticker: str, market: str, excd: str, days: int) -> 
     else:
         rows, bymd, seen = [], "", set()
         while len(rows) < days:
-            page = client.overseas_daily(ticker, excd=excd, bymd=bymd)
+            page = db.overseas_daily(client, ticker, excd=excd, bymd=bymd)
             page = [r for r in page if r["date"] not in seen]
             if not page:
                 break
@@ -65,7 +82,7 @@ def fetch(client: KisClient, ticker: str, market: str, excd: str, days: int) -> 
             oldest = min(r["date"] for r in page)
             prev = datetime.strptime(oldest, "%Y%m%d") - timedelta(days=1)
             bymd = prev.strftime("%Y%m%d")
-    rows, _ = drop_incomplete_session(rows)
+    # 미완성 세션은 db 일봉이 이미 뺐다(need_final — 관측 시각 > 그 세션 마감인 확정 행만 · 2026-10-19 Codex U04)
     return rows
 
 
@@ -115,30 +132,52 @@ def condition_rows(rows: list, name: str, test) -> list:
     return [i for i in range(len(rows)) if i >= max(HORIZONS) and test(rows, i)]
 
 
-def report(rows: list, up2: float, ticker: str) -> None:
-    n = len(rows)
-    print(f"{ticker} — 일별 {n}행 ({rows[-1]['date']} ~ {rows[0]['date']})\n")
-
+def conditions(up2: float) -> list:
+    """(저장 코드, 표시 문구, 판정 함수) — 보고(report)와 저장(record)이 같은 조건을 쓴다."""
     ma20 = lambda rs, i: sum(r["close"] for r in rs[i:i + 20]) / 20 if i + 20 <= len(rs) else None
-
-    conds = [
-        ("전체 (조건 없음 — 비교 기준선)", lambda rs, i: True),
-        (f"직전 2거래일 누적 +{up2}% 이상 (급등 직후)",
+    return [
+        ("all", "전체 (조건 없음 — 비교 기준선)", lambda rs, i: True),
+        (f"up2_ge_{up2:g}", f"직전 2거래일 누적 +{up2}% 이상 (급등 직후)",
          lambda rs, i: i + 2 < len(rs) and rs[i + 2]["close"]
          and (rs[i]["close"] - rs[i + 2]["close"]) / rs[i + 2]["close"] * 100 >= up2),
-        (f"직전 2거래일 누적 -{up2}% 이하 (급락 직후)",
+        (f"down2_le_-{up2:g}", f"직전 2거래일 누적 -{up2}% 이하 (급락 직후)",
          lambda rs, i: i + 2 < len(rs) and rs[i + 2]["close"]
          and (rs[i]["close"] - rs[i + 2]["close"]) / rs[i + 2]["close"] * 100 <= -up2),
-        ("종가가 20일선 위",
+        ("above_ma20", "종가가 20일선 위",
          lambda rs, i: (m := ma20(rs, i)) is not None and rs[i]["close"] > m),
-        ("종가가 20일선 아래",
+        ("below_ma20", "종가가 20일선 아래",
          lambda rs, i: (m := ma20(rs, i)) is not None and rs[i]["close"] < m),
-        ("3거래일 연속 양봉 직후",
+        ("up_streak_3", "3거래일 연속 양봉 직후",
          lambda rs, i: i + 3 < len(rs) and all(rs[k]["close"] > rs[k + 1]["close"]
                                                for k in (i, i + 1, i + 2))),
     ]
 
-    for label, test in conds:
+
+STATE_PRECEDENCE = ("up2_ge_", "down2_le_", "up_streak_3", "below_ma20", "above_ma20", "all")   # 구체적인 조건 먼저
+
+
+def state_of(rows: list, codes) -> str:
+    """지금 상태에 맞는 조건 코드(2026-10-19 · Codex J01) — 저장된 코드(`codes`) 중 구체적인 것부터(급등·급락 직후 → 연속 양봉 →
+    20일선 아래/위 → 전체) 오늘(rows[0] · 최신순) 참인 첫 코드. 판정 함수는 기록과 같은 conditions(). 없으면 'all'."""
+    codes = list(codes or [])
+    for pre in STATE_PRECEDENCE:
+        for code in [c for c in codes if c == pre or (pre.endswith("_") and c.startswith(pre))]:
+            m = re.search(r"(\d+(?:\.\d+)?)$", code) if pre.endswith("_") else None
+            up2 = float(m.group(1)) if m else 5.0
+            test = next((t for c, _, t in conditions(up2) if c == code), None)
+            try:
+                if test and rows and test(rows, 0):
+                    return code
+            except (KeyError, TypeError, ZeroDivisionError):
+                continue
+    return "all"
+
+
+def report(rows: list, up2: float, ticker: str) -> None:
+    n = len(rows)
+    print(f"{ticker} — 일별 {n}행 ({rows[-1]['date']} ~ {rows[0]['date']})\n")
+
+    for _, label, test in conditions(up2):
         idxs = condition_rows(rows, label, test)
         print(f"■ {label}   (해당일 {len(idxs)}일)")
         if len(idxs) < 5:
@@ -152,6 +191,46 @@ def report(rows: list, up2: float, ticker: str) -> None:
 
     print("※ 이 표는 분포를 보여줄 뿐 방향을 예측하지 않는다. n이 작으면 우연이고,")
     print("  국면이 바뀌면 과거는 무효다. 크기와 트리거 수준을 정하는 데 쓴다.")
+
+
+def _iso_day(d: str) -> str:
+    d = str(d)
+    return f"{d[:4]}-{d[4:6]}-{d[6:8]}" if len(d) == 8 and d.isdigit() else d
+
+
+def record(rows: list, up2: float, ticker: str, market: str, stamp: str = None) -> int:
+    """조건부 기저율을 저장소(co_base_rate)에 행으로 남긴다 — 보고와 같은 조건·창(HORIZONS). 반환 쓴 행 수.
+
+    보고가 숫자를 내지 않는 조건(해당일 5일 미만 — 일화)은 저장하지 않는다. `hit_rate`는 상승 비율(0~1),
+    `avg_ret`·`median_ret`는 %. 조건 행에는 같은 창의 '전체' 기준선(n·상승 비율·중앙값)을 같이 적는다 — 기준선과 비교해야 읽힌다."""
+    as_of = _iso_day(rows[0]["date"])
+    stats = {}
+    for code, _, test in conditions(up2):
+        idxs = condition_rows(rows, code, test)
+        if len(idxs) < 5:
+            continue
+        for h in HORIZONS:
+            vals = [fr[h] for i in idxs if (fr := forward_returns(rows, i)) and h in fr]
+            if vals:
+                stats[(code, h)] = {"n": len(vals), "hit_rate": sum(1 for v in vals if v > 0) / len(vals),
+                                    "avg_ret": sum(vals) / len(vals), "median_ret": statistics.median(vals)}
+    with db.tx():
+        for (code, h), s in stats.items():
+            db.base_rate_put(market, ticker, code, h, s["n"], s["hit_rate"], s["avg_ret"], s["median_ret"], as_of=as_of,
+                             stamp=stamp, baseline=None if code == "all" else stats.get(("all", h)))
+    return len(stats)
+
+
+def record_touch(rows: list, ticker: str, market: str, level: float, tp: dict, stamp: str = None) -> None:
+    """진입 기준가 도달 확률(reach_prob)도 같은 표에 — 조건 `touch_le_<기준가>`, 창 = 기간(거래일)."""
+    db.base_rate_put(market, ticker, f"touch_le_{level:g}", int(tp.get("horizon") or 0), int(tp.get("n") or 0), tp.get("prob"),
+                     as_of=_iso_day(rows[0]["date"]), stamp=stamp)
+
+
+def _stamp_of(out: str, market: str):
+    """`--out data/run_evidence/base_rates_<YYMMDD>_<mkt>.txt`의 스탬프 — 저장 행을 그 run에 잇는다(없으면 None)."""
+    m = re.search(r"_(\d{6})_(kr|us)\b", Path(out).name) if out else None
+    return m.group(1) if m and m.group(2) == market else None
 
 
 def main() -> int:
@@ -175,8 +254,18 @@ def main() -> int:
     if len(rows) < 60:
         print(f"일별 시세가 {len(rows)}행뿐 — 기저율을 낼 수 없다(최소 60행).", file=sys.stderr)
         return 2
+    stamp = _stamp_of(args.out, args.market)
+    try:
+        record(rows, args.up2, args.ticker, args.market, stamp)
+    except sqlite3.Error as e:                    # 저장소 기록 실패가 기저율 출력(증거 파일)을 막지 않는다
+        print(f"★ 기저율을 저장소에 못 남겼다({type(e).__name__}: {e})", file=sys.stderr)
     if args.touch is not None:
         tp = touch_prob(rows, args.touch, args.horizon)
+        if tp.get("n"):
+            try:
+                record_touch(rows, args.ticker, args.market, args.touch, tp, stamp)
+            except sqlite3.Error as e:
+                print(f"★ 도달 확률을 저장소에 못 남겼다({type(e).__name__}: {e})", file=sys.stderr)
         line = (f"[도달 확률] {args.ticker} 기준가 {args.touch:,.2f} (현재 {tp.get('now', 0):,.2f} 대비 {tp.get('depth_pct', 0):+.1f}%) · "
                 f"{args.horizon}거래일 안 도달 {('%.0f%%' % (tp['prob'] * 100)) if tp.get('prob') is not None else '산정 불가'} "
                 f"(n={tp.get('n')}) → 논지 다리에 reach_prob {round(tp['prob'], 2) if tp.get('prob') is not None else 'null'} · reach_n {tp.get('n')}")

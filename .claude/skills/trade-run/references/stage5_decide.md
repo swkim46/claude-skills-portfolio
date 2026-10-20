@@ -9,7 +9,8 @@
 SG form  trade-run dispatch dir=<REPO>/ai-trading-bot
 SG judge trade-run dispatch <id>=<값> … \
     deliverable=<approved_*.json 절대경로> note=<분석노트 절대경로> \
-    signal=<signals/signal_*.json 절대경로> dir=<REPO>/ai-trading-bot
+    signal=<signals/signal_*.json 절대경로> approved=<signals/approved_*.json 절대경로> \
+    dir=<REPO>/ai-trading-bot
 # 제안 0건
 SG form  trade-run no_trade dir=<REPO>/ai-trading-bot
 SG judge trade-run no_trade <id>=<값> … \
@@ -24,23 +25,26 @@ SG judge trade-run no_trade <id>=<값> … \
 `status=`는 기권 run도 예외 없이 **`python3 account_status.py --market <mkt> --stamp <YYMMDD> --refresh`**를 돌려
 만든 계좌 현황 파일이다(`stage6_execute.md` §7) — 기권일수록 주식:현금 비율이 보고 끝에 보여야 한다.
 **둘 중 하나는 반드시 돈다.** 기권도 검문 대상이다. **기권이어도 `risk_guard.py`는 돈다** —
-`approved=`가 그 산출이고, 게이트는 거기서 `deficit_short`(아래 〈미달 강제〉)를 읽는다.
+`approved=`가 그 산출이고, 게이트는 거기서 `deficit_short`(아래 〈미달 강제〉)·`undersized_short`(4-b 〈확인된 축 소액 보유〉)·
+`factor_short`(〈요인 판정〉)를 읽는다.
 
 **★ 이 단계는 모델이 돈다 — `risk_guard.py`와 dry-run과 이 게이트까지 전부.** 무인 슬롯에서도
 그렇다(`run_auto.py`는 토큰만 확인하고 `--send`만 자기가 한다 · `../SKILL.md` 소유권 경계).
 **게이트를 남에게 넘기지 마라** — 일을 안 한 쪽이 각서에 답하면 각서가 성립하지 않는다.
 
 `signal=`은 시그널 JSON을 직접 검사하는 데 쓴다 — `scenarios`·`standing_rules`·
-`material_gaps`·`evidence`·`horizon_days`가 실제로 실렸는지 게이트가 파일에서 확인한다.
+`material_gaps`·`facts`·`horizon_days`가 실제로 실렸는지 게이트가 파일에서 확인한다.
 **노트에만 적고 시그널에 안 실으면 다음 run이 못 읽으므로 그 자리에서 막힌다.**
 
 
 **산출** `signals/signal_<YYMMDD>_<mkt>.json` → `signals/approved_<YYMMDD>_<mkt>.json`
 
 ```
-# 시그널 초안을 쓴 뒤 — 갈래 ① 주문 근거 검증(아래 〈갈래 ①〉): extract → 배경 에이전트 발사 → (본 세션 일) → risk_guard 직전 합류
-python3 fc_track1.py extract --stamp <YYMMDD> --market <mkt>
-python3 fc_track1.py decide --mode pre --stamp <YYMMDD> --market <mkt>   # 감사를 기다리지 않는다 — 판정표 기준
+# 시그널 초안을 쓴 뒤 — 갈래 ① 주문 근거 검증(아래 〈갈래 ①〉): 집행 표 반영 → 고정 → 배경 에이전트 발사 → (본 세션 일) → risk_guard 직전 합류
+python3 db.py import <YYMMDD> <mkt>                                       # 시그널 제안·facts[]를 집행 표로(다시 돌려도 같다)
+python3 facts.py queue --stamp <YYMMDD> --market <mkt> --batch track1
+python3 facts.py render-claims --stamp <YYMMDD> --market <mkt> --batch track1
+python3 facts.py decide --mode pre --stamp <YYMMDD> --market <mkt> --signal signals/signal_<YYMMDD>_<mkt>.json   # 감사를 기다리지 않는다 — 판정표 기준
 python3 note_lint.py signal  --stamp <YYMMDD> --market <mkt>     # → 시그널 note_lint (승인 파일로 옮겨져 dispatch가 본다)
 python3 risk_guard.py signals/signal_<…>.json --snapshot data/snapshot_<…>.json --live   # --live: 보유 시세를 지금 값으로
 python3 execute.py signals/approved_<…>.json            # dry-run (필수)
@@ -62,17 +66,31 @@ python3 universe_apply.py --signal signals/signal_<…>.json --apply   # ★ 유
 함께 새 행이 생긴다. 같은 조건이 두 id를 받았으면 `python3 scenarios.py merge --from SC-a --into SC-b`(손편집 금지).
 *실사례(2026-09-21): 문구만 손본 이월 8건이 새 id를 받아 손으로 병합했다.*
 
-### ★★ 갈래 ① — 주문 근거 검증 (시그널 초안 뒤 배경 · `risk_guard` 직전 합류 · 감사는 전파 즉시 · 2026-10-13 · 2026-10-14)
+**★ 사건과 가지 조건을 구조로 적는다(2026-10-19 · Codex S04·J02).** 날짜가 정해진 사건(실적·지표·정책 발표)은 시그널 `events[]`에
+`{id, subject, kind(earnings|macro|policy|corporate|factor|price), scheduled, window_end(관측 마감), source, metrics[{name, domain(num|enum), unit, values}]}`로
+한 번 적고, 그 사건의 시나리오 행마다 `event`(그 id)와 `cond[]`(원자 AND — `{metric, op, value, value_hi?, unit?, window?}` ·
+`op ∈ < <= > >= == between in is delayed else`)를 붙인다. 조건 문장(`condition`)은 그대로 두되 **기계는 `cond`만 읽는다**(문장을 해석하지 않는다).
+`cond`가 없거나 틀리면 그 행은 `text_only`로 승격되고(막지 않는다) 경고가 나온다. **`limits.scenario_cond_required` 날짜부터 `note_lint signal`이
+위반으로 막는다** — ① 숫자 조건(%·이상·이하·비교 기호)인데 `cond`가 없는 행 ② 사건의 지표 공간을 가지들이 다 덮지 못함(미커버 칸·지연 가지 없음·
+대응이 다른 겹침). 남는 칸은 `else` 행('유지·추가 확인')으로, 발표 지연은 `delayed` 행(`next_check` = `window_end`)으로 묶는다(`stage3_map.md` 〈gaps〉).
+미리 보기: `python3 scenarios.py check --signal signals/signal_<st>_<mkt>.json`(종료 3이면 빈칸이 있다).
+**병합 규칙** — `promote`는 조건이 같다는 것만으로 합치지 않는다: ① `persistent_id` ② 구조화 행은 같은 사건 + 같은 조건 원자 ③ 글 행은 부호·소수점·
+비교 기호를 남긴 같은 문장 — 그리고 **대응이 새로 더하는 것이 없을 때만** 출처를 덧붙인다. 조건은 같은데 대응이 다르면 새 행 +
+`possible_duplicate_of`가 붙는다(이어받을 가지면 다음엔 `persistent_id` + `scenarios.py respond --replace`). 같은 시그널 안의 행끼리는 병합하지 않는다
+(한 표 = 서로 다른 가지). 원장 행의 조건 구조를 바꿀 때는 `scenarios.py set-cond --id SC-… --cond '<JSON>'`(승격이 조용히 덮지 않는다).
+*실사례(Codex 재현 · 2026-10-19): 옛 정규화가 '-'와 '.'을 지워 "-5% 이하"와 "5% 이하", "5.0%"와 "50%"를 같은 조건으로 합쳤다.*
 
-**★ 배경으로 돌린다(2026-10-14).** `extract` 직후 배경 에이전트 하나가 아래 코드 블록의 조달 → 판정표 → `LINT OK` → `corrections`
-→ `fc_propagate.py plan` → (교정 0이면) `verify --write` · 게이트 ② · 감사 발사를 한다(`stage4_note.md` 5-C 〈배경 에이전트〉 지시문 그대로 ·
-`init`·`apply`·시그널 편집 금지). 본 세션은 그동안 `note_lint.py signal` · `scenarios.py promote` · `base_rates` · `universe_apply`를 한다.
-**합류 = `risk_guard` 직전** — 판정표 끝이 `본 세션 적용 대기`면 `fc_propagate.py apply` → `verify --write` → 게이트 ② → 감사 발사 →
+### ★★ 갈래 ① — 주문 근거 검증 (시그널 초안 뒤 배경 · `risk_guard` 직전 합류 · 감사는 교정 반영 즉시 · 2026-10-13 · 2026-10-14)
+
+**★ 배경으로 돌린다(2026-10-14).** `render-claims` 직후 배경 에이전트 하나가 아래 코드 블록의 조달 → 판정 행(`facts.py verdict`) → 교정(`facts.py correct`)
+→ `LINT OK` → 판정표 렌더 → (교정 0이면) `REFS OK` · 게이트 ② · 감사 발사를 한다(`stage4_note.md` 5-C 〈배경 에이전트〉 지시문 그대로 ·
+`init`·`render-note`·시그널 편집 금지). 본 세션은 그동안 `note_lint.py signal` · `scenarios.py promote` · `base_rates` · `universe_apply`를 한다.
+**합류 = `risk_guard` 직전** — 판정표 끝이 `본 세션 적용 대기`면 `stage.py render-note` → `facts.py check-refs`(`REFS OK`) → `facts.py render-verdict --batch track1` → 게이트 ② → 감사 발사 →
 `decide --mode pre`. 판정표가 아직 안 끝났으면 **기다린다** — 근거가 서야 주문이 나간다. 10분 동안 판정표 파일이 그대로이고 완료 표시가
 없으면 한 번 다시 띄우고, 두 번째도 멈추면 본 세션이 남은 행을 채운다(조달 못 한 행은 `UNVERIFIABLE` + 시도 기록 → `LINT OK` →
 `decide --mode pre`가 그 근거의 제안만 뺀다 · fetch가 전면 장애일 때만 매수 없이 · 규율 매도는 그대로).
 
-**★ 주문은 감사를 기다리지 않는다(2026-10-13 17:30 개정 · 2026-10-14 감사 발사를 전파 직후로 당김).** 주문 전에는 판정표 검증까지만 한다.
+**★ 주문은 감사를 기다리지 않는다(2026-10-13 17:30 개정 · 2026-10-14 감사 발사를 교정 반영 직후로 당김).** 주문 전에는 판정표 검증까지만 한다.
 감사(최대 5회)는 게이트 ② 통과 즉시 배경으로 돌고, 결과는 `stage6_execute.md` 〈갈래 ① 감사 — 결과 반영 · 최대 5회 · 소급〉이 run을 닫기
 전에 받는다 — 판정표 재채점이 체결된 매수의 근거를 뒤집으면 되돌려 판다.
 운영자(2026-10-13 17:30): "감사 완료하고 매매하는 건 너무 과하다 — 매매와 관련된 팩트 체크는 배경 팩트 체크보다 빡빡하게
@@ -86,44 +104,80 @@ python3 universe_apply.py --signal signals/signal_<…>.json --apply   # ★ 유
 스스로 적었다 — 한 매수 근거는 규제기관 **도메인 루트 주소만으로** T1·MATCH였고, 매수 근거 6행 중 그 run에서 실제로 검증된 것은 2행이었다.
 
 ```
-python3 fc_track1.py extract --stamp <YYMMDD> --market <mkt>
-    # → analysis/AI클레임_<st>_<mkt>_주문근거.md (고정 목록 — 제안·재투자 후보 evidence · 숫자가 든 보유 판단 · 배분의 외부 사실)
-    # 근거를 바꾸거나 더하면: extract --append (판정표가 생긴 뒤 그냥 extract는 거부 — 2026-10-15)
+python3 db.py import <YYMMDD> <mkt>
+python3 facts.py queue --stamp <YYMMDD> --market <mkt> --batch track1
+python3 facts.py render-claims --stamp <YYMMDD> --market <mkt> --batch track1
+    # → analysis/AI클레임_<st>_<mkt>_주문근거.md (고정 목록 — 제안·재투자 후보 facts · 숫자가 든 보유 판단 · 배분의 외부 사실)
+    # 근거를 바꾸거나 더하면: render-claims --append (목록이 생긴 뒤 그냥 render-claims는 거부 — 2026-10-15)
 # ↓ 배경 에이전트(run_in_background) — 4단 5-C 〈배경 에이전트〉 지시문
 Skill(fact-check) — 그 목록으로 그룹 조달·판정(4단 5-C 3-a의 지시문 그대로 · 시간 상한 없음 · init 금지)
-    # → analysis/AI클레임_<st>_<mkt>_주문근거_판정.md (갈래 ② 판정표의 같은 출처 행을 옮겨 써도 된다 · 원 문구는 이 고정본 번호)
-python3 <fact-check>/scripts/lint_verdict.py analysis/AI클레임_<st>_<mkt>_주문근거_판정.md \
-    --claims analysis/AI클레임_<st>_<mkt>_주문근거.md --write                                    # LINT OK
-python3 <fact-check>/scripts/fc_propagate.py plan|verify analysis/AI클레임_<st>_<mkt>_주문근거_판정.md \
-    --stamp <YYMMDD> --market <mkt> [--write]                    # 교정 0이면 verify --write(PROPAGATE OK) → 게이트 ② → 감사 발사
-# ↓ 본 세션(risk_guard 직전 합류) — 교정이 있으면 apply → verify --write → 게이트 ② → 감사 발사
-python3 fc_track1.py decide --mode pre --stamp <YYMMDD> --market <mkt>
-    # 감사를 기다리지 않는다 — 판정표만으로 결정(감사는 전파 즉시 배경 · 최대 5회 · 결과는 6단 끝에 반영 · 결정을 뒤집으면 소급)
+    # → data/run_evidence/verdict_<st>_<mkt>_track1.jsonl (갈래 ② 판정의 같은 출처 행을 옮겨 써도 된다 · 원 문구는 이 고정본 번호)
+python3 facts.py verdict --batch data/run_evidence/verdict_<st>_<mkt>_track1.jsonl --stamp <YYMMDD> --market <mkt> --label track1
+python3 facts.py correct F-… --set <칸>=<값> --reason "…" --verdict <판정 #> --stamp <YYMMDD> --market <mkt>   # MISMATCH·STALE마다
+python3 facts.py lint --stamp <YYMMDD> --market <mkt> --batch track1                     # LINT OK
+python3 facts.py render-verdict --stamp <YYMMDD> --market <mkt> --batch track1
+    # → analysis/AI클레임_<st>_<mkt>_주문근거_판정.md (머리 LINT OK · 끝 REFS OK) · 교정 0이면 게이트 ② → 감사 발사
+# ↓ 본 세션(risk_guard 직전 합류) — 교정이 있으면 render-note → check-refs(REFS OK) → render-verdict → 게이트 ② → 감사 발사
+python3 facts.py decide --mode pre --stamp <YYMMDD> --market <mkt> --signal signals/signal_<YYMMDD>_<mkt>.json
+    # 감사를 기다리지 않는다 — 판정표만으로 결정(감사는 교정 반영 즉시 배경 · 최대 5회 · 결과는 6단 끝에 반영 · 결정을 뒤집으면 소급)
 # ↓ 정식 judge 전에 모의 감사 1회(배경 · 2026-10-15 · 4단 5-C 〈모의 감사〉) — 주문을 막지 않으려고 decide 뒤에 돈다.
 #   지적으로 판정이 바뀌면 고친 뒤 decide --mode post(체결된 매수의 근거가 무너지면 소급) → 정식 judge → FIRE
 ```
-(`<fact-check>` = `<REPO>/.claude/skills/fact-check`)
-
-- **근거 판정은 손으로 적지 않는다.** `decide`가 판정표의 판정·등급·행 번호(`fc_row`)·검증한 주소를 시그널 `evidence`에 덮어쓰고
-  `track1` 블록을 남긴다. `extract` 뒤에 근거를 더하면 그 행은 `UNVERIFIED_T1`이다.
-- **★ 고정본은 다시 뽑지 않고 덧붙인다(2026-10-15).** 근거 문구를 바꿨거나(교정 반영) `refill_candidates`를 늦게 더했으면
-  `python3 fc_track1.py extract --append --stamp <YYMMDD> --market <mkt>` — 새 번호로 덧붙이고(같은 자리의 옛 번호는 `superseded_by`),
-  판정표에 **그 번호의 행을 더한다**. 옛 번호의 판정 행은 지우지 않는다(원 문구의 기록). 판정표가 생긴 뒤 `extract`를 그냥 다시 돌리면
+- **★ 제안의 근거는 사실 id다** — 제안·`refill_candidates`마다 `"facts": [{"id": "F-000731", "role": "support|background|against",
+  "support": "<이 사실이 받치는 것 — 논지·크기·배분·보유·매도 중 무엇의 어느 문장>"}]`(옛 `evidence` 칸 대신). `db.py import`가 이것을 집행 표로 옮기고,
+  주문 근거 판정은 그 사실들의 저장소 판정을 잇는다(`risk_guard`가 조인으로 본다).
+- **★ 크기 사유의 숫자는 사실 칸에서 온다** — `expected_upside_pct`(목표가 대비 기대 상승)는 `analyst` 사실의 `target_new`와 현재가로, 수주가 매출에서
+  차지하는 비율은 `order` 사실의 `pct_of_sales`로 계산하고 `size_why`에 그 사실 id를 적는다(예: `목표가 F-000731 기준 +24%`). 사실 칸에 없는 숫자를
+  손으로 만들지 않는다 — 없으면 3단처럼 조사해 `facts.py add`로 먼저 넣는다.
+- **근거 판정은 손으로 적지 않는다.** `decide`가 저장소 판정으로 통과·제외를 정하고 `track1` 블록을 남긴다(`--signal`이면 시그널 파일에도).
+  `render-claims` 뒤에 근거를 더하면 그 근거는 `UNVERIFIED_T1`이다.
+- **★ 고정본은 다시 뽑지 않고 덧붙인다(2026-10-15).** 근거를 바꿨거나 `refill_candidates`를 늦게 더했으면
+  `python3 db.py import <YYMMDD> <mkt>` → `python3 facts.py render-claims --append --stamp <YYMMDD> --market <mkt> --batch track1` — 새 번호로 덧붙이고,
+  그 번호의 판정 행을 `facts.py verdict`로 더한다. 옛 번호의 판정 행은 지우지 않는다(원 문구의 기록). 목록이 생긴 뒤 `render-claims`를 그냥 다시 돌리면
   종료코드 3으로 거부된다. *실사례: 10-14 미국 run은 교정 5건 뒤 고정본을 두 번 다시 뽑아 교정 뒤 문구를 판정했고, 원 판정 MISMATCH 4건이
   'MISMATCH 0건'으로 사라져 감사가 grading-basis로 세 번 FAIL을 줬다.*
-- **★ 주문 근거 판정표는 행마다 `받치는 것:`**(lint (z) · 2026-10-15) — 비고에 `받치는 것: <논지|크기|배분|보유|매도> — <그 근거가 떠받치는
-  시그널 문장의 요지>`. 쓰다가 다른 회사·다른 지표·다른 분기인 것이 드러나면 그 근거를 바꾼다(MATCH여도 그 매수를 받치지 못한다).
+- **★ 거부 뒤 근거 번호 교체는 교정이 아니라 회피다(2026-10-19).** `risk_guard`가 근거 사유(MISMATCH·주문 근거 검증·근거 사실 없음 등)로
+  거부한 뒤 그 제안의 사실 번호를 바꿔 다시 돌리면, `risk_guard`가 같은 run의 앞 회차를 기억해(저장소 `ex_screen`) **그 제안만**
+  '거부 회피 재실행'으로 거부한다 — 나머지 제안은 그대로 승인·전송된다. 값이 틀린 사실은 `facts.py correct`로 번호를 유지한 채 고치고
+  재판정이 가른다(같은 번호의 재판정은 회피로 보지 않는다 — 알려진 잔여). 논지의 근거가 틀렸으면 주문이 아니라 논지를 처리한다(아래 〈근거가 틀린 논지〉).
+  '논지 근거 … 없다' 거부 뒤 그 논지의 근거 번호를 제안에 넣는 것은 회피가 아니다 — 원장에 미리 적힌 근거다(채우기와 같다).
+- **★ 주문 근거 판정표는 행마다 `받치는 것:`**(lint (z) · 2026-10-15) — 판정 행 `support` 칸에 쓰고 판정표 비고에 `받치는 것: <논지|크기|배분|보유|매도> — <그 근거가 떠받치는
+  시그널 문장의 요지>`로 렌더된다. 쓰다가 다른 회사·다른 지표·다른 분기인 것이 드러나면 그 근거를 바꾼다(MATCH여도 그 매수를 받치지 못한다).
   부재 단정은 `검색:` 기록(lint (s)), 감사 지적 `무시:`는 반증 링크·행 지목과 함께(lint (ⓙ)) — fact-check §5.
-- **`decide --mode pre`는 판정표만으로 결정한다** — 근거 행이 전부 MATCH이고 T1/T2가 하나 이상인 매수만 통과, MATCH가 아니거나
-  T3뿐인 근거의 매수는 빠진다. 판정표에 `LINT OK`·`PROPAGATE OK` 줄이 없으면 거부한다. 감사 결과는 기다리지 않는다.
+- **`decide --mode pre`는 판정표만으로 결정한다 — 통과 규칙은 도구(`facts.decide`) 하나다(FB-261017-9)**: 받치는 사실(support) 중
+  MATCH(T1/T2)가 하나 이상 · 받치는 사실에 MISMATCH·UNVERIFIED_T1 없음 · 배경 사실에 MISMATCH 없음. STALE·UNVERIFIABLE은 다른 받치는
+  사실이 MATCH(T1/T2)면 제외 사유가 아니다. `facts.py lint --batch track1`이 `LINT OK`가 아니면 거부한다. 감사 결과는 기다리지 않는다.
+  **소급은 `decide --mode post` 출력에서만 — 판단으로 되팔지 않는다.** STALE·UNVERIFIABLE만 남은 체결 매수는 post가 `stale_support`로 내고
+  같은 run에서 다시 확인하거나 보유를 재판정한다 — 미결이면 `stage.py close`가 닫지 않는다(`stage6_execute.md` 〈낡은 근거〉).
+  *실사례(10-14 미국): 도구가 통과시킨 매수를 이 문서의 옛 문구('근거 행 전부 MATCH')로 손수 되팔았고 다음 날 +5.1%였다.*
 - `risk_guard`(`limits.fc_track1_required`)가 `track1` 없음 · drop 종목 · `UNVERIFIED_T1` · 판정표 MATCH(T1/T2) 근거 0인 매수를
   **'주문 근거 검증 미통과'로 거부**한다 — 타당성 거부라 논지는 armed로 남고 다음 run이 다시 본다.
+- **★ 판정은 그 판정이 본 사실 판에만 선다(2026-10-19 · Codex R04 · W03).** 판정 행마다 `fact_rev`(검증자가 큐 행에서 그대로 옮긴 판 —
+  빠지면 클레임이 고정될 때의 판이고, 그 뒤 값이 바뀌었으면 그 행은 거부된다 · 넣는 순간의 지금 판으로 추정하지 않는다)가 붙고, 사실 값이
+  바뀌면(`facts.py correct`의 값 칸 · 재사용 등록의 빈 값 채움 · 사실의 인용이 옛 판과 새 판 **모두에** 있지 않은 근거 본문 판 교체
+  `correct --set source_version=`) `value_rev`가 새 판으로 올라 그 앞 판정은 세지 않는다(REVERIFY).
+  그래서 MISMATCH를 `correct`로 고친 사실은 **고친 값을 다시 판정해야**(`facts.py verdict` · round+1) 선다 — `risk_guard`는
+  `근거에 MISMATCH 포함 … (교정됨 — 고친 값으로 재판정 필요)`, MATCH 뒤 값이 바뀐 사실은 `재판정 필요 — …`로 거부한다(둘 다 유효성 거부 ·
+  같은 번호의 재판정은 회피가 아니다). 표기 칸(출처 이름·티어 등)만 고치면 rev만 오르고 판정은 그대로 센다.
+  판 이력: `facts.py history F-…` · `facts.py show F-… --rev N` · `facts.py correct F-… --from-rev N --reason "…"`(새 교정으로 되돌림).
+- **★ 〈근거가 틀린 논지〉 — 주문을 고치지 말고 논지를 처리한다(2026-10-19).** 논지 근거(`evidence`)의 사실이 MISMATCH로 판정 불일치가 되면
+  `theses.py check`(2단)가 맨 위에 `★ 재검토 필요`로 띄우고 `risk_guard`는 그 논지의 매수를 '논지 재검토 중'으로 거부한다. 출구는 둘 —
+  `theses.py set-evidence --id <id> --drop <틀린 F> --facts <새 F> --why "…"`(근거를 다시 세움 · 옛 근거는 `corrections[]`) 또는
+  `theses.py set-status --id <id> --status closed`. 새 근거의 매수는 다음 run이 검증 뒤 낸다. 오늘 세운 논지면 부족 검사가 첫 매수 대신 이 처리를
+  요구한다(`deficit.basis_review` → `deficit_short`). 또 **주문은 논지의 근거 위에 선다** — 매수 제안의 받치는 사실 = 그 논지의 받치는
+  근거 번호(더 많지도 적지도 않게 · 다르면 '논지 근거와 제안의 받치는 사실이 다르다' 거부). 새 받치는 사실은 `set-evidence --facts`로 논지에
+  먼저 넣는다 — 그래서 받치는 사실이 틀리면 곧 논지가 재검토로 오른다. 번호 없는 옛 논지는 첫 승인 때 그 제안의 받치는 사실이 논지 근거로
+  채택된다(`approved.evidence_adopted`). *실사례(261019 국내): 하나금융 주문의 근거 F-000093이 MISMATCH로 거부되자 run이 주문 쪽 번호만 F-000098로
+  바꿔 다시 돌렸고, 전송 직전 점검이 run 전체를 세워 깨끗한 2건까지 못 나갔다.*
 - **갈래 ①의 감사는 배경(갈래 ②)보다 빡빡하다** — 최대 5회(FAIL마다 고쳐 다시) · 주문 전용 감사 항목 3개(`kind: order`) ·
-  결정을 뒤집는 결과는 소급(되돌림 매도). 감사는 전파 즉시 배경으로 뜨고, 결과 반영은 run 끝이다(`stage6_execute.md`).
+  결정을 뒤집는 결과는 소급(되돌림 매도). 감사는 교정 반영 즉시 배경으로 뜨고, 결과 반영은 run 끝이다(`stage6_execute.md`).
 - **보고 첫 줄**: `주문 근거 n건 · 감사 r회 PASS|FAIL(남은 유형) · 소급 m건(종목·수량·사유) · 제외 k건` — 주문 전 `TRACK1 RESULT`와
   집행 뒤 `TRACK1 POST` 줄에서 옮긴다(`stage6_execute.md`).
 - **감사 소급 대기 행은 risk_guard가 알아서 판다** — 이어받기 `## 감사 소급` 절의 행은 이 단계 `risk_guard`(정상·규율 전용 모두)가
   `source: audit_reversal` SELL로 싣는다(보유 0이면 void로 닫는다). 장중이면 1단에서 이미 `stops.py --send`로 나갔을 것이다(`stage1_capture.md`).
+- **보유 판단의 근거가 서지 않으면**(`TRACK1 RESULT`의 `holds_unverified`) 그 보유를 다시 판정하고, 팔아야 하면
+  `python3 facts.py reverse --stamp <YYMMDD> --market <mkt> --ticker <T> --qty <N> --why "<무엇이 무너졌나>" --kind hold_overturned` — 되돌림 대기 행이 되어
+  이 run `risk_guard`가 `audit_reversal` SELL로 싣는다(장중 집행 뒤라면 `stops.py --send` · `stage6_execute.md` 〈갈래 ①〉 3).
 - `dispatch` 게이트는 승인 파일에 `track1`과 `note_lint: NOTE-LINT OK` 칸이 있는지 **디스크로** 본다(규율 전용 run은 제외).
 
 게이트는 **제안 건수로 갈린다**: 제안 ≥1건이면 `dispatch`, 0건이면 `no_trade`.
@@ -201,6 +255,9 @@ python3 fc_track1.py decide --mode pre --stamp <YYMMDD> --market <mkt>
 - `risk_guard`가 approved에 `deficit = {gap_pct, gap_amt, deployable, need, approved_buy, covered_pct, counted, distinct_axes,
   e0_missing, why}`와 **`deficit_short: true|false`**를 쓴다. 건수는 **유효성 거부**(유니버스 밖·MISMATCH·비중 0·현재가
   없음·목표 여유 없음·집중 명분 없음)를 뺀 BUY 제안을 센다 — 한도·현금으로 거부된 제안은 **센다**(제안자는 할 일을 했다).
+- 오늘 세운 논지의 e0가 유효성 사유로 거부됐거나 근거가 틀렸으면(재검토 중) e0를 고쳐 다시 내는 것이 아니라(거부 회피) **그 논지의 처리**를
+  요구한다 — `deficit.basis_review`에 적히고 원장에서 고치거나(`set-evidence`·`set-trigger`) 닫기 전에는 `deficit_short`다. 같은 제안이
+  그대로 재판정(값 교정·검증)으로 통과하면 그것으로도 풀린다. 오늘 고친 논지의 첫 매수는 다음 run 몫이다(`deficit.rebased_today` · 요구 없음).
 - **`deficit_short: true`면 `dispatch`·`no_trade` 게이트가 열리지 않는다.** 4단 §6·§7로 돌아가
   제안을 채우고(축이 다른 종목·오늘 세운 논지의 e0) 시그널을 다시 발행한 뒤 `risk_guard`를 다시
   돈다. 이건 "거부를 뒤집는 재실행"이 아니라 **"부족을 채우는 재실행"**이다 — §11에 두 판정을 다 적는다.
@@ -211,6 +268,7 @@ python3 fc_track1.py decide --mode pre --stamp <YYMMDD> --market <mkt>
   **이미 판정이 난 run에 소급 적용하지 않는다.** 바꿨으면 노트 §10에 전·후와 이유를 적고
   **다음 run부터** 적용한다. *실사례(2026-09-10): 목표 비중 정책을 신설하니 같은 제안이
   거부→승인으로 뒤집혔는데, 그날 판정에 적용하지 않고 approved를 거부 상태로 복원했다.*
+  코드도 막는다(2026-10-19) — `risk_guard`가 같은 run의 첫 회차 한도 해시(`limits_sha256`)를 기억해, 한도가 바뀐 회차는 전체 거부한다(되돌리면 계속 돈다).
 
 ### ★ 도구 동작 — 매 run 코드를 열지 않는다 (2026-10-01 확인)
 
@@ -238,7 +296,9 @@ python3 fc_track1.py decide --mode pre --stamp <YYMMDD> --market <mkt>
 | BUY 042660 한화오션 8% | 승인 4주 @84,500 | (6단) | (6단) | (6단) |
 | BUY 005930 삼성전자 4% | **거부** — 축 합계 상한 초과 | — | — | — |
 
-- 거부는 **사유 그대로** 적는다. 거부를 피하려고 시그널을 고쳐 다시 돌리는 것은 금지다.
+- 거부는 **사유 그대로** 적는다. 거부를 피하려고 시그널을 고쳐 다시 돌리는 것은 금지다 — `risk_guard`가 같은 run의 유효성 거부를 기억해
+  고쳐 온 제안만 '거부 회피 재실행'으로 거부하고 나머지는 그대로 승인·전송한다. 그 행(`approved.screen.tainted` · `rejected[]`의
+  `why_class: taint`)도 사유 그대로 적는다.
 - `no_trade`면 §11에 **"전송 없음"과 기권 사유**를 적고 6단 없이 여기서 닫는다 — 닫기 전에 `journal.py --daily`와
   `account_status.py --refresh`는 돈다(계좌 현황 블록은 기권 run에도 붙는다).
 - 다 적었으면 `<!-- ✓ §11-규율 -->`을 찍는다.
@@ -259,8 +319,8 @@ python3 fc_track1.py decide --mode pre --stamp <YYMMDD> --market <mkt>
 
 - **★ `refill_candidates` — "현금이 생기면 다음에 살 것" 순서 목록(2026-10-15).** 이 run 안에서 승인 뒤 매도(장중 손절·추적·감사 소급)가 나면
   재투자 pass(`refill.py` — `stage6_execute.md` 〈매도 뒤 재투자〉)가 매수 제안과 이 목록으로 판 돈을 다시 쓴다. 항목은 BUY 제안과 같은 형식이고
-  같은 검증을 받는다(`ticker`·`thesis`·`confidence`·`weight_target_pct`·`size_why`·`expected_upside_pct`·`evidence`·`basis_refs` — 노트 §7에 이름을 적는다).
-  **시그널 초안에 넣은 뒤 `fc_track1.py extract`를 돌린다** — 후보의 근거도 주문 근거 판정표에 들어가야 재투자 때 산다(판정표에 없으면
+  같은 검증을 받는다(`ticker`·`thesis`·`confidence`·`weight_target_pct`·`size_why`·`expected_upside_pct`·`target_basis`·`thesis_structure`·`facts`·`basis_refs` — 노트 §7에 이름을 적는다).
+  **시그널 초안에 넣은 뒤 `db.py import` → `facts.py queue --batch track1`을 돌린다** — 후보의 근거도 주문 근거 판정표에 들어가야 재투자 때 산다(판정표에 없으면
   `UNVERIFIED_T1`로 거부). 고르는 법: 이번 run에서 근거는 섰는데 크기·건수·축 때문에 뺀 것, 기다리는 가격 칸이 가까운 armed 논지.
   넣을 것이 없으면 `refill_candidates: []`와 `refill_none_why`(예: "매수 제안이 gap을 이미 다 채운다 — 판 돈은 제안 비율대로 다시 나눈다").
   *실사례: 10-14 미국 run은 01:42에 VST 약 $17,400을 판 뒤 살 목록이 없어 다음 run까지 현금이었다 — XLV·MCK·COR처럼 '안 산 쪽'이 후보였다.*
@@ -307,8 +367,8 @@ python3 fc_track1.py decide --mode pre --stamp <YYMMDD> --market <mkt>
 `per_position_max_pct: 12`가 한쪽 120만원 · 다른 쪽 1,606만원이었고, 확신도 표가
 뒤집혀 있었다 — 낮은 확신도 `2%`가 높은 확신도 `8%`보다 3.3배 큰 베팅이었다.*
 
-- **★ 반대편은 같은 계좌 계열만 더한다(2026-10-15 · 실계좌 전환).** `risk_guard`는 반대 시장 스냅샷·자산 곡선 행을 **지금 계좌 모드와 같은 계열**
-  (모의 / 실계좌)에서만 읽는다 — 모의 미국 보유를 실계좌 국내 run의 반대편으로 더하면 포트폴리오가 거의 찬 것으로 보여 첫 실전 run이 거의 안 산다.
+- **★ 반대편은 같은 계좌 계열만 더한다(2026-10-15 · 실계좌 전환 준비).** `risk_guard`는 반대 시장 스냅샷·자산 곡선 행을 **지금 계좌 모드와 같은 계열**
+  (모의 / 실계좌)에서만 읽는다 — 모의 미국 보유를 실계좌 국내 run의 반대편으로 더하면 포트폴리오가 거의 찬 것으로 보여 한 실행이 거의 안 산다.
   실계좌 첫날처럼 반대편 실계좌 스냅샷이 아직 없으면 '못 쟀다'로 그 시장 자산만 분모로 쓴다(통합증거금이라 그 시장 현금이 곧 전체 현금이다).
 - **목표는 포트폴리오, 집행은 그 시장 현금 — 그리고 그 안에서 알아서 한다.** 비중 판단은 합산
   기준이고, 실제로 살 수 있는지는 그 시장 자산이 정한다. `risk_guard`가 세 단계로 처리한다:
@@ -357,14 +417,53 @@ python3 base_rates.py <ticker> --market <kr|us> \
 나쁘면 크기를 줄이거나 e0를 생략하고 그 사실을 §7에 적는다. **기저율은 예측이 아니라 분포다** —
 방향을 정하지 않고 크기와 트리거 수준을 정한다.
 
-### ★ 목표 여유 — 1차 목표가 현재가 +3% 안이면 **이미 오른 것을 쫓는 제안**이다
+### ★ 목표 여유 — 1차 목표가 현재가 대비 수익 바닥 안이면 **이미 오른 것을 쫓는 제안**이다
 
 `risk_guard`가 BUY 제안의 1차 목표(제안 `exits[]`·논지 `exit_triggers[]`의 `price >= N` 중 최솟값)와 현재가를 대조해
-`min_target_gap_pct`(`limits.json` · 3%) 안이면 **유효성 거부**한다(미달 건수에 안 세므로 다른 종목을 내야 한다).
+`min_target_gap_pct`(`limits.json` · 10% · 실계좌는 `min_target_gap_pct_by_market`의 시장별 세후 값 — 아래 〈수익 바닥〉) 안이면 **유효성 거부**한다
+(미달 건수에 안 세므로 다른 종목을 내야 한다). 목표 수준은 아래 〈목표 기준〉으로 바닥 검사 전에 정한다.
 `../SKILL.md` §0-b "어제 뉴스로 오른 것을 오늘 사지 않는다"의 기계 형태다 — 사자마자 절반이 팔리는 회전은 비중도
 못 올린다. 논지는 `armed`로 두고, **다음 run이 새 과거 고정 기준으로 목표를 다시 건다**(`theses_levels.md` ·
 `theses.py set-trigger`). *실사례(2026-09-21 테스): 09-18에 +7% 자리로 건 x3 147,800이 사기도 전에 +0.7%가
 됐는데 "재저울질하지 않는다"며 그대로 제안했다.*
+
+### ★ 목표 기준 — 노리는 상승폭의 닻을 바닥 검사 **전에** 정한다 (2026-10-19 · Codex J01)
+
+BUY마다 `target_basis{level_kind, level_price, level_source, chosen_reason, chosen_at}`를 적는다. `level_kind`는 가격 수준 파일
+(`price_levels.py`)의 수준 이름(`resistance_1`·`confluence_2`·…) 또는 `analyst`(애널리스트 목표가 — `level_source`가 그 목표가를 담은
+사실 id `F-…`)·`fixed`(논지에 박은 고정 목표)다. **두 숫자는 뜻이 다르다** — `upside_to_target_pct`(목표까지 거리)는 `risk_guard`가 기준
+수준과 현재가로 계산하고, `expected_upside_pct`(이 자리에서 노리는 상승폭)는 `analyst`·`fixed`가 아니면 그 거리를 넘을 수 없다.
+`risk_guard`는 아래 순서로 보고 처음 걸린 자리에서 거부한다:
+1. 기준이 없다 → `목표 기준 없음`
+2. 1차 고정 목표(`price >= N`)와 기준 수준이 0.5% 넘게 다르다 → `목표 기준 불일치` — 출구와 같은 수준을 닻으로 적는다
+3. 기준 수준이 수익 바닥보다 가깝다 → `목표 여유 없음` — **바닥을 넘기려고 수준을 바꾸지 않는다**
+4. 가격 수준 파일에서 임의성이 가장 낮은 수준(기준이 가장 많이 겹친 `confluence_*`, 없으면 `resistance_1`)이 아닌 수준을 골랐는데
+   `chosen_reason`이 20자 미만이거나 · 출처 토큰(S번호·F-id·R행·스윙 고점·구간)이 없거나 · '바닥·미달·문턱·하한·floor·min_target·넘기·맞추'를
+   가리킨다 → `목표 기준 선택 사유 없음`. 사유는 **그 수준 자체의 근거**다(예: "S3 수주 잔고 근거 — 2차 저항이 2024-06 스윙 고점과 같은 자리").
+5. `expected_upside_pct`가 목표까지 거리보다 크다 → `기대 상승폭 불일치`
+
+이 거부는 전부 **유효성 거부**다 — 미달 건수에 안 세고, 거부 뒤 수준만 바꿔 다시 돌리면 그 제안이 `거부 회피 재실행`으로 거부된다.
+수익 바닥·최소 건수·축 수·목표 비중은 그대로다. 형식 적용일(`limits.json` `scenario_cond_required`) 전에는 1번이 경고만 낸다.
+승인 주문에는 `target_basis`·`upside_to_target_pct`·`base_rate`·`target_line`이 붙는다. `base_rate`는 제안의 지금 상태(이동평균 아래·
+급등 직후 …)와 시계(`horizon_days` 이하 중 가장 긴 기저율 시계)에 맞는 조건부 기저율 행이고, 없으면 `target_line`에 "조건부 중앙값 미측정"이
+찍힌다 — 확률을 지어내지 않는다. 예: `목표까지 거리 +9.9%(resistance_1 134,650) · 조건부 중앙값 +7.04%(below_ma20 · n=115 · +20일) · 기준선 +2.70%(n=312)`.
+*실사례(2026-10-19 국내): 가격 수준 파일이 '임의성 낮음'으로 적은 수준(+9.4%)이 세후 바닥(10.3%)에 못 미치자 사유 없이 2차 저항(+15.4%)을
+목표로 골랐다 — 수준을 문턱에 맞춘 것이다.*
+
+### ★ 논지 구조 — 사실이 맞아도 결론이 타당한지는 따로 적는다 (2026-10-19 · Codex G02)
+
+BUY마다 `thesis_structure` 다섯 칸을 적는다 — 노트 §7 제안 행과 같은 내용이다.
+
+| 칸 | 무엇 | `note_lint.py signal`이 보는 것 |
+|---|---|---|
+| `mechanism` | 이 사실이 어떤 경로로 이 종목 가격을 움직이나 | 20자 이상 · 출처 토큰(S번호·F-id·R행) |
+| `priced_in_vs_new` | 이미 가격에 든 것과 아직 안 든 것 | 20자 이상 · 출처 토큰 |
+| `strongest_counter` | 가장 강한 반대 근거 | 그 제안 `facts[]`의 `role: against` 사실 id를 인용(반대 사실이 하나 이상 있어야) |
+| `kill_observation` | 무엇이 보이면 틀린 것인가 | 숫자·날짜·'컨센·발표·공시·종가' 중 하나 |
+| `decision_deadline` | 언제까지 결판나야 하나 | `YYYY-MM-DD` · 세션일 뒤 ~ 세션 + `horizon_days` |
+
+빈 칸이나 틀 문장(`<…>`·`…`)은 오류다. 적용일(`scenario_cond_required`)부터 `NOTE-LINT` 오류이고 그 전엔 경고다. `risk_guard` 거부는 아니다 —
+판단 품질은 노트 관문이 본다.
 
 ### 4-b. 크기 규칙 — 크기는 판단이고, 부족은 코드가 채운다 (2026-09-22)
 
@@ -377,10 +476,22 @@ python3 base_rates.py <ticker> --market <kr|us> \
 - **집중은 상한이 아니라 명분이다.** 이번 주문 뒤 종목 비중이 `concentration_disclose_pct.position`(20%) 또는 축 비중(양 시장
   합산·배수 반영)이 `.axis`(40%)를 넘기면 그 제안에 `concentration_why`가 있어야 한다 — 없으면 그 제안만 거부. 선을 넘겨
   사는 것은 허용이고, 이유 없이 넘기는 것이 거부다(현금 명분과 같은 원리).
-- **★ 요인 집중은 상한이 아니라 대응이다(FB-261012-4).** 축이 달라도 요인(`driver`)이 같으면 한 베팅이다 — 1단
+  **이 선은 심사·gap 채우기·최종 묶음 세 자리에서 같은 식으로 다시 잰다(2026-10-19 · Codex R05).** 명분 없는 제안은 gap 채우기가
+  키우다가 **선에서 멈춘다**(심사가 받은 크기 아래로는 안 내림 · 같은 축의 뒤 제안 몫을 남긴다). 멈춰서 gap이 남으면 미달 사유에
+  `집중 선에서 멈춤 — <종목> <선>(명분 없음) <금액>`이 찍히고 `deficit_short=true`라 집행기가 보내지 않는다 — 고치는 길은 그 제안에
+  `concentration_why`를 적거나 **다른 종목을 내는 것**이다(현금으로 남기는 것은 길이 아니다). 최종 묶음(주문당 상한 뒤)에서도 명분 없이
+  선을 넘는 매수가 남으면 그 주문과 그 매수를 위한 회전 매도만 빠지고, 매수마다 선 뒤 비중이 승인 파일 `concentration`에 공개된다.
+- **★ 요인 집중은 상한이 아니라 판정이다(FB-261012-4 · FB-261017-7).** 축이 달라도 요인(`driver`)이 같으면 한 베팅이다 — 1단
   `exposure_<st>_<mkt>.md`의 최대 요인 노출(양 시장 합산)을 보고, 새 BUY가 그 요인에 더 싣는다면 `size_why`에 "최대 요인 X% →
-  Y%"를 적는다. 그 요인이 꺾이는 가지와 대응은 노트 §7 '꺾이면' 행에 둔다(증액 중단·약한 논지부터·역노출). 확인된 승자를 이
+  Y%"를 적는다. 그 요인이 꺾이면(1단 `## 요인 상태`) 대응은 미리 정한 방향이 아니라 아래 **〈요인 판정〉**이다. 확인된 승자를 이
   행으로 자동 매도하지 않는다. *실사례(2026-10-12): 요인 태그를 처음 달자 'AI 투자' 한 요인이 포트폴리오의 약 69%였다.*
+- **★ 〈요인 판정〉 — 꺾인 요인은 run이 원인을 찾아 보유마다 저점매수·유지·정리를 판정한다(FB-261017-7 · 2026-10-17 사용자).**
+  시그널 `factor_judgments[]`: `{"driver", "scenario_id", "fired_by": ["drawdown"|"sells"], "cause", "state": "intact|broken|unknown",
+  "sources", "decisions": [{"ticker", "held", "thesis_id", "decision": "저점매수|유지|정리", "why", "sources"}]}` — 노트 §7 `[요인 판정]` 블록과 같은 값
+  (`stage4_note.md`). `risk_guard`: 꺾인 요인의 종목 BUY·사다리 추가는 판정이 없으면 `요인 판정 없음`으로 거부 · 그 종목 결정이 없거나 `저점매수`가
+  아니면 거부 · `저점매수`+사유면 통과. approved `factor{fired, judged, unjudged, undecided, sell_missing, decisions}`·`factor_short` —
+  판정 없는 꺾인 요인 · 결정 빠진 보유 · `정리`인데 이 run의 SELL 없음 중 하나면 `factor_short: true`로 `dispatch`·`no_trade` 게이트가 막는다.
+  `factor.state: missing`(1단 요인 상태 없음)은 `risk_guard`가 경고만 하지만 게이트가 본다. 판정은 사람에게 묻지 않는다.
 - **이벤트는 줄일 이유가 아니라 베팅할 자리다.** D-3 시나리오의 우세한 가지에 크기를 키운다(`stage3_map.md` 강제 등장 표).
 - **★ 수익 바닥 10% · 상한 없음(2026-10-03 사용자).** BUY마다 `expected_upside_pct`(이 자리에서 노리는 상승폭 — 근거가 30%·50%·100%면
   그 숫자)를 적는다. 없거나 10 미만이면 `risk_guard`가 거부한다(1차 고정 목표가 있으면 그 목표도 현재가 +10% 이상이어야 한다 —
@@ -397,6 +508,14 @@ python3 base_rates.py <ticker> --market <kr|us> \
   중 하나. 사유가 없으면 `risk_guard`가 거부한다. 기준이 중앙값이 아니라 평균인 이유: 작은 보유가 많을수록 중앙값이 같이 내려가
   기준이 무너진다. 투자비중이 목표보다 모자라고 현금이 보유 평균 이상 남아 gap 채우기가 키울 수 있으면 이 검사는 건너뛴다 — 그때는 코드가 키운다. *실사례(261010): 적용 뒤 새 진입 13건 평균 1.22% · 미국 22종목 중 12종목이 2% 미만 — 같은 주에 15~20%로
   든 두 종목이 +20%씩 올라 미국 계좌를 3~4%p씩 끌어올렸다.*
+- **★ 확인된 축 소액 보유 — 축이 확인된 보유가 이 시장 보유 평균의 절반보다 작으면 이 run이 키우거나 작게 두는 사유를 적는다(FB-261017-8 · 2026-10-17 사용자 승인).**
+  '축이 확인된 보유' = 열린 `+` 전망 축의 논지가 있고 현재가 > 평균가인 보유(회전 매도가 자금원에서 빼는 것과 같은 정의 — 전망 판정은
+  토요일 몫이라 run 안에서는 이것이 확인이다). 그 비중이 보유 평균 × `position_sizing.confirmed_axis_min_vs_avg_ratio`(0.5)보다 작으면 둘 중 하나:
+  ① 이 run의 증액 BUY — 증분 뒤 그 선 이상이거나 그 BUY의 `increase_when.to_pct` ≥ 그 선(논지 원장에 다리를 더하는 명령이 없으므로 증액은 그 run의 BUY다)
+  ② 시그널 `holds[]`에 `small_why{kind, why, expected_upside_pct}` — `kind`는 위 넷·`order_cap`에 더해 `etf_expression`(ETF 소액으로 축을 표현 중)도
+  받는다. `expected_upside_pct`로 **계좌 기여 = 비중 × 기대 상승폭**이 approved `undersized.rows[].contribution_pp`에 남는다. 둘 다 없으면
+  approved `undersized_short: true`로 `dispatch`·`no_trade` 게이트가 막는다. 0.5는 자동 크기가 아니라 판정을 요구하는 선이다 — 키울지 작게 둘지는
+  run이 정한다(0이면 끔). *실사례(261017 피드백): 에너지·헬스케어 축이 맞아 10% 넘게 오르는 동안 그 보유는 계좌의 1% 안팎이었다(미국 주간 초과수익 −2.67%p).*
 - 레버리지 ETF 증분은 배수로 나눈다(상품 특성). 계산 결과 **1주도 못 사면** 그 사실을 `rejected` 사유로 남긴다.
 - **★ 실계좌는 주문당 상한이 있다(2026-10-12 사용자 결정).** 한 종목 한 번 매수는 100만 원까지, 1주 값이 100만 원을 넘는 종목은
   금액 대신 최대 2주(`limits.json` `order_cap` · 미국은 그날 환율로 원화 환산). 크기는 판단대로 적는다 — `risk_guard`가 gap 채우기
@@ -438,23 +557,28 @@ approved에 넣는다(손절 전량 · 목표 트리거의 `size_pct`, 없으면
 - **★ 판단의 맥락도 시그널에 싣는다** — 노트에만 두면 다음 run이 못 읽는다.
   `no_trade_reason`(안 산 이유) · `scenarios`(§3의 조건→대응 표를 그대로 — 지연·무소식 가지는 `next_check`에 예정일 · 대응은
   `responses: {"kr": "…", "us": "…"}`로 두 시장 다(영향 없으면 그 시장 값에 `영향 없음 — 이유`) · 반대 시장이 연 같은 이벤트는 `persistent_id`) ·
+  날짜가 정해진 사건의 가지는 `events[]` + 행마다 `event`·`cond`(위 〈사건과 가지 조건을 구조로 적는다〉) ·
   `standing_rules`(시나리오 무관 상시 규칙) · `material_gaps`(재료에서 빠진 축).
+  **시나리오 대응이 후보를 막으면 그 후보 줄에 어느 대응(SC id)이 왜 막는지 적는다** — 대응은 그 이벤트가 값을 내리는 업종·요인만 막는다
+  (`stage4_note.md` §7 〈진입을 막는 대응은 범위를 적는다〉 · FB-261017-3). 범위 없이 시장 전체를 막는 대응은 그 범위로 고쳐 쓰고 판단한다.
   다음 run은 **직전 시그널의 `scenarios`를 먼저 읽고** 그 조건이 실현됐는지부터 판정한다.
 
 ---
 
 - risk_guard가 거부한 건은 **사유와 함께 보고만 한다.** 거부를 피하려고 시그널을 고쳐 다시
-  돌리는 것은 금지 — 리밋을 우회하는 행위다.
+  돌리는 것은 금지 — 리밋을 우회하는 행위다. `risk_guard`가 회차를 기억하므로 고쳐 다시 내도 그 제안은 '거부 회피 재실행'으로
+  거부된다 — 되살리지 않는다(다음 run이 다시 본다).
 - `limits.json`·`watchlist.json`은 **재료 통독~시그널 발행 구간에서 수정하지 않는다.** 그 구간 밖에서 조정하는 것은 운영 판단이고, 바꿨으면 그 사실과 이유를 노트 §10에 적는다.
 
 ## 이 단계의 자가점검 — 결정
 
-- [ ] **갈래 ① — `fc_track1.py decide --mode pre`의 `TRACK1 RESULT` 줄이 판정표에 있는가** — 감사를 기다리지 않고 판정표로 결정했고,
-      시그널 근거 판정을 손으로 적은 곳 0. 제외된 제안은 보고 첫 줄에 종목·사유로 · 감사는 전파 즉시 배경(결과는 6단 끝에 반영)
+- [ ] **갈래 ① — `facts.py decide --mode pre`의 `TRACK1 RESULT` 줄이 판정표에 있는가** — 감사를 기다리지 않고 판정표로 결정했고,
+      시그널 근거 판정을 손으로 적은 곳 0. 제외된 제안은 보고 첫 줄에 종목·사유로 · 감사는 교정 반영 즉시 배경(결과는 6단 끝에 반영)
+- [ ] **제안마다 `facts`(사실 id · role · support)가 있고, 크기 사유의 숫자(목표가 대비 상승·수주/매출 비율)가 사실 id와 함께 `size_why`에 있는가**
 - [ ] **이어받기 `## 감사 소급` 대기 행이 승인 파일에 `audit_reversal` 매도로 실렸거나 void로 닫혔는가**(대기 행이 없으면 해당 없음)
 - [ ] **`note_lint.py signal` → 시그널 `note_lint`가 `NOTE-LINT OK`인가** — 제안·보유·거부 후보·시나리오가 노트에 있고 출처 칸이 찼다
       (10-13 밤 run은 출처 경고만)
-- [ ] **`refill_candidates`를 근거와 함께 적었는가, 없으면 `[]`와 `refill_none_why`인가** — `fc_track1.py extract` **전에** 시그널에 있었는가
+- [ ] **`refill_candidates`를 근거와 함께 적었는가, 없으면 `[]`와 `refill_none_why`인가** — `db.py import`·`facts.py queue --batch track1` **전에** 시그널에 있었는가
 - [ ] **유니버스 밖 종목이 `proposals`에 0건**(발굴한 것은 `watchlist_candidates`로만)
 - [ ] **호흡이 주~월 단위인가** — 며칠 안에 결판나는 논지를 제안하지 않았는가(`../SKILL.md` §0-b).
       어제 뉴스로 오른 것을 오늘 쫓아 사지 않았는가
@@ -479,8 +603,13 @@ approved에 넣는다(손절 전량 · 목표 트리거의 `size_pct`, 없으면
       있는가. "종가 기준으로 다음 run"이라고 미룬 문장이 0인가
 - [ ] **미달이면 `deficit_short: false`인가** — 제안 건수·서로 다른 축·오늘 세운 논지의 e0가
       `limits.json` 요구를 채웠는가. `true`면 §6·§7로 돌아가 채운 뒤 다시 돌렸는가
+- [ ] **`undersized_short: false`인가** — 확인된 축 보유 가운데 보유 평균×0.5 미만마다 이 run의 증액 BUY 또는
+      `holds[].small_why{kind, why, expected_upside_pct}`(계좌 기여)가 있는가
+- [ ] **`factor_short: false`이고 `factor.state`가 missing이 아닌가** — 꺾인 요인마다 시그널 `factor_judgments[]`(원인·상태·보유별 결정)가 있고
+      `정리`로 판정한 보유마다 이 run의 SELL이 있는가
 - [ ] **반대편 대기 논지를 고려했는가** — 이번 제안이 그보다 확신도가 낮으면 §7에 이유를 적었는가
-- [ ] risk_guard 거부 건을 **우회 시도 없이** 사유대로 보고했는가
+- [ ] risk_guard 거부 건을 **우회 시도 없이** 사유대로 보고했는가 — `approved.screen.tainted`가 0건이거나, 있으면 그 행을 §11에 사유 그대로
+      적고 되살리지 않았는가 · 재검토 논지(`deficit.basis_review`)를 주문이 아니라 `set-evidence`·닫기로 처리했는가
 - [ ] **투자비중이 목표 대역 안인가** — 미달이면 `deficit_multiplier`가 걸렸는지 확인하고,
       하한 미달 연속 횟수가 한도를 넘었으면 제안 0건으로 닫지 않았는가
 - [ ] **진입 트리거에 e0(선진입)이 있는가** — 전부 현재가 아래면 하락 없이는 집행 0이다
@@ -493,4 +622,6 @@ approved에 넣는다(손절 전량 · 목표 트리거의 `size_pct`, 없으면
       다음 run이 그것을 판정할 방법이 없다(id가 매 run 재사용된다). 이월 행에 `persistent_id`를 적었는가
 - [ ] **1차 목표까지 여유가 있는가** — "목표 여유 없음" 거부를 받았으면 우회하지 않고 다음 run에
       `set-trigger`로 새 목표를 건 뒤 재제안하는가
+- [ ] **BUY마다 `target_basis`와 `thesis_structure` 다섯 칸이 있는가** — 임의성 낮은 수준이 아닌 목표를 골랐으면 `chosen_reason`이
+      그 수준 자체의 근거인가(바닥을 가리키는 사유 0) · 반대 근거 사실(`role: against`)을 세웠는가
 

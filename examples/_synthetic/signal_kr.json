@@ -1,15 +1,15 @@
 {
   "schema_version": "1.0",
-  "run_id": "DEMO-kr",
+  "run_id": "<run_id>",
   "market": "KR",
-  "generated_at": "2026-10-12T09:20:00+09:00",
+  "generated_at": "<now>",
   "no_trade": false,
-  "_comment": "시연용 시그널. generated_at은 run_trace.sh가 실행 시각으로 다시 찍는다(180분 지난 시그널은 코드가 통째로 거부하므로).",
+  "_comment": "시연용 시그널(AI 세션이 쓰는 주문 제안 파일의 모양). seed_demo.py가 run_id·generated_at과 <ref:…> 근거 id를 채운다. 180분 지난 시그널은 코드가 통째로 거부한다. 근거는 문장이 아니라 저장소에 등록한 사실의 id(facts[].id)로 적는다 — 2026-10-17 저장소 전환 뒤의 형식.",
   "allocation": {
     "based_on": null,
     "target_invested_pct": 60,
     "regime": "하락 상태 판단 — 벤치마크(069500) 20일 -3.1% · 60일선 아래 · 하락 섹터 15/21 (가상 수치, 캡처 파일 기준)",
-    "cash_reason": "하락 상태 — 새 논지는 첫 칸(e0)만 진입하고 나머지는 되돌림 사다리에 건다",
+    "cash_reason": "하락 상태 — 새 논지는 첫 진입분만 사고 나머지는 되돌림 가격에 건다",
     "cash_release_when": "벤치마크가 60일선을 회복하면 목표 80%로 변경",
     "reserved": [],
     "change": null
@@ -25,25 +25,13 @@
       "name": "한빛전선(가상)",
       "action": "BUY",
       "weight_target_pct": 3.0,
-      "thesis": "해상풍력 2단계 케이블 공급 계약(공시 확인) + 국내 조달 의무 비율 도입(입법예고 원문 확인). 논지 호흡 12주. 첫 칸 3%만 진입, 조달 비율 확정 뒤 10/9 상승분의 절반을 반납한 가격에 두 번째 칸.",
+      "thesis": "해상풍력 2단계 케이블 공급 계약(공시 확인) + 국내 조달 의무 비율 도입(입법예고 원문 확인). 예상 기간 12주. 첫 진입분 3%만 사고, 조달 비율 확정 뒤 10/9 상승분의 절반을 반납한 가격에 두 번째 진입분.",
       "confidence": 0.62,
       "horizon_days": 84,
       "risk_notes": "입법예고 결과 2028년 적용 비율이 원안 60%에서 40% 이하로 후퇴하면 논지 무효",
-      "evidence": [
-        {
-          "claim": "한빛전선, 해상풍력 2단계 해저 HVDC 케이블 공급 계약 체결(가상 공시)",
-          "source_url": "https://example.invalid/dart/900001-20261009",
-          "tier": "T2",
-          "verdict": "MATCH",
-          "track1": "PASS"
-        },
-        {
-          "claim": "전력망 확충 특별법 시행령 개정안 입법예고 — 국내 조달 의무 비율 2027년 40%, 2028년 60%(가상 공고)",
-          "source_url": "https://example.invalid/moleg/notice-20261009",
-          "tier": "T1",
-          "verdict": "MATCH",
-          "track1": "PASS"
-        }
+      "facts": [
+        {"id": "<ref:order-900001>", "role": "support", "support": "논지 — 2단계 발주가 실제로 났다(수주 공시)"},
+        {"id": "<ref:policy-grid>", "role": "support", "support": "논지 — 국내 조달 의무 비율이 케이블 자재에 적용된다(입법예고 원문)"}
       ],
       "exits": [
         {
@@ -54,12 +42,18 @@
           "basis": "resistance_1 — 10/9 급등 전 고점 (가상)"
         }
       ],
-      "size_why": "기대 +18%(1차 목표 29,300) · 깨지는 조건: 2028년 조달 비율 40% 이하 후퇴 또는 2단계 발주 지연 · 손절 -9%(22,600) · gap 없음(투자비중 62% ≥ 목표 60%)이라 첫 칸 3%만 — 나머지는 확정 뒤 되돌림 사다리",
+      "target_basis": {
+        "level_kind": "resistance_1",
+        "level_price": 29300,
+        "level_source": "가격 기준 계산 — 10/9 급등 전 고점 (가상)",
+        "chosen_reason": "급등 전 고점이 가장 가까운 매물대라 1차 저항으로 삼는다 (가상)"
+      },
+      "size_why": "기대 +18%(1차 목표 29,300) · 깨지는 조건: 2028년 조달 비율 40% 이하 후퇴 또는 2단계 발주 지연 · 손절 -9%(22,600) · gap 없음(투자비중 62% ≥ 목표 60%)이라 첫 진입분 3%만 — 나머지는 확정 뒤 되돌림 가격에",
       "concentration_why": "",
-      "expected_upside_pct": 18.0,
+      "expected_upside_pct": 17.9,
       "small_why": {
         "kind": "binary_event",
-        "why": "입법예고 결과(국내 조달 의무 비율 확정)가 나오기 전까지 첫 칸만 — 확정 뒤 10/9 상승분의 절반을 반납한 가격에 두 번째 칸"
+        "why": "입법예고 결과(국내 조달 의무 비율 확정)가 나오기 전까지 첫 진입분만 — 확정 뒤 10/9 상승분의 절반을 반납한 가격에 두 번째 진입분"
       }
     },
     {
@@ -71,14 +65,8 @@
       "confidence": 0.55,
       "horizon_days": 60,
       "risk_notes": "구리 가격 하락 전환 시 무효",
-      "evidence": [
-        {
-          "claim": "동양구리 3분기 가공 물량 전년 대비 증가(가상 IR)",
-          "source_url": "https://example.invalid/ir/900002",
-          "tier": "T2",
-          "verdict": "MATCH",
-          "track1": "PASS"
-        }
+      "facts": [
+        {"id": "<ref:earnings-900002>", "role": "support", "support": "논지 — 가공 물량이 늘고 있다(기업설명 자료)"}
       ],
       "exits": [
         {
@@ -89,6 +77,12 @@
           "basis": "resistance_1 (가상)"
         }
       ],
+      "target_basis": {
+        "level_kind": "resistance_1",
+        "level_price": 12300,
+        "level_source": "가격 기준 계산 — 직전 고점 (가상)",
+        "chosen_reason": "직전 고점을 1차 저항으로 삼는다 (가상)"
+      },
       "size_why": "기대 +2%(1차 목표 12,300) · 깨지는 조건: 구리 가격 하락 전환 · 손절 -6% · 3차 수혜라 4%",
       "concentration_why": "",
       "expected_upside_pct": 2.0
@@ -98,18 +92,11 @@
       "name": "코스모AI(가상)",
       "action": "BUY",
       "weight_target_pct": 2.0,
-      "thesis": "뉴스레터 편집자 권유 문장을 근거로 올린 제안 — 코드가 걸러야 정상(유니버스 밖).",
+      "thesis": "뉴스레터 편집자 권유 문장을 근거로 올린 제안 — 코드가 걸러야 정상(매매 대상 목록 밖 · 등록된 사실 없음).",
       "confidence": 0.5,
       "horizon_days": 30,
       "risk_notes": "-",
-      "evidence": [
-        {
-          "claim": "뉴스레터 본문의 권유 문장",
-          "source_url": "https://example.invalid/newsletter/20261012",
-          "tier": "T3",
-          "verdict": "MATCH"
-        }
-      ],
+      "facts": [],
       "exits": [
         {
           "id": "x1",
@@ -129,23 +116,12 @@
       "ticker": "900003",
       "name": "대양해운(가상)",
       "why": "케이블 포설 전용선 보유 — 2차 수혜 후보. universe_rules 규칙으로 편입 여부 판정",
-      "evidence": [
-        {
-          "claim": "대양해운, 포설 전용선 2척 운영(가상 IR)",
-          "source_url": "https://example.invalid/ir/900003",
-          "tier": "T2",
-          "verdict": "MATCH"
-        }
+      "facts": [
+        {"id": "<ref:ir-900003>", "role": "support", "support": "편입 후보 — 포설 전용선 2척 운영(기업설명 자료)"}
       ]
     }
   ],
   "refill_candidates": [],
   "refill_none_why": "시연 — 이번 실행에 매도가 없어 재투자할 대금이 없다",
-  "rejected_candidates": [],
-  "track1": {
-    "audit": "PASS",
-    "rounds": 1,
-    "drop": [],
-    "_comment": "시연용 — 실제 운영에서는 fc_track1.py decide가 판정표에서 옮겨 적는다"
-  }
+  "rejected_candidates": []
 }

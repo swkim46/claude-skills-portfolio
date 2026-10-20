@@ -1,10 +1,16 @@
 {
   "schema_version": "1.0",
   "market": "KR",
-  "generated_at": "2026-10-16T13:01:29.386353+09:00",
-  "signal_ref": "signals/signal_DEMO_kr.json",
-  "snapshot_ref": "data/snapshot_DEMO_kr.json",
-  "limits_sha256": "b665fe998bd98a7b6439ccf944bb0df58e4c2664616f9688f079487d16e70e3f",
+  "generated_at": "2026-10-20T14:43:04.212928+09:00",
+  "signal_ref": "signals/signal_261012_kr.json",
+  "snapshot_ref": "data/snapshot_261012_kr.json",
+  "limits_sha256": "b5ead5995a9a1516a312a09bad9f6f6797e5797284a654a481b15d6249538939",
+  "signal_sha256": "1a303bbdeddf7b51ac8571580b3f68f1b1f0fa546ab1cdb7675604374600b03a",
+  "snapshot_sha256": "24b249d72eedbb706ad54aa1afce7d93d3721036246a1cae34eedc2f0dd47f61",
+  "universe_sha256": "1980dd1276ebdeff5cc063484a6c1f383cf69a314fab5442136e97469a6e1e73",
+  "material_sha256": null,
+  "code_commit": null,
+  "code_sha": "efa56be9e0a16d0d657d6d9668a2eb474ceb5e47157b7ee1cd2a7a403ca1c46c",
   "orders": [
     {
       "ticker": "900001",
@@ -21,24 +27,20 @@
         "name": "한빛전선(가상)",
         "action": "BUY",
         "weight_target_pct": 3.0,
-        "thesis": "해상풍력 2단계 케이블 공급 계약(공시 확인) + 국내 조달 의무 비율 도입(입법예고 원문 확인). 논지 호흡 12주. 첫 칸 3%만 진입, 조달 비율 확정 뒤 10/9 상승분의 절반을 반납한 가격에 두 번째 칸.",
+        "thesis": "해상풍력 2단계 케이블 공급 계약(공시 확인) + 국내 조달 의무 비율 도입(입법예고 원문 확인). 예상 기간 12주. 첫 진입분 3%만 사고, 조달 비율 확정 뒤 10/9 상승분의 절반을 반납한 가격에 두 번째 진입분.",
         "confidence": 0.62,
         "horizon_days": 84,
         "risk_notes": "입법예고 결과 2028년 적용 비율이 원안 60%에서 40% 이하로 후퇴하면 논지 무효",
-        "evidence": [
+        "facts": [
           {
-            "claim": "한빛전선, 해상풍력 2단계 해저 HVDC 케이블 공급 계약 체결(가상 공시)",
-            "source_url": "https://example.invalid/dart/900001-20261009",
-            "tier": "T2",
-            "verdict": "MATCH",
-            "track1": "PASS"
+            "id": "F-000001",
+            "role": "support",
+            "support": "논지 — 2단계 발주가 실제로 났다(수주 공시)"
           },
           {
-            "claim": "전력망 확충 특별법 시행령 개정안 입법예고 — 국내 조달 의무 비율 2027년 40%, 2028년 60%(가상 공고)",
-            "source_url": "https://example.invalid/moleg/notice-20261009",
-            "tier": "T1",
-            "verdict": "MATCH",
-            "track1": "PASS"
+            "id": "F-000002",
+            "role": "support",
+            "support": "논지 — 국내 조달 의무 비율이 케이블 자재에 적용된다(입법예고 원문)"
           }
         ],
         "exits": [
@@ -50,29 +52,66 @@
             "basis": "resistance_1 — 10/9 급등 전 고점 (가상)"
           }
         ],
-        "size_why": "기대 +18%(1차 목표 29,300) · 깨지는 조건: 2028년 조달 비율 40% 이하 후퇴 또는 2단계 발주 지연 · 손절 -9%(22,600) · gap 없음(투자비중 62% ≥ 목표 60%)이라 첫 칸 3%만 — 나머지는 확정 뒤 되돌림 사다리",
+        "target_basis": {
+          "level_kind": "resistance_1",
+          "level_price": 29300,
+          "level_source": "가격 기준 계산 — 10/9 급등 전 고점 (가상)",
+          "chosen_reason": "급등 전 고점이 가장 가까운 매물대라 1차 저항으로 삼는다 (가상)"
+        },
+        "size_why": "기대 +18%(1차 목표 29,300) · 깨지는 조건: 2028년 조달 비율 40% 이하 후퇴 또는 2단계 발주 지연 · 손절 -9%(22,600) · gap 없음(투자비중 62% ≥ 목표 60%)이라 첫 진입분 3%만 — 나머지는 확정 뒤 되돌림 가격에",
         "concentration_why": "",
-        "expected_upside_pct": 18.0,
+        "expected_upside_pct": 17.9,
         "small_why": {
           "kind": "binary_event",
-          "why": "입법예고 결과(국내 조달 의무 비율 확정)가 나오기 전까지 첫 칸만 — 확정 뒤 10/9 상승분의 절반을 반납한 가격에 두 번째 칸"
+          "why": "입법예고 결과(국내 조달 의무 비율 확정)가 나오기 전까지 첫 진입분만 — 확정 뒤 10/9 상승분의 절반을 반납한 가격에 두 번째 진입분"
         }
       },
+      "facts": [
+        {
+          "id": "F-000001",
+          "role": "support",
+          "support": "논지 — 2단계 발주가 실제로 났다(수주 공시)",
+          "status": "verified",
+          "verdict": "MATCH",
+          "version": 1,
+          "value_rev": 1
+        },
+        {
+          "id": "F-000002",
+          "role": "support",
+          "support": "논지 — 국내 조달 의무 비율이 케이블 자재에 적용된다(입법예고 원문)",
+          "status": "verified",
+          "verdict": "MATCH",
+          "version": 1,
+          "value_rev": 1
+        }
+      ],
       "exempt_from_count_limit": false,
       "thesis_id": null,
-      "trigger_id": null
+      "trigger_id": null,
+      "target_basis": {
+        "level_kind": "resistance_1",
+        "level_price": 29300,
+        "level_source": "가격 기준 계산 — 10/9 급등 전 고점 (가상)",
+        "chosen_reason": "급등 전 고점이 가장 가까운 매물대라 1차 저항으로 삼는다 (가상)"
+      },
+      "upside_to_target_pct": 17.91,
+      "base_rate": null,
+      "target_line": "목표까지 거리 +17.9%(resistance_1 29,300) · 조건부 중앙값 미측정"
     }
   ],
   "rejected": [
     {
       "ticker": "900002",
       "action": "BUY",
-      "why": "목표 여유 없음 — 1차 목표 12,300이 현재가 12,050 대비 +2.1% (< 바닥 10%) · 이미 오른 가격을 쫓는 제안(§0-b)이거나 노릴 수익이 바닥보다 작다 · 논지 재설정 후 재제안"
+      "why": "목표 여유 없음 — 기준 수준 resistance_1 12,300이 현재가 12,050 대비 +2.1% (< 바닥 10%) · 바닥을 넘기려고 수준을 바꾸지 않는다",
+      "why_class": "validity"
     },
     {
       "ticker": "900004",
       "action": "BUY",
-      "why": "유니버스 밖 종목 (watchlist 미등재·미보유). watchlist_candidates로 제안할 것"
+      "why": "유니버스 밖 종목 (watchlist 미등재·미보유). watchlist_candidates로 제안할 것",
+      "why_class": "validity"
     }
   ],
   "shaved": [],
@@ -82,7 +121,7 @@
     "based_on": null,
     "target_invested_pct": 60,
     "regime": "하락 상태 판단 — 벤치마크(069500) 20일 -3.1% · 60일선 아래 · 하락 섹터 15/21 (가상 수치, 캡처 파일 기준)",
-    "cash_reason": "하락 상태 — 새 논지는 첫 칸(e0)만 진입하고 나머지는 되돌림 사다리에 건다",
+    "cash_reason": "하락 상태 — 새 논지는 첫 진입분만 사고 나머지는 되돌림 가격에 건다",
     "cash_release_when": "벤치마크가 60일선을 회복하면 목표 80%로 변경",
     "reserved": [],
     "change": null,
@@ -95,6 +134,16 @@
     "need": 0
   },
   "scaled_up": null,
+  "concentration": {
+    "900001": {
+      "pos_pct_after": 2.98,
+      "axes_after": {
+        "offshore_grid": 32.15
+      },
+      "line_hit": [],
+      "why": null
+    }
+  },
   "deficit": {
     "invested_pct": 61.98,
     "target": 60.0,
@@ -104,6 +153,8 @@
     "distinct_axes": 0,
     "tickers": [],
     "e0_missing": [],
+    "basis_review": [],
+    "rebased_today": [],
     "gap_pct": 0.0,
     "gap_amt": 0,
     "deployable": 3800000,
@@ -111,20 +162,63 @@
     "approved_buy": 0,
     "covered_pct": null,
     "short": false,
-    "why": "투자비중 62.0% ≥ 판단 목표 60% — 미달 아님"
+    "why": "투자비중 62.0% ≥ 판단 목표 60% — 미달 아님",
+    "undersized": {
+      "ratio": 0.5,
+      "avg_w": 30.99,
+      "line": 15.5,
+      "rows": [],
+      "short": false,
+      "why": "확인된 축 보유 가운데 보유 평균×0.5=15.50% 미만 없음"
+    }
   },
   "deficit_short": false,
+  "undersized": {
+    "ratio": 0.5,
+    "avg_w": 30.99,
+    "line": 15.5,
+    "rows": [],
+    "short": false,
+    "why": "확인된 축 보유 가운데 보유 평균×0.5=15.50% 미만 없음"
+  },
+  "undersized_short": false,
+  "factor": {
+    "state": "missing",
+    "short": false,
+    "run_id": "261012_kr",
+    "why": "요인 상태 없음 — 1단 `market_map.py exposure --by driver --stamp`가 이 run을 재지 않았다(경고만)"
+  },
+  "factor_short": false,
   "account_mode": "paper",
   "order_cap": null,
   "track1": {
-    "audit": "PASS",
-    "rounds": 1,
-    "drop": [],
-    "_comment": "시연용 — 실제 운영에서는 fc_track1.py decide가 판정표에서 옮겨 적는다"
+    "result": "PARTIAL",
+    "audit": "PENDING",
+    "rounds": 0,
+    "pass": [
+      "900001",
+      "900002"
+    ],
+    "drop": [
+      "900004"
+    ],
+    "holds_unverified": [],
+    "allocation_unverified": [],
+    "ref": "analysis/AI클레임_261012_kr_주문근거_판정.md",
+    "at": "2026-10-20T14:43:04+09:00"
   },
   "note_lint": null,
   "discipline_only": false,
   "refill_need": null,
   "refill": false,
-  "refill_of": null
+  "refill_of": null,
+  "screen": {
+    "pass": 1,
+    "mode": "main",
+    "prior_passes": 0,
+    "tainted": [],
+    "limits_sha_first": "b5ead5995a9a1516a312a09bad9f6f6797e5797284a654a481b15d6249538939",
+    "rows": 3
+  },
+  "evidence_adopted": []
 }

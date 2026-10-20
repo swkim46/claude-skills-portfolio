@@ -4,7 +4,8 @@
 
 왜(2026-10-13 밤 사용자): "날짜 기록은 무조건 현지 날짜(국장이면 한국, 미장이면 미국) 기준으로." 장 마감 뒤·주말에
 돌린 run은 그 run이 준비하는 **다음 거래일**이다. 전환일 전 스탬프는 옛 규칙(시작한 한국 날짜)으로 읽는다.
-현재 run 포인터(`journal/current_run.json`)가 진행 중인 run의 스탬프를 잇는다. 실제 원장·포인터는 건드리지 않는다.
+현재 run 포인터(저장소 op_current_run — 예전 `journal/current_run.json`)가 진행 중인 run의 스탬프를 잇는다.
+실제 저장소는 건드리지 않는다 — 전부 `testkit.db_case()`의 빈 임시 저장소에서 돈다(2026-10-17).
 
     python3 test_sessions.py          # run_tests.py가 부른다
 """
@@ -21,14 +22,15 @@ from pathlib import Path
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
+import db              # noqa: E402
 import sessions as ss   # noqa: E402
+from testkit import db_case, seed   # noqa: E402
 
 KST = timezone(timedelta(hours=9))
 PASS, FAIL = "PASS", "FAIL"
 results = []
 _STATE = {"current": "(시작 전)", "done": False}
 _TMP = Path(tempfile.mkdtemp(prefix="sstest_"))
-ss.CURRENT_RUN = _TMP / "current_run.json"          # 실제 포인터를 건드리지 않는다
 
 
 def _halt_banner():
@@ -126,8 +128,8 @@ def t4_pointer():
         ss.JOURNAL = jd
         t0 = k(2026, 10, 13, 10, 35)
         cur = ss.write_current("kr", "261013", t0)
-        if cur.get("session_date") != "2026-10-13" or not ss.CURRENT_RUN.exists():
-            p.append(f"포인터를 못 썼다: {cur}")
+        if cur.get("session_date") != "2026-10-13" or (db.current_run_read() or {}).get("stamp") != "261013":
+            p.append(f"포인터를 못 썼다: {cur} · 저장소 {db.current_run_read()}")
         if ss.read_current("kr", t0 + timedelta(hours=2)).get("stamp") != "261013":
             p.append("같은 시장 2시간 뒤에 포인터를 못 읽는다")
         if ss.read_current("us", t0 + timedelta(hours=2)):
@@ -151,13 +153,13 @@ def t4_pointer():
         if ss.run_stamp("kr", later) != "261014":
             p.append("끝난 run 뒤에는 다음 세션 스탬프여야 한다")
         # 지난 스탬프(재처리·테스트)로는 포인터를 덮지 않는다
-        before = ss.CURRENT_RUN.read_text(encoding="utf-8")
+        before = db.current_run_read()
         with contextlib.redirect_stderr(io.StringIO()):
             r = ss.write_current("kr", "260916", later)
-        if r or ss.CURRENT_RUN.read_text(encoding="utf-8") != before:
+        if r or db.current_run_read() != before:
             p.append("지난 스탬프(260916)로 포인터를 덮었다")
         # 포인터가 없으면 run_date는 시장 세션 날짜 → 시장도 없으면 한국 날짜
-        ss.CURRENT_RUN.unlink()
+        db.kv_delete("op_current_run", "current")
         if ss.run_date("us", k(2026, 10, 14, 1, 0)) != date(2026, 10, 13):
             p.append("포인터 없이 미국 run_date(01:00 KST → 동부 10-13)")
         if ss.run_date("", k(2026, 10, 14, 1, 0)) != date(2026, 10, 14):
@@ -170,11 +172,11 @@ def t4_pointer():
 def t5_scan_future_stamp():
     """토요일 미국 run은 월요일 스탬프(오늘보다 뒤)를 쓴다 — scan이 그 run을 세야 한다."""
     p = []
-    saved = (ss.DATA, ss.ANALYSIS, ss.SIGNALS, ss.JOURNAL, ss.LEDGER)
+    saved = (ss.DATA, ss.ANALYSIS, ss.SIGNALS, ss.JOURNAL)
     td = _TMP / "scan"
     try:
         ss.DATA = td / "data"; ss.ANALYSIS = td / "analysis"; ss.SIGNALS = td / "signals"
-        ss.JOURNAL = td / "journal"; ss.LEDGER = ss.JOURNAL / "sessions.jsonl"
+        ss.JOURNAL = td / "journal"
         for d in (ss.DATA, ss.ANALYSIS, ss.SIGNALS, ss.JOURNAL):
             d.mkdir(parents=True, exist_ok=True)
         import os
@@ -189,105 +191,108 @@ def t5_scan_future_stamp():
         if any(r["reached"] == "0 없음" and r["stamp_date"] > "2026-10-17" for r in rows):
             p.append("아직 안 온 날짜를 '0 없음'으로 적었다")
     finally:
-        ss.DATA, ss.ANALYSIS, ss.SIGNALS, ss.JOURNAL, ss.LEDGER = saved
+        ss.DATA, ss.ANALYSIS, ss.SIGNALS, ss.JOURNAL = saved
     report("(5) scan — 주말 run의 앞날 스탬프(다음 거래일)를 센다 · 미래 날짜는 미실행이 아니다", p)
 
 
-def t6_rename_run():
-    """두 run 이름 바꾸기(rename_run.py) — 임시 폴더의 가짜 run으로 건조 실행 → 적용 → 남은 표기 0 · 시각 보존 · id 보존."""
+def t6_old_stamp_reads_session_no_rename():
+    """옛 스탬프는 이름을 바꾸지 않고 세션 날짜로 읽는다(2026-10-17) — `rename_run.py`(10-12·10-13 미국 두 run을 제 이름으로
+    옮기던 도구 · 전 텍스트 파일 정규식 치환)는 `_archive/`로 갔다. 대신 run의 세션 날짜는 run 행의 칸(`ex_run.session_date`)이고,
+    전환일(2026-10-14) 전 스탬프는 그 run이 처음 손댄 파일 시각으로 옛 규칙을 적용해 읽는다(`session_iso`).
+    잴 것: 10-13 01:24 KST에 시작한 미국 run(스탬프 261013)은 동부 10-12 세션 · 전환일 뒤 스탬프는 시각과 무관하게 그 날짜 ·
+    run id는 그대로(261013_us)이고 세션 날짜는 칸에 남는다 · 실제 10-12 run(261012_us)과 행이 겹치지 않는다 · scan이 같은 날짜를 센다."""
     import os
-    import rename_run as rr
     p = []
-    root = _TMP / "rename"
-    for d in ("analysis", "journal", "signals", "data/run_evidence"):
-        (root / d).mkdir(parents=True, exist_ok=True)
-    t_run = k(2026, 10, 13, 1, 24)
-    files = {
-        "analysis/분석노트_261013_us_v1_0.md": "US 261013 · 직전 `intraday_touch_261013_us.json` · 리서치 `섹터_전력_261013_v1_0.md` · AL-261013-us",
-        "analysis/분석노트_261013_kr_v1_0.md": "직전 run(US 261013) · 시그널 signal_261013_us.json · 국내 261013_kr 그대로",
-        "analysis/섹터_전력_261013_v1_0.md": "# 섹터 리서치 (261013 · US)",
-        "analysis/섹터_국내_261013_v1_0.md": "# 국내 섹터 리서치 — 이름 그대로",
-        "data/run_evidence/intraday_touch_261013_us.json": "{}",
-        "data/run_evidence/intraday_touch_261012_us.json": '{"real": "10-12"}',
-        "signals/signal_261013_us.json": '{"run_id": "us:261013"}',
-        "journal/allocation.jsonl": '{"id": "AL-261013-us", "stamp": "261013", "market": "us"}\n{"id": "AL-261013-kr", "stamp": "261013", "market": "kr"}\n',
-        "journal/reviews.jsonl": '{"market": "US", "session": "2026-10-13", "signal": "signal_261013_us.json"}\n'
-                                 '{"market": "KR", "session": "2026-10-13", "signal": "signal_261013_kr.json"}\n',
-        "journal/equity_curve.jsonl": '{"date": "2026-10-13", "market": "US", "ts": "2026-10-13T02:43:08+09:00"}\n'
-                                      '{"date": "2026-10-13", "market": "US", "ts": "2026-10-13T17:29:02+09:00"}\n'
-                                      '{"date": "2026-10-13", "market": "KR", "ts": "2026-10-13T02:43:08+09:00"}\n',
-        "journal/scenarios.json": json.dumps({"scenarios": [
-            {"id": "SC-261013-1", "opened_by": "us:261013", "market": "us", "opened": "261013"},
-            {"id": "SC-261013-2", "opened_by": "kr:261013", "market": "kr", "opened": "261013"}]}, ensure_ascii=False, indent=2) + "\n",
-        "journal/fetch_log.jsonl": '{"note": "261013_us 그대로 둔다"}\n',
-    }
-    for rel, body in files.items():
-        f = root / rel
-        f.write_text(body, encoding="utf-8")
-        ts = t_run.timestamp(); os.utime(f, (ts, ts))
-    led = _TMP / "promotion_ledger.jsonl"          # 감사 원장(프로젝트 밖) — run 이름표만 바뀐다
-    led.write_text('{"run": "ai클레임_261013_us_주문근거_판정.md", "status": "FAIL"}\n{"run": "ai클레임_261013_kr_판정.md"}\n',
-                   encoding="utf-8")
-    pl = rr.plan(root, "261013_us", "261012_us", ["섹터_전력_261013_v1_0.md"], started=t_run, ledger=led)
-    names = {b.name for _, b in pl["renames"]}
-    for want in ("분석노트_261012_us_v1_0.md", "섹터_전력_261012_v1_0.md", "intraday_touch_261012_us_b.json", "signal_261012_us.json"):
-        if want not in names:
-            p.append(f"이름 계획에 {want}가 없다: {sorted(names)}")
-    if (root / "analysis/분석노트_261012_us_v1_0.md").exists():
-        p.append("건조 실행이 파일을 바꿨다")
-    with contextlib.redirect_stdout(io.StringIO()):
-        rr.apply(root, pl)
-    rd = lambda rel: (root / rel).read_text(encoding="utf-8")
-    n1 = rd("analysis/분석노트_261012_us_v1_0.md")
-    for want in ("US 261012", "intraday_touch_261012_us_b.json", "섹터_전력_261012_v1_0.md", "AL-261012-us"):
-        if want not in n1:
-            p.append(f"이 run 노트에 {want}가 없다: {n1}")
-    kr = rd("analysis/분석노트_261013_kr_v1_0.md")
-    if "US 261012" not in kr or "signal_261012_us.json" not in kr or "261013_kr" not in kr:
-        p.append(f"다른 run 노트의 참조: {kr}")
-    if rd("data/run_evidence/intraday_touch_261012_us.json") != '{"real": "10-12"}':
-        p.append("이미 있던 10-12 파일을 덮었다")
-    if not (root / "analysis/섹터_국내_261013_v1_0.md").exists():
-        p.append("--also가 아닌 시장 표기 없는 파일을 바꿨다")
-    al = rd("journal/allocation.jsonl")
-    if '"id": "AL-261012-us", "stamp": "261012"' not in al or '"id": "AL-261013-kr", "stamp": "261013"' not in al:
-        p.append(f"배분 원장: {al}")
-    rv = [json.loads(x) for x in rd("journal/reviews.jsonl").splitlines() if x.strip()]
-    if rv[0]["session"] != "2026-10-12" or rv[1]["session"] != "2026-10-13":
-        p.append(f"회고 session: {rv}")
-    eq = [json.loads(x) for x in rd("journal/equity_curve.jsonl").splitlines() if x.strip()]
-    if [r["date"] for r in eq] != ["2026-10-12", "2026-10-13", "2026-10-13"]:
-        p.append(f"자산 곡선 date(이 run 시간대의 미국 행만): {[r['date'] for r in eq]}")
-    sc = json.loads(rd("journal/scenarios.json"))["scenarios"]
-    if [(r["id"], r["opened_by"], r["opened"]) for r in sc] != [("SC-261013-1", "us:261012", "261012"), ("SC-261013-2", "kr:261013", "261013")]:
-        p.append(f"시나리오(id 보존 · 이 run 행만 opened): {sc}")
-    if "261013_us" not in rd("journal/fetch_log.jsonl"):
-        p.append("fetch_log를 고쳤다")
-    if abs((root / "analysis/분석노트_261012_us_v1_0.md").stat().st_mtime - t_run.timestamp()) > 1 or \
-       abs((root / "journal/allocation.jsonl").stat().st_mtime - t_run.timestamp()) > 1:
-        p.append("파일 시각을 보존하지 않았다")
-    if rr.remaining(root, "261013_us"):
-        p.append(f"옛 표기가 남았다: {rr.remaining(root, '261013_us')}")
-    if not (root / "_rename_snapshots/261013_us_to_261012_us/analysis/분석노트_261013_us_v1_0.md").exists():
-        p.append("원본 복사본이 없다")
-    if "261013_us" not in rd("journal/rename_log.jsonl"):
-        p.append("rename_log 기록이 없다")
-    lt = led.read_text(encoding="utf-8")
-    if "ai클레임_261012_us_주문근거_판정.md" not in lt or "ai클레임_261013_kr_판정.md" not in lt:
-        p.append(f"감사 원장 이름표: {lt}")
-    pl2 = rr.plan(root, "261012_us", "261011_us", [], ledger=led, ledger_only=True)
-    if pl2["renames"] or set(pl2["edits"]) != {led}:
-        p.append(f"--ledger-only가 원장 밖을 건드린다: {pl2['renames'][:2]} {list(pl2['edits'])[:3]}")
-    with contextlib.redirect_stdout(io.StringIO()):
-        rr.apply(root, pl2)
-    if "ai클레임_261011_us_주문근거_판정.md" not in led.read_text(encoding="utf-8") or \
-       not (root / "analysis/분석노트_261012_us_v1_0.md").exists():
-        p.append("원장만 바꾸기 결과가 틀렸다")
-    report("(6) rename_run — 이름·참조·회고·자산 곡선·시나리오·감사 원장 이름표 · 충돌은 _b · id·시각 보존 · 다른 run 파일은 참조만", p)
+    saved = (ss.DATA, ss.ANALYSIS, ss.SIGNALS, ss.JOURNAL)
+    td = _TMP / "oldstamp"
+    try:
+        ss.DATA = td / "data"; ss.ANALYSIS = td / "analysis"; ss.SIGNALS = td / "signals"; ss.JOURNAL = td / "journal"
+        for d in (ss.DATA, ss.ANALYSIS, ss.SIGNALS, ss.JOURNAL):
+            d.mkdir(parents=True, exist_ok=True)
+        stamps = {("261013", "us"): k(2026, 10, 13, 1, 24),      # 옛 규칙 — 시작한 한국 날짜 스탬프 · 동부 월 10-12 장중
+                  ("261012", "us"): k(2026, 10, 12, 22, 40),     # 같은 동부 10-12 세션의 다른 run(실제로 10-12에 시작)
+                  ("261014", "us"): k(2026, 10, 15, 1, 0)}       # 전환일 뒤 — 스탬프 = 세션 날짜(시작 시각과 무관)
+        for (st, m), t in stamps.items():
+            for n in (f"material_{st}_{m}.md", f"snapshot_{st}_{m}.json"):
+                f = ss.DATA / n
+                f.write_text("x", encoding="utf-8")
+                os.utime(f, (t.timestamp(), t.timestamp()))
+        want = {("261013", "us"): "2026-10-12", ("261012", "us"): "2026-10-12", ("261014", "us"): "2026-10-14"}
+        for (st, m), w in want.items():
+            got = ss.session_iso(st, m)
+            if got != w:
+                p.append(f"{st}_{m} 세션 날짜 {got}(기대 {w})")
+            db.run_start(st, m, session_date=got)
+        rows = {r["run_id"]: r for r in db.q("SELECT run_id, stamp, session_date FROM ex_run")}
+        if set(rows) != {"261013_us", "261012_us", "261014_us"}:
+            p.append(f"run id가 바뀌었다(이름 바꾸기 없이 스탬프 그대로여야): {sorted(rows)}")
+        elif rows["261013_us"]["session_date"] != "2026-10-12" or rows["261013_us"]["stamp"] != "261013":
+            p.append(f"옛 스탬프 run 행의 세션 날짜 칸: {rows['261013_us']}")
+        db.run_start("261013", "us")                              # 같은 run을 다시 열어도 세션 날짜 칸은 그대로
+        if (db.run_get("261013", "us") or {}).get("session_date") != "2026-10-12":
+            p.append("run을 다시 열자 세션 날짜 칸이 지워졌다")
+        sc = {(r["stamp"], r["market"]): r["session_date"] for r in ss.scan(6, today=date(2026, 10, 16))}
+        for key, w in want.items():
+            if sc.get(key) != w:
+                p.append(f"scan의 {key} 세션 날짜 {sc.get(key)}(기대 {w})")
+        if Path(HERE / "rename_run.py").exists():
+            p.append("rename_run.py가 아직 작업 폴더에 있다(_archive/로 갔어야)")
+    finally:
+        ss.DATA, ss.ANALYSIS, ss.SIGNALS, ss.JOURNAL = saved
+    report("(6) 옛 스탬프는 이름을 바꾸지 않고 세션 날짜로 읽는다 — 전환일 전 시작 시각 규칙 · run 행 session_date 칸 · scan 일치", p)
 
 
-for fn in (t1_session_date_table, t2_stamp_to_session_cutover, t3_prev_trading_day, t4_pointer, t5_scan_future_stamp, t6_rename_run):
-    _safe(fn)
+def t7_ledgers_in_store():
+    """심은 run 기록·회고가 저장소에서 읽히고(runs·_reviewed) · scan 원장은 op_session으로 통째 다시 쓰인다 · 포인터 행 하나."""
+    import argparse
+    p = []
+    saved = (ss.DATA, ss.ANALYSIS, ss.SIGNALS, ss.JOURNAL)
+    _scan = ss.scan
+    td = _TMP / "store"
+    try:
+        ss.DATA = td / "data"; ss.ANALYSIS = td / "analysis"; ss.SIGNALS = td / "signals"; ss.JOURNAL = td / "journal"
+        for d in (ss.DATA, ss.ANALYSIS, ss.SIGNALS, ss.JOURNAL):
+            d.mkdir(parents=True, exist_ok=True)
+        import os
+        for n in ("material_261015_kr.md", "snapshot_261015_kr.json"):
+            f = ss.DATA / n
+            f.write_text("x", encoding="utf-8")
+            ts = k(2026, 10, 15, 9, 31).timestamp(); os.utime(f, (ts, ts))
+        seed(logs={"run_log": [{"market": "kr", "session_date": "2026-10-15", "outcome": "ok", "orders": {"sent": 2},
+                                "no_trade": False}],
+                   "reviews": [{"market": "KR", "session": "2026-10-15", "signal": "signal_261015_kr.json"},
+                               {"market": "US", "session": "2026-10-14", "phantom": True}]})
+        if ("kr", "2026-10-15") not in ss._reviewed() or ("us", "2026-10-14") in ss._reviewed():
+            p.append(f"회고 기록을 저장소에서 못 읽었다(또는 허깨비를 셌다): {ss._reviewed()}")
+        rs = [r for r in ss.runs(4, today=date(2026, 10, 16)) if r["stamp"] == "261015" and r["market"] == "kr"]
+        if not rs or rs[0].get("outcome") != "ok" or not rs[0].get("reviewed") or rs[0].get("orders") != {"sent": 2}:
+            p.append(f"run 기록·회고가 runs()에 안 붙었다: {rs}")
+        # scan의 오늘을 심은 기록에 맞춰 고정한다 — 실제 오늘을 쓰면 날짜가 지나 창(3일)이 그 run을 벗어난다(2026-10-19)
+        ss.scan = lambda days, today=None: _scan(days, today=today or date(2026, 10, 16))
+        with contextlib.redirect_stdout(io.StringIO()):
+            ss.cmd_scan(argparse.Namespace(days=3))
+        led = db.log_rows("sessions")
+        if not led or not any(r.get("stamp") == "261015" and r.get("market") == "kr" for r in led):
+            p.append(f"scan 원장이 저장소(op_session)에 없다: {len(led)}행")
+        with contextlib.redirect_stdout(io.StringIO()):
+            ss.cmd_scan(argparse.Namespace(days=3))
+        if len(db.log_rows("sessions")) != len(led):
+            p.append("scan을 두 번 돌렸더니 원장 행이 늘었다(통째 다시 쓰기여야 한다)")
+        ss.write_current("kr", "261015", k(2026, 10, 15, 9, 31))
+        ss.write_current("kr", "261015", k(2026, 10, 15, 9, 40))
+        n_ptr = db.q1("SELECT COUNT(*) AS n FROM op_current_run")["n"]
+        if n_ptr != 1:
+            p.append(f"현재 run 포인터 행이 {n_ptr}개(1개여야 한다)")
+    finally:
+        ss.DATA, ss.ANALYSIS, ss.SIGNALS, ss.JOURNAL = saved
+        ss.scan = _scan
+    report("(7) 저장소 — 심은 run 기록·회고가 읽힌다 · scan 원장 op_session 통째 쓰기 · 포인터 한 행", p)
+
+
+with db_case():
+    for fn in (t1_session_date_table, t2_stamp_to_session_cutover, t3_prev_trading_day, t4_pointer, t5_scan_future_stamp,
+               t6_old_stamp_reads_session_no_rename, t7_ledgers_in_store):
+        _safe(fn)
 
 shutil.rmtree(_TMP, ignore_errors=True)
 _STATE["done"] = True

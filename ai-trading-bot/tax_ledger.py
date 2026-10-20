@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-해외주식 양도소득세 원장 — 실계좌 미국 체결로 연간 실현 손익(원화)과 예상 세액을 낸다(2026-10-12 실계좌 전환).
+해외주식 양도소득세 원장 — 실계좌 미국 체결로 연간 실현 손익(원화)과 예상 세액을 낸다(2026-10-12 실계좌 전환 계획).
 
 세법(analysis/세제_실계좌_261012_v1_0.md §2): 연 순차익(국내 과세대상과 합산) − 기본공제 250만 원 × 22%(지방세 포함).
 양도가액·취득가액은 **결제일 기준환율**로 원화 환산한다(소득세법 시행령 제178조의5①) — 통합증거금으로 원화 주문했어도
@@ -22,6 +22,13 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import costs as _costs
+import db
+
+
+def _latest_fx(fam: str = "real") -> float:
+    """최근 USD/KRW 관측(portfolio.fx_at — 그 계좌 계열 잔고 환율 → 시장 공통 관측) · 없으면 0. 세금은 실계좌 체결이 대상이다."""
+    import portfolio
+    return float(portfolio.fx_at(None, fam)[0] or 0.0)
 
 HERE = Path(__file__).parent
 KST = timezone(timedelta(hours=9))
@@ -54,16 +61,29 @@ def _us_day_of(ts) -> str:
         return str(ts or "")[:10]
 
 
+def _db_fills(path: Path, t: dict) -> list:
+    """거래 기록의 체결 한 건에 해당하는 저장소 체결 행(ex_fill) id — 결제일 환율이 아직 없는 것만.
+    같은 run(파일 이름의 스탬프) · 종목 · 매수/매도 · 전송 시각으로 맞춘다. 아직 저장소로 옮겨지지 않았으면 빈 목록 —
+    그때는 나중의 이전(`db.import_run_artifacts`)이 거래 기록의 settle_fx를 함께 옮긴다."""
+    m = re.search(r"trades_(\d{6})_us\.json$", path.name)
+    if not m:
+        return []
+    return db.fills_find(db.run_id(m.group(1), "us"), str(t.get("ticker")), side=t.get("action"), sent_at=t.get("ts"),
+                         without_fx=True)
+
+
 def fill_fx(rate: float = None, at: str = None, source: str = "", today: date = None,
             include_paper: bool = False) -> int:
     """결제일이 오늘 이전·당일인데 `settle_fx`가 비어 있는 미국 체결에 환율을 채운다. 반환 채운 건수.
 
     결제일 당일 run이 채우면 '결제일 당일', 늦게 채우면 '결제일 뒤 첫 기록 — 근사'로 출처를 남긴다.
+    채운 환율은 두 곳에 쓴다 — 저장소의 결제일 환율 행(ex_fill_fx · 추가만, `v_tax`가 읽는다)과 거래 기록 파일의
+    `fill.settle_fx`(run 파일 · `ledger()`가 지금 읽는 자리).
     """
     today = today or _us_today()               # 결제일은 미국 날짜다 — 한국 새벽엔 한국 날짜가 하루 앞선다
     if not rate:
-        rate = _costs.latest_fx()
-        source = source or "최신 미국 스냅샷 exchange_rate"
+        rate = _latest_fx()
+        source = source or "최근 환율 관측(portfolio.fx_at)"
     if not rate:
         return 0
     at = at or datetime.now(KST).isoformat()
@@ -86,6 +106,8 @@ def fill_fx(rate: float = None, at: str = None, source: str = "", today: date = 
             f["settle_fx"] = float(rate)
             f["settle_fx_at"] = at
             f["settle_fx_source"] = (f"{source} · " if source else "") + ("결제일 당일" if sdd == today else "결제일 뒤 첫 기록 — 근사")
+            for fid in _db_fills(path, t):
+                db.fill_fx_put(fid, float(rate), f["settle_fx_source"])
             changed = True
             n += 1
         if changed:
@@ -99,7 +121,7 @@ def ledger(year: int, include_paper: bool = False) -> dict:
     us = cfg.get("US") or {}
     comm = float(us.get("commission_pct") or 0) / 100
     sec = float(us.get("sec_fee_sell_pct") or 0) / 100
-    fallback_fx = _costs.latest_fx()
+    fallback_fx = _latest_fx("paper" if include_paper else "real")
     fills = []
     for _, rec in _us_records(include_paper):
         for t in rec.get("trades") or []:
@@ -163,7 +185,7 @@ def december_candidates(led: dict, include_paper: bool = False) -> list:
     d = json.loads(Path(best).read_text(encoding="utf-8"))
     if (d.get("svr") or "paper") != "real" and not include_paper:
         return []
-    fx = float((d.get("balance") or {}).get("exchange_rate") or 0) or _costs.latest_fx()
+    fx = float((d.get("balance") or {}).get("exchange_rate") or 0) or _latest_fx()
     room = max(0.0, float(led["net_gain_krw"]) - float(led["deduction_krw"]))
     out = []
     for p in (d.get("balance") or {}).get("positions") or []:

@@ -45,9 +45,23 @@ python3 fill.py journal/trades_<stamp>_<mkt>.json --note <분석노트 절대경
   재발주하지 않고 `CANCELLED`에 "가격 이탈"을 적는다 — 캡처 뒤 달아난 것을 쫓지 않는다. 재발주 건은
   `fill_reorder_wait_minutes`(기본 10분) 뒤 취소. *실사례(2026-09-16 AVGO): 지정가가 캡처 시점(09:39 ET) 값 그대로 나가
   시세 아래에 걸렸고, 정정 거부를 13번 되풀이하다 20분 뒤 0주로 끝났다 — 2026-09-17 사용자 지시로 이 규칙이 됐다.*
+- **★ 재발주·정정도 보내기 전에 기록한다(2026-10-19 · Codex W01).** `fill.py`는 재발주·정정을 보내기 **전에** 그 의도를 번호 없는 링크로
+  그날 기록에 쓰고(`fill.reorders`·`order_chain`의 `pending`) 응답이 오면 번호를 채운다 · 분명한 거절이면 의도를 거둔다 · 취소는 응답 직후 바로 쓴다.
+  접수 직후 죽어도 다음 실행은 그 링크를 보고 **다시 보내지 않고** 당일 주문 목록으로 붙이거나(재발주 = 같은 수량의 새 원주문 · 정정 = 원주문
+  번호가 지금 꼬리 번호인 행) 두 번 없음을 확인한 뒤 뺀다. 예전엔 응답을 받은 뒤에야 메모리에 붙고 폴링 끝에 저장해, 그 사이 죽으면 재시작이
+  같은 재발주를 또 보냈다.
 - 종결마다 `fill.verdict`를 쓰고, 파일 최상위 `fill_confirmed`(전송·체결·부분·취소·만료·거부·미확정)와
-  노트 §11의 `<!-- gen:fill -->` 줄을 갱신한다. `status`는 전송 상태(SENT/UNKNOWN/FAILED)로 그대로
-  두며 **종결 상태의 정본은 `fill.verdict`다.**
+  노트 §11의 `<!-- gen:fill -->` 줄을 갱신한다. `status`는 전송 상태로 그대로 두며 **종결 상태의 정본은 `fill.verdict`다.**
+- **★ 주문 상태 다섯 값(2026-10-19 · Codex R01·R02)** — `execute.py`는 주문마다 **보내기 전에** `PENDING` 행을 적고 결과를 바로 바꾼다:
+  `SENT`(접수) · `UNKNOWN`(보낸 뒤 응답을 잃음 — **접수됐을 수 있다**) · `REJECTED`(증권사가 분명히 거절 — 접수 0) ·
+  `UNSENT`(우리가 안 보냄 — 가격 이탈·상한·수량 0·검증 오류 · 접수 0) · 옛 기록의 `FAILED`는 접수 0으로 읽는다.
+  `PENDING`·`UNKNOWN`은 **같은 주문도, 같은 종목·방향도 다시 보내지 않는다** — `fill.py`(그리고 다음 `execute.py`)가
+  증권사 **당일 주문 목록**으로 그 주문을 행에 붙이거나(→ `SENT`), 목록이 두 번 '없다'고 확정하고 잔고도 그대로면
+  `UNSENT`로 내려 다시 보낼 수 있게 한다. 사람에게 묻지 않는다 — 판정은 코드가 하고 §11에는 결과만 적는다.
+  `REJECTED`·`UNSENT`는 같은 승인으로 다시 보낼 수 있다(걸린 주문이 없어 중복이 될 수 없다 · 시도 번호가 오른다).
+  전송 직전 갱신·주문당 상한으로 수량·가격이 바뀌면 그 **실제 요청**(`request` · 행 `qty`·`price`)을 다시 적은 **뒤** 보낸다 — 승인 값은
+  `approved_qty`·`approved_price`에 남고, 당일 목록 대사는 실제 요청 수량으로 한다(2026-10-19 · Codex W02 · 예전엔 승인 수량이 남아
+  접수된 주문을 못 찾았다).
 - 상태 TR이 계속 죽으면 그 건은 미확정으로 남고 종료코드 3이다 — 그때는 게이트가 열리지 않는 것이
   **맞다**. 사용자에게 알리고 TR이 살아나면 다시 돌린다.
 - **모의서버 국내 체결 TR은 0행이 정상일 수 있다** — 그때 `fill.py`는 **잔고 대조**(행의 `fill.qty_before` 대비
@@ -60,10 +74,21 @@ python3 fill.py journal/trades_<stamp>_<mkt>.json --note <분석노트 절대경
 46주). 2026-09-10에도 같은 approved 재실행으로 042660 4주가 두 번 나갔다.* 승인은 파일이고 파일은 다시
 돌릴 수 있으므로, "다시 돌리지 마라"가 아니라 **전송이 멱등**이어야 한다.
 
-- `execute.py --send`는 그날 `trades_*.json`에 **같은 승인 파일명·같은 (종목, 방향, source)**의 행이 있으면
-  판정과 무관하게 **건너뛴다**(`⊘ 건너뜀 … (멱등)`) — 열린 건은 `fill.py`의 몫, 종결 건은 끝난 것, `REJECTED`도
-  재전송하지 않는다. 그러므로 **"확정한 뒤 같은 approved로 다시 돌려라"는 안전한 지시다.**
-- 같은 (종목, 방향)의 **열린 주문**이 있으면 승인 파일과 무관하게 **보류**한다(`⊘ 보류`) — 먼저 `fill.py`로 종결시킨다.
+- `execute.py --send`는 그날 `trades_*.json`에 **같은 승인 파일명·같은 (종목, 방향, source)**의 **접수됐을 수 있는** 행
+  (`SENT`·`UNKNOWN`·`PENDING`)이 있으면 판정과 무관하게 **건너뛴다**(`⊘ 건너뜀 … (멱등)`) — 열린 건은 `fill.py`의 몫,
+  종결 건은 끝난 것, 접수 뒤 거부도 재전송하지 않는다. 그러므로 **"확정한 뒤 같은 approved로 다시 돌려라"는 안전한 지시다.**
+  같은 건이 접수 0(`REJECTED`·`UNSENT`)뿐이면 다시 보낸다.
+- 같은 (종목, 방향)의 **열린 주문이나 접수 불명(`UNKNOWN`·`PENDING`) 주문**이 있으면 승인 파일과 무관하게 **보류**한다
+  (`⊘ 보류`) — 먼저 `fill.py`로 종결·해소시킨다.
+- **그날 기록이 깨졌으면 보내지 않는다**(종료코드 2 — 옛 판은 옆으로 치우고 새로 써서 중복 검사가 빈 기록을 봤다). 파일을 확인한다.
+  **다른 프로세스가 같은 기록을 쓰는 중이면**(`journal/.trades_<st>_<mkt>.lock`) 종료코드 5 — 그 쓰기(보통 배경 `fill.py`)가
+  끝난 뒤 다시 돌린다. 사람 결정이 아니라 재시도다.
+- **저장소에 이 승인 파일의 주문 의도가 있는데 그날 기록에 없으면 보내지 않는다**(종료코드 2 · 2026-10-19 Codex R02·v7) — 기록이 덮인
+  것이다(그 기록으로 중복을 검사하면 이미 나간 주문이 다시 나간다). 저장소 주문 행은 마감(`stage.py close`)이 그날 기록에서 옮긴 것이라
+  마감 뒤 같은 run을 다시 돌릴 때 걸린다. 기록을 되살린 뒤 다시 돌린다. 저장소를 못 읽어도 대조할 수 없으므로 멈춘다.
+- **저장소 장부(v7·v8)** — 주문 행은 보낸 승인 판(해시+순번)에 이어지고(`approval_link` recorded · 옛 행은 유일할 때만 inferred · 아니면 비움),
+  체결은 사건이 아니라 **관측**이다(주문마다 마지막 관측 = `v_fill_latest` · 행을 더하지 않는다 · 수량 부호 없음). 다섯 장부 표는 자료형·값
+  제약(STRICT)이 걸려 있어 주문 모양이 아닌 행은 옮기지 않고 마감 출력에 `★ [저장소] 장부 모양이 아닌 행 n건` 줄로 남긴다.
 - 정당한 재발행(브로커 거부 뒤 새 가격 등)은 **파일명을 바꾼다**(`_v2`·`_reissue`) — 이미 그렇게 쓰고 있다.
 - 매도 수량은 보유량을 넘지 않는다(보유 0이면 건너뜀).
 
@@ -88,7 +113,7 @@ python3 fill.py journal/trades_<stamp>_<mkt>.json --note <분석노트 절대경
 ### ★ 승인 초과는 사고다 — 게이트가 승인 대비 집행을 센다
 
 `fill.py`(그리고 `execute.py`가 기록을 쓸 때마다)가 `trades_*.json`에 `reconcile`을 쓴다 — 종목·방향별
-**승인 합계**(`runs[].approved_orders` 스냅샷) vs **집행 합계**(`fill.filled_qty`). 넘으면 `journal/incidents.jsonl`에
+**승인 합계**(`runs[].approved_orders` 스냅샷) vs **집행 합계**(`fill.filled_qty`). 넘으면 저장소 `op_incident`에
 `INC-<stamp>-<n>`으로 **자동 기록**하고 초과를 만든 행에 `incident_id`를 찍는다. §11 생성줄이 `승인 초과 **N건** ·
 사고 기록 INC-…`가 되고, `execute` 게이트는 **초과 0건** 또는 **사고 기록됨**만 통과시킨다 — 조용히 지나가는 길이
 없다(2026-09-21 승인 46/집행 92가 그대로 통과했던 자리). `execute.py`는 종료코드 **4**, `run_auto`는 `failed_incident`.
@@ -104,12 +129,21 @@ python3 fill.py journal/trades_<stamp>_<mkt>.json --note <분석노트 절대경
 기록된다** — 미기록 집행은 게이트의 정상 동작이 아니라 사고다.
 
 **산출** `journal/trades_<YYMMDD>_<mkt>.json`(주문·체결) ·
-`journal/equity_curve.jsonl`(append) · `journal/position_peaks.json` · `config/benchmark.json`
+`journal/equity_curve.jsonl`(저장소 `ex_equity_point`의 읽기 전용 렌더본) · 시장별 고점 `ex_position_peak` · 벤치마크 기준점 `op_benchmark_anchor`
 
 ```
-python3 execute.py signals/approved_<…>.json --send --note <분석노트 절대경로>   # dispatch GATE PASS 뒤에만
+python3 execute.py signals/approved_<…>.json --send --note <분석노트 절대경로>   # dispatch GATE PASS 뒤에만(집행기가 확인한다)
 python3 fill.py journal/trades_<stamp>_<mkt>.json --note <분석노트 절대경로>       # 미확정이 남았을 때만, 종료코드 0까지 반복
 ```
+**★ 집행기가 관문을 스스로 확인한다(2026-10-19 · Codex R03)** — 본 승인은 **지금 보내는 파일 그 바이트**의 dispatch
+GATE PASS 기록(게이트 엔진이 judge 때 `approved=` 파일 해시를 서명해 남긴다)이 있어야 보내고, 미달 표시
+(`deficit_short`·`factor_short`·`undersized_short`) 중 하나라도 참이면 보내지 않는다(종료코드 2 · 주문 0건). 그러므로
+**dispatch judge에는 반드시 `approved=<그 승인 파일 절대경로>`를 넘긴다.** judge 뒤에 risk_guard를 다시 돌렸으면(승인이 낡았다·
+시세 갱신 등) 해시가 달라 보내지 않는다 — **dispatch를 form부터 다시 받는다**(같은 체크포인트 재판정은 순서 위반이 아니다).
+재투자 승인(`refill`)은 그 run 본 승인의 dispatch 통과 위에서, 규율 전용 승인(장중 손절·미국 주간)은 관문 없이 **규율 매도만** 보낸다.
+**★ 승인 뒤 근거 값이 바뀌었으면 보내지 않는다(2026-10-19 · Codex R04)** — 매수 승인 행의 사실 판(`facts[].version`)보다 저장소 값 판
+(`value_rev`)이 뒤면 `승인 뒤 근거가 고쳐졌다 — …`로 종료코드 2(주문 0건). 재판정(`facts.py verdict`)이 필요하면 먼저 하고 risk_guard를 다시 돌려
+dispatch를 다시 받는다. 표기만 고친 것(rev만 오름)은 막지 않는다.
 `execute.py`는 전송 직후 잔고를 한 번 대조해 주문마다 `fill`(전후 수량·요청 수량·지정가)을 쓰고,
 이어서 `fill`이 **주문 단위 체결 TR로 종결 판정**을 덮어쓴다. 같은 approved로 다시 돌려도 이미 나간 건은
 다시 나가지 않는다(멱등 — 위 절). **확정 대기 중 예외로 끊겼으면**(상태 TR 타임아웃 등 — 2026-09-22 KR)
@@ -197,7 +231,21 @@ python3 fill.py journal/trades_<stamp>_<mkt>.json --note <분석노트 절대경
   (매수는 올리고 매도는 내린다 — 유리한 쪽으로 옮기면 체결을 포기하는 것이고 그게 원래 문제다).
   **국내·해외 모두** 갱신하고(2026-09-17 — 그전엔 해외를 건너뛰어 AVGO가 캡처 가격으로 나갔다), 가격이 올랐으면
   **수량을 승인 금액 안으로 내린다**. 승인가 대비 `send_refresh_max_pct`(기본 2%) 넘게 달아났으면 **보내지 않고**
-  `FAILED(client-side)`로 적는다 — 그 종목은 다음 run이 새 가격으로 다시 판단한다(§11에 "미전송 — 가격 이탈"로).
+  `UNSENT(client-side)`로 적는다 — 그 종목은 다음 run이 새 가격으로 다시 판단한다(§11에 "미전송 — 가격 이탈"로).
+  **★ 예외 — 위험 축소 매도는 더 빠져도 보낸다**(2026-10-19 사용자 결정 · Codex R08): 손절·추적 손절·논지 무효·감사 소급
+  매도(`risk_reducing` — `source` discipline이고 이익실현 다리가 아님 · audit_reversal)는 이탈 한도 밖이어도 전송 시점 시세로
+  지정가를 다시 잡아 보내고, 체결 추적(정정·재발주)도 하한 없이 시세를 따른다(횟수·대기 제한은 그대로). 모델 매도·자금 조달
+  매도·이익실현 다리·모든 매수는 ±2% 그대로다. 시장가는 쓰지 않는다.
+- **★ 전송 직전 전제 재검사(2026-10-19 · Codex J04 · W04).** 모델이 낸 매수(`source: llm`)는 보내기 전에 시세를 읽어(실패하면 한 번 더 — 그렇게
+  얻은 **시세 하나**로 전제 검사와 지정가·수량을 함께 정한다 · 재조회가 검사를 건너뛰던 길을 막았다 · 시세를 못 읽는 원인 둘은 코드에서 없앴다 —
+  run 도중 토큰이 만료되면 새 토큰으로 한 번 다시 묻고, 미국 시세가 틀린 거래소 코드로 빈 값이면 다른 거래소로 다시 물어 거래소 없는 주문은 그 거래소로
+  보낸다 · 남는 실패는 증권사 장애가 재시도 시간을 넘을 때뿐이다) 심사 규칙을 다시
+  적용한다 — ① 손절선(제안·논지 출구의 `price <=` 중 가장 높은 것) 위인가 ② 제안·논지에 진입 구간(`구간 lo~hi`)이 있으면 그 안인가
+  ③ 1차 목표(없으면 `target_basis` 수준)까지 거리가 수익 바닥 이상인가. 하나라도 어긋나면 보내지 않고 `UNSENT(client-side)`에
+  `전제 이탈 — 손절선 115,000 아래(시세 114,500)`처럼 적는다 — 가격 이탈처럼 쫓지 않고 다음 run이 새 가격으로 다시 판단한다
+  (§11에 "미전송 — 전제 이탈"). 행 `premise`에는 `전제 유지` · `전제 검사 대상 없음`(세 항목이 다 없음) · `시세 조회 실패 — 전제 미검사`
+  중 하나가 남고, 뒤의 둘은 그대로 보낸다. 전송 시점 시세는 행 `quote_at_send`와 저장소 시세 기록(`source=send`)에 남는다.
+  위험 축소 매도·규율 매도는 재검사하지 않는다(위 예외). 스냅샷 나이는 막는 기준이 아니라 기록이다(`runs[].snapshot_age_min`).
 - **〈1주 하한〉 매수 수량 내림이 0주면 1주를 보낸다**(`kis_client.buy_qty_within` — 전송 직전 갱신·정정·재발주 공통).
   가격은 이미 이탈 한도 안이므로 초과는 한 주 값의 그 % + 틱 이내이고, 승인 **수량**은 넘지 않는다(대조는 수량 기준).
   사유 칸에 `1주 하한(승인 금액 대비 +x%)`이 찍힌다. 호가·센트 반올림 분은 승인 금액 초과로 세지 않는다.
@@ -236,38 +284,56 @@ python3 fill.py journal/trades_<stamp>_<mkt>.json --note <분석노트 절대경
 여기서는 **결과를 받는다**. 주문 전용 감사 항목(`kind: order`)은 패킷에 자동으로 붙는다. 감사가 체결 확정 전에 끝났으면 체결 확정 뒤에
 `decide --mode post`를 다시 돌린다(소급은 체결 수량을 본다).
 ```
-python3 <REPO>/.claude/skills/_stepgate/stepgate.py audit-status dir=<프로젝트폴더>   # 대기·PASS·FAIL 수
-python3 fc_track1.py decide --mode post --stamp <YYMMDD> --market <mkt>                                       # 결과마다
+python3 <REPO>/.claude/skills/_stepgate/stepgate.py audit-status fact-check dir=<프로젝트폴더>   # ①·② 판정표 감사의 대기·PASS·FAIL 수
+# ★ 스킬 이름(fact-check)을 빼면 판정표 감사가 PENDING=0으로 보인다 — 기다리지 않고 닫게 된다(2026-10-17 예행)
+python3 facts.py decide --mode post --stamp <YYMMDD> --market <mkt>                                           # 결과마다
 # FAIL을 고쳐 다시 받을 때(아래 2): SG form·judge fact-check verdict … deliverable=<…주문근거_판정.md 절대경로> → FIRE 블록 발사
 ```
-1. **PASS** → `decide --mode post`(기록 — `TRACK1 POST` 줄) → 끝.
-2. **FAIL** → 지적마다 판정표 행을 **재채점**한다: 지적이 맞으면 그 행 판정을 바꾸고(MATCH → MISMATCH·STALE·UNVERIFIABLE) 같은
-   결함 유형을 전 행에서 쓸어 고친다 · 지적이 틀렸으면 비고에 `무시: <반증 http 링크 또는 행 L…·클레임 N>`(lint (ⓙ) — 규칙 인용만으로는 무시하지
-   않는다 · 2026-10-15). 근거 문구를 바꾸면 고정본은 다시 뽑지 않고 `fc_track1.py extract --append`. 그다음 `lint_verdict.py --write` → `fc_propagate.py verify --write`
+1. **PASS** → `decide --mode post`(기록 — `TRACK1 POST` 줄) → 끝. `audit=`는 **지금 판정표 판**을 본 감사만 PASS다 — 감사가 본 판정표 해시가
+   지금 파일과 다르면(감사 뒤 판정표가 바뀌었다) `audit=STALE`이고 지금 판정표로 감사를 다시 받는다. 회차 수는 이력 그대로 센다(2026-10-19 · Codex W06 ·
+   렌더 시각만 다른 재렌더는 파일을 다시 쓰지 않는다).
+2. **FAIL** → 지적마다 판정 행을 **재채점**한다: 지적이 맞으면 그 사실의 판정 행을 새로 넣고(`facts.py verdict` — MATCH → MISMATCH·STALE·UNVERIFIABLE ·
+   렌더는 마지막 판정을 쓴다 · `facts.py correct`로 값을 고친 사실을 다시 판정할 때는 행에 `fact_rev`=고친 뒤 판(`facts.py show F-…`의 rev ·
+   빠지면 거부 메시지가 그 판을 알려 준다)을 적는다) 같은 결함 유형을 전 행에서 쓸어 고친다 · 지적이 틀렸으면 판정 행 `note`에 `무시: <반증 http 링크 또는 행 L…·클레임 N>`(lint (ⓙ) — 규칙 인용만으로는 무시하지
+   않는다 · 2026-10-15). 사실 값이 틀렸으면 `facts.py correct`(그 뒤 `stage.py render-note`). 근거를 바꾸거나 더하면 고정본은 다시 뽑지 않고 `facts.py render-claims --batch track1 --append`.
+   그다음 `facts.py lint --batch track1` → `facts.py render-verdict --batch track1`(`LINT OK`·`REFS OK`)
    → `decide --mode post` → 다시 judge → 다음 감사. **FAIL은 최대 5회**(`limits.fc_track1_max_rounds`) — 넘기면 더 고치지 않고 기록만 한다.
-3. **소급** — `decide --mode post`가 재채점된 표로 통과/제외를 다시 계산해, **이 run에 체결된 매수**의 근거가 무너졌으면(근거 행 MISMATCH ·
-   MATCH·T1/T2 근거 0 — `risk_guard`가 매수를 거부하는 규칙과 같다) `journal/audit_reversals.jsonl`에 되돌림 매도를 쓴다(체결 수량 · 사람 확인 없음).
+3. **소급 — 출처는 `decide --mode post` 출력 하나다(판단으로 되팔지 않는다 · FB-261017-9)** — post가 재채점된 표로 **이 run에 체결된 매수**
+   (본 승인·재투자 승인 모두)를 5단과 같은 한 규칙(받치는 사실 중 MATCH(T1/T2) ≥1 · 받치는 사실에 MISMATCH·UNVERIFIED_T1 없음 · 배경 MISMATCH 없음)으로
+   다시 재서 제외된 것만 저장소 `ex_reversal_event`에 되돌림 매도로 쓴다(체결 수량 · 승인 파일 `buy_ref` · 판정 행 `fc_rows` · 사람 확인 없음).
+   승인 파일·판정 행이 없는 소급 행은 소비자(`risk_guard.reversals_pending`)가 void로 닫는다.
    - **장중** → 그 자리에서 `python3 stops.py --market <mkt> --send`(현재가 스냅샷 → 규율 전용 risk_guard → 전송 → 체결 확정 → 원장 filled).
      오늘 산 논지는 `theses.py set-status held` **뒤에** 보낸다 — 전량 체결이면 fill이 논지를 닫는다(안 닫혔으면 `set-status closed --note "감사 소급 REV-…"`).
    - **장 닫힘** → 대기로 남긴다. 다음 그 시장 run의 이어받기 `## 감사 소급` 절에 나오고 1단 `stops.py --send`·5단 `risk_guard`가 자동으로 판다.
    - 장중 소급 매도가 체결되면 판 돈은 아래 〈매도 뒤 재투자〉로 — `stops.py`가 재투자 기록을 남기고 `stage.py close`가 그것을 본다(2026-10-15).
    - **표기·한정어 지적은 소급이 아니다** — 표를 고쳐도 근거 판정이 MATCH로 남으면 되돌림 0이다(10-13 국내처럼 배분 설명만 짚힌 경우).
+   - **〈낡은 근거 — 같은 run에서 끝낸다〉**(2026-10-17 사용자: 근거가 무너진 매수를 하루 더 들지 않는다) — post가 `stale_support=<종목>(<사실>)`를 내면
+     (통과했지만 받치는 사실에 STALE·UNVERIFIABLE이 남은 체결 매수 — 팔지 않는다) 그 run 안에서 둘 중 하나로 끝낸다:
+     ① 그 사실을 출처에서 다시 확인(`fetch.py`) → `facts.py correct F-… --set <칸>=<새 값> --set as_of=<날짜> --reason "…"` → `facts.py verdict`(재판정 행)
+     → `decide --mode post` 다시 — 새 값이 받치면 MATCH로 `stale_support`에서 빠지고, 안 받치면 MISMATCH로 post가 소급한다
+     ② 다시 확인하지 못하면 그 보유를 재판정 — 유지 `theses.py set-status --id <논지> --status held --note "[보유 재판정] <종목> — 낡은 사실 F-… 확인 불가 · 유지 사유 …"`,
+     정리 `facts.py reverse … --why …`(hold_overturned)
+     ③ 둘 다 없으면 `stage.py close`가 종료코드 4로 닫지 않는다(점검표를 치우고 run_close 보류 — 재투자 미처리와 같은 방식).
+     **값만 바뀐 근거도 여기로 온다(2026-10-19 · Codex R04)** — 체결 뒤 받치는 사실의 값이 바뀌었는데 옛 판정이 MATCH였으면(REVERIFY ·
+     틀렸다는 증거는 없다) post가 소급하지 않고 `stale_support`에 넣는다. 옛 판정이 MISMATCH였다가 고친 것은 소급 그대로다.
    - **보유 판단**의 근거가 무너졌으면(`holds_unverified`) 그 보유를 다시 판정하고, 팔아야 하면
-     `python3 fc_track1.py reverse --stamp <YYMMDD> --market <mkt> --ticker <T> --qty <N> --why "<무엇이 무너졌나>"` → 위와 같은 경로.
+     `python3 facts.py reverse --stamp <YYMMDD> --market <mkt> --ticker <T> --qty <N> --why "<무엇이 무너졌나>" --kind hold_overturned` → 위와 같은 경로.
+     `reverse`는 `hold_overturned`뿐이고 대상(이 run `holds_unverified` · 이 run `stale_support` · 직전 run의 낡은 근거·`holds_unverified`) 밖 종목과
+     그 밖의 이 run 체결 매수는 도구가 거부한다(rc 3).
    - **배분 설명**(국면·현금 사유)의 사실이 틀리면 기록하고 다음 run 배분 입력으로 넘긴다 — 이미 산 것을 비율만큼 되팔지는 않는다.
 4. **체결된 매수가 0건이면** 감사는 한 번만 받고 기록한다(보유 판단 지적이 있으면 3의 보유 재판정만).
 5. **run을 닫기 전에 결과를 기다린다**(운영자 2026-10-13: "안 왔으면 기다려야지") — 저널·계좌 현황을 돌린 뒤 보고 전에 ①·② 감사 기록이
-   다 왔는지 `audit-status`로 본다. 10분 동안 기록·파일 변화·완료 알림이 없으면 그 감사를 한 번 다시 띄우고, 두 번째도 침묵이면 `미수신`으로
+   다 왔는지 `audit-status fact-check dir=<프로젝트폴더>`로 본다(스킬 이름을 빼면 0건으로 보인다). `stage.py close`가 낡은 근거 미결을 센다(종료코드 4). 10분 동안 기록·파일 변화·완료 알림이 없으면 그 감사를 한 번 다시 띄우고, 두 번째도 침묵이면 `미수신`으로
    적고 닫는다 — 늦게 온 결과는 다음 run 이어받기 `## 감사 소급`의 '① 감사 결과 미반영'이 `decide --mode post`로 받는다(안전망이지
    기본 경로가 아니다). 이 규칙이 있는 이유: 배경 에이전트는 세션 한도·도구 오류로 소리 없이 죽는 일이 있다.
-6. **§11에 `[감사 소급]` 줄** — `감사 r회 PASS|FAIL · 소급 REV-…(종목·수량·전송/대기)` 또는 `소급 없음`.
+6. **§11에 `[감사 소급]` 줄** — `감사 r회 PASS|FAIL · 소급 REV-…(종목·수량·전송/대기)` 또는 `소급 없음` · `낡은 근거 n건(종목 · 재확인/유지/정리)`.
 
 ### ★ 갈래 ② 감사 — 묶음 합류·결과 반영 (2026-10-13 · 2026-10-14 배경화)
 
-배경 서술(노트 `[AI]` 전건)은 묶음 ②-A(3단 끝)·②-B(4단 심층 끝)로 배경 에이전트가 판정표·lint·전파 계획까지 하고, 교정이 0이면
+배경 서술(노트 `[AI]` 전건)은 묶음 ②-A(3단 끝)·②-B(4단 심층 끝)로 배경 에이전트가 판정·교정·lint·판정표 렌더까지 하고, 교정이 0이면
 게이트 ②·감사까지 띄운다(`stage4_note.md` 5-C 〈배경 에이전트〉 · 운영자: "배경 서술까지 깊게 파는데, 이건 지금처럼 2차까지만").
-**집행 뒤 할 일** — ① 아직 합류하지 않은 묶음(`본 세션 적용 대기`)이 있으면 `fc_propagate.py apply` → `verify --write` → 노트 `v1_1`
-(§11까지 든 최신본에서) → 아래 게이트 ② → FIRE 블록대로 감사 발사 ② 결과가 오면 1차 FAIL은 유형 단위로 한 번 고치고(4단 5-C 8번)
+**집행 뒤 할 일** — ① 아직 합류하지 않은 묶음(`본 세션 적용 대기`)이 있으면 `stage.py render-note`(노트 `v1_1` —
+§11까지 든 최신본에서) → `facts.py check-refs`(`REFS OK`) → `facts.py render-verdict` → 아래 게이트 ② → FIRE 블록대로 감사 발사 ② 결과가 오면 1차 FAIL은 유형 단위로 한 번 고치고(4단 5-C 8번)
 다시 judge → 2차는 기록만 ③ 모든 감사 기록이 남은 뒤 `SG clear fact-check dir=<프로젝트폴더>`.
 ```
 SG form  fact-check verdict dir=<프로젝트폴더>
@@ -311,11 +377,19 @@ SG judge fact-check verdict <id>=<값> … deliverable=<analysis/AI클레임_<st
 ```
 python3 journal.py --daily --market <mkt>        # 매 run 마지막
 python3 journal.py --weekly                      # 금요일 — ④절까지 끝까지 돌아야 한다(토요일 trade-feedback의 입력)
-python3 stage.py close --market <mkt> --stamp <YYMMDD>   # ★ 계좌 현황 바로 앞 — 미룬 주간거래 손절 점검 · 재투자 대기 확인 · 실전 점검표
+python3 stage.py close --market <mkt> --stamp <YYMMDD>   # ★ 계좌 현황 바로 앞 — 미룬 주간거래 손절 점검 · 재투자 대기 확인 · 실전 점검표 · REFS OK|FAIL · run 시간·사실 수 기록
 python3 account_status.py --market <mkt> --stamp <YYMMDD> --refresh   # ★ 보고 마지막 블록 — 양 시장 journal 갱신 후 계좌 현황
 ```
-**★ `stage.py close`(2026-10-15 · 실전 전환 주간)** — ① 국내 run이 09:30 캡처에서 못 한 미국 주간거래 손절 점검(실계좌 계열) ② 재투자 기록이
-`open`이면 종료코드 3(위 〈매도 뒤 재투자〉) ③ `real_check.py` → `data/run_evidence/real_check_<st>_<mkt>.md`(12항목 · ★ 줄이 맨 앞).
+**★ `stage.py close`(2026-10-15 · 실계좌 전환 준비 주간)** — ① 국내 run이 09:30 캡처에서 못 한 미국 주간거래 손절 점검(실계좌 계열) ② 재투자 기록이
+`open`이면 종료코드 3(위 〈매도 뒤 재투자〉) ③ `real_check.py` → `data/run_evidence/real_check_<st>_<mkt>.md`(12항목 · ★ 줄이 맨 앞)
+④ `facts.py check-refs`로 이번 run의 사실 참조를 검사해 `REFS OK|FAIL` 줄을 찍고, 단계 시각과 사실 수(새·재사용·되풀이·뉴스보다 먼저)를 run 기록에 남기며
+`[사실]` 줄로 보여 준다(토요일 피드백의 run 시간·재료 지표가 이것을 읽는다). `REFS FAIL`이면 찍힌 사실의 빠진 칸(as_of·url·quote)을 `facts.py correct`로 채우고
+close를 다시 돌린다. **교정 뒤 노트를 다시 렌더하지 않았으면 ★ 줄이 뜬다** — `python3 stage.py render-note --stamp <YYMMDD> --market <mkt>`를 돌린 뒤 close를 다시 돌린다.
+**★ close 종료코드(2026-10-19 · Codex U02 — '닫힘'은 '모름'일 수 없다)**: 0 닫음 · 3 재투자 미처리 · 4 낡은 근거 미결(검사가 죽어도 4) ·
+5 사실 층 미결(`REFS FAIL` · 마감 검사 예외) · 6 저장 단계 실패(이관·감사 복사·run_close) · 7 외부 점검 명령 실패(`real_check.py`·
+`stops.py --daytime`의 종료코드 ≠ 0). 우선순위 6 > 7 > 3 > 4 > 5. **0이 아니면 run을 닫지 않는다** — 3·4·5는 점검표도 치운다(execute·no_trade
+게이트가 그 파일을 본다). 원인을 고쳐 close를 다시 돌리면 새 시도로 멱등하게 닫힌다. 감사 회차는 **다른 폴더(예행)의 감사를 세지 않는다** —
+감사 행마다 범위(project/foreign/unknown)가 남는다(`db.audit_rows` · 바로잡기 `db.py audit-rescope <run>`).
 그 점검표의 머리줄과 표를 보고의 〈계좌 현황〉 바로 앞에 **그대로** 붙인다(`../SKILL.md` 보고 ④). 푸시를 보냈으면 바로
 `python3 push_log.py --stamp <st> --market <mkt> --text "<보고 첫 줄>"`(점검표 ⑩ — 못 보냈으면 `--failed`).
 **★ `account_status.py`가 run의 마지막 명령이다.** 시장별 자산·현금·투자·주식:현금·당일/누적·벤치마크 대비와
@@ -343,10 +417,13 @@ python3 account_status.py --market <mkt> --stamp <YYMMDD> --refresh   # ★ 보�
 
 - [ ] **승인 뒤 따로 나간 매도가 있었으면 재투자를 돌렸거나 `refill-defer`로 미룬 사유를 적었는가** — `stage.py close` 종료코드 0
 - [ ] **`stage.py close`의 실전 점검표를 계좌 현황 앞에 그대로 붙였는가** · 푸시 뒤 `push_log.py`
+- [ ] **`stage.py close`가 `REFS OK`를 찍었는가** — `REFS FAIL`이면 빠진 칸을 채우고, 재렌더 ★가 뜨면 `render-note` 뒤 다시 돌렸는가
 - [ ] **갈래 ① 감사 결과를 run을 닫기 전에 받아 결과마다 `decide --mode post`를 돌렸는가**(안 왔으면 기다렸고, 두 번 침묵이면 `미수신`) —
       FAIL은 재채점 뒤 최대 5회 · 체결 매수의 근거가 무너졌으면
       되돌림을 장중엔 같은 run에서 보냈고(닫혔으면 대기) §11에 `[감사 소급]` 줄
-- [ ] **갈래 ② 묶음마다 합류했는가**(교정 apply·verify → v1_1 → 게이트 ② → 감사 발사 · 또는 배경이 이미 발사) — 1차 → 수정 1회 → 2차(기록만) ·
+- [ ] **되돌림은 전부 post가 낸 행인가 · `reverse`는 대상 종목에만 · 낡은 근거(`stale_support`)는 이 run에서 끝났는가**(재확인 또는 `[보유 재판정]`/reverse) —
+      `stage.py close` 종료코드 4가 아닌가
+- [ ] **갈래 ② 묶음마다 합류했는가**(노트 재렌더 v1_1 → `REFS OK` → 게이트 ② → 감사 발사 · 또는 배경이 이미 발사) — 1차 → 수정 1회 → 2차(기록만) ·
       결과를 기다렸거나 `미수신`을 적었는가 · 보고에 `주문 근거 검증 …`·`배경 검증 …` 두 줄
 
 - [ ] **전송한 주문 전부가 종결 상태인가** — `trades_*.json`의 `fill_confirmed.open_orders`가 0이고

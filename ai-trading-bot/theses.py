@@ -30,15 +30,15 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import db
+
 HERE = Path(__file__).parent
-STORE = HERE / "journal" / "theses.json"
 KST = timezone(timedelta(hours=9))
 
 STATUSES = ("armed", "held", "closed", "expired")
 
 # 기계 판정 가능한 조건. 변수는 스냅샷·보유에서 나오고, 사람이 쓴 문장은 못 들어온다.
 VARS = ("price", "change_pct", "pnl_pct", "days_since_entry", "days_to_expiry", "from_peak_pct")
-PEAKS = HERE / "journal" / "position_peaks.json"
 # 매크로 조건 낱말 — 이 낱말이 든 매도 다리는 그 종목 자체의 조건(`stock`)을 같이 걸어야 한다(FB-261003-6).
 MACRO_WORDS = re.compile(r"CPI|PCE|FOMC|연준|Fed\b|기준금리|금리|물가|고용지표|비농업|실업률|국채|10년물|점도표|"
                          r"추가 인상|인상 여지|인하 여지|매크로|macro", re.I)
@@ -48,17 +48,26 @@ ZONE_RE = re.compile(r"구간\s*([\d][\d,]*(?:\.\d+)?)\s*~\s*([\d][\d,]*(?:\.\d+
 
 
 def load() -> dict:
-    if not STORE.exists():
-        return {"schema_version": "1.0", "theses": []}
-    try:
-        return json.loads(STORE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
-        raise SystemExit(f"논지 원장을 읽을 수 없다 ({e}) — 손으로 확인할 것: {STORE}")
+    """논지 원장(저장소 jd_thesis)을 옛 theses.json 모양 {schema_version, theses}로 읽는다.
+    `save()`와 짝 — 읽은 뒤 다른 프로세스가 먼저 고친 논지를 덮어쓰려 하면 StaleWrite로 멈춘다."""
+    meta = db.docmeta_get("theses") or {}
+    return {"schema_version": meta.get("schema_version") or "1.0", "theses": db.theses_load()}
 
 
 def save(data: dict) -> None:
-    STORE.parent.mkdir(parents=True, exist_ok=True)
-    STORE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    """옛 통째 쓰기 자리 — 바뀐 논지만 행 단위로 쓴다(db.theses_save · 렌더본 theses.json은 db가 커밋 뒤 내보낸다)."""
+    db.theses_save(data["theses"])
+
+
+def _update(tid: str, fn) -> dict:
+    """논지 하나를 한 트랜잭션 안에서 읽고-고치고-쓴다 — 같은 시각 다른 논지를 고치는 쓰기(체결·배경 판정)를 덮지 않는다."""
+    try:
+        t = db.thesis_update(tid, fn)
+    except KeyError:
+        if db.thesis_get(tid) is None:
+            raise SystemExit(f"그런 id가 없다: {tid}") from None
+        raise
+    return t
 
 
 def eval_cond(expr: str, ctx: dict, why: dict = None):
@@ -102,11 +111,10 @@ def build_ctx(t: dict, snapshot: dict) -> dict:
     ctx = {"price": q.get("price") or pos.get("price"),
            "change_pct": q.get("change_pct"),
            "pnl_pct": pos.get("pnl_pct")}
-    # ★ 고점 대비 하락률(추적 매도용, FB-261003-2) — 저널이 갱신하는 보유 고점과 지금 가격 중 큰 값이 고점이다.
+    # ★ 고점 대비 하락률(추적 매도용, FB-261003-2) — 저널이 갱신하는 보유 고점(저장소 ex_position_peak)과 지금 가격 중 큰 값이 고점이다.
     try:
-        peaks = json.loads(PEAKS.read_text(encoding="utf-8"))
-        pk = float(((peaks.get(str(t.get("market") or "").upper()) or {}).get(ticker) or {}).get("peak_price") or 0)
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        pk = float((db.peaks_for_market(str(t.get("market") or "").upper()).get(ticker) or {}).get("peak_price") or 0)
+    except (TypeError, ValueError):
         pk = 0.0
     if ctx["price"] and pos:
         peak = max(pk, float(ctx["price"]))
@@ -136,7 +144,7 @@ def held_without_trail(theses: list, market: str = "") -> list:
 
 
 def check(market: str, snapshot_path: Path) -> int:
-    data = load()
+    data = {"theses": db.theses_all()}                     # 읽기만 — 쓰기 짝(load/save)이 필요 없다
     snap = json.loads(snapshot_path.read_text(encoding="utf-8"))
     today = _run_day(market)
 
@@ -178,6 +186,16 @@ def check(market: str, snapshot_path: Path) -> int:
                 waiting.append(row)
 
     kind_ko = {"entry_triggers": "매수", "exit_triggers": "매도"}
+    # ★ 재검토 필요(2026-10-19) — 근거 사실이 틀렸다고 판정된 논지. 저장소 트리거가 표시를 붙이지만 아무도 안 읽어, 한 실행에서
+    #   run이 주문 쪽 근거만 바꿔 넘기려 했다(261019 국내 하나금융). 고칠 길은 둘 — 근거를 다시 세우거나 닫는다.
+    review = [r for r in db.theses_under_review() if not market or str(r.get("market") or "").upper() == market.upper()]
+    if review:
+        print(f"★ 재검토 필요 {len(review)}건 — 근거 사실이 틀렸다고 판정됐다(MISMATCH). 근거를 다시 세우거나"
+              f"(`theses.py set-evidence --id <id> --drop <틀린 F> --facts <새 F> --why …`) 닫아라(`set-status closed`) — "
+              f"그 전에는 risk_guard가 이 논지의 매수를 받지 않는다(새 근거의 매수는 다음 run):")
+        for r in review:
+            print(f"    {r['ticker']} · {r['id']} · " + " / ".join(f"{f['fact_id']} {f['why'][:70]}" for f in r["facts"]))
+        print()
     no_trail = held_without_trail(data["theses"], market)
     if no_trail:
         print(f"★ 추적 다리 없음 {len(no_trail)}건 — 보유 논지의 수익 쪽 매도는 고점 대비 추적 다리(`from_peak_pct`)가 기본이다"
@@ -244,7 +262,7 @@ def check(market: str, snapshot_path: Path) -> int:
 
 
 def cmd_list() -> int:
-    data = load()
+    data = {"theses": db.theses_all()}
     if not data["theses"]:
         print("논지 원장이 비어 있다.")
         return 0
@@ -410,8 +428,8 @@ def entry_reach_ok(t: dict) -> bool:
 def cmd_add(path: Path) -> int:
     new = json.loads(path.read_text(encoding="utf-8"))
     items = new if isinstance(new, list) else [new]
-    data = load()
-    have = {t["id"] for t in data["theses"]}
+    have = {t["id"] for t in db.theses_all()}
+    ready = []
     for t in items:
         missing = [k for k in REQUIRED + REQUIRED_NEW if not t.get(k)]
         if missing:
@@ -483,31 +501,44 @@ def cmd_add(path: Path) -> int:
                              f"레버리지는 며칠 단위로만 든다(일일 리셋 손실). 호흡을 줄이거나 기초 종목으로 바꿔라")
         if lev > 1:
             t["leverage"] = lev; t["inverse"] = inv
+        # ★ 논지 근거 = 저장소의 사실(2026-10-19) — 근거마다 사실 번호가 있어야 그 사실이 틀렸을 때 저장소가 논지에 재검토 표시를
+        #   붙이고(트리거) risk_guard가 그 논지의 매수를 막는다. 번호 없는 근거는 기계가 모르는 근거다(기존 논지 15개 중 14개가 그랬다).
+        ev = [e for e in t.get("evidence") or [] if isinstance(e, dict)]
+        nofid = [i for i, e in enumerate(ev, 1) if not str(e.get("fact_id") or "").strip()]
+        gone = [e["fact_id"] for e in ev if e.get("fact_id") and not db.q1("SELECT 1 AS o FROM ev_fact WHERE id=?", (e["fact_id"],))]
+        if not any((e.get("role") or "support") == "support" and e.get("fact_id") for e in ev) or nofid or gone:
+            raise SystemExit(f"{t['id']} 근거(evidence)는 저장소 사실 번호로 단다 — 받치는(support) 근거 1개 이상 · 항목마다 fact_id"
+                             + (f" · 번호 없는 항목 {nofid}" if nofid else "") + (f" · 저장소에 없는 번호 {gone}" if gone else "")
+                             + " (`facts.py add`가 준 F-… 번호)")
         t.setdefault("status", "armed")
         t.setdefault("created", _run_day(t.get("market", "")).isoformat())
-        data["theses"].append(t)
+        ready.append(t)
         have.add(t["id"])
         print(f"등록: {t['id']}  {t['ticker']} {t.get('name', '')}  "
               f"[{t.get('axis_id')} · {t['axis']}]")
-    save(data)
+    # 전건 검증이 끝난 뒤 한 트랜잭션으로 넣는다 — 하나라도 규칙 위반이면 아무것도 넣지 않는다(옛 통째 쓰기와 같은 원자성).
+    with db.tx():
+        for t in ready:
+            if db.thesis_get(t["id"]) is not None:          # 검증하는 사이 다른 프로세스가 같은 id를 넣었다
+                raise SystemExit(f"id 중복: {t['id']}")
+            db.thesis_put(t)
     return 0
 
 
 def cmd_status(tid: str, status: str, note: str) -> int:
     if status not in STATUSES:
         raise SystemExit(f"status는 {STATUSES} 중 하나")
-    data = load()
-    for t in data["theses"]:
-        if t.get("id") == tid:
-            t["status"] = status
-            t.setdefault("history", []).append(
-                {"ts": datetime.now(KST).isoformat(), "status": status, "note": note})
-            if status == "held":
-                t.setdefault("entered_on", _run_day(t.get("market", "")).isoformat())
-            save(data)
-            print(f"{tid} → {status}")
-            return 0
-    raise SystemExit(f"그런 id가 없다: {tid}")
+
+    def fn(t):
+        t["status"] = status
+        t.setdefault("history", []).append(
+            {"ts": datetime.now(KST).isoformat(), "status": status, "note": note})
+        if status == "held":
+            t.setdefault("entered_on", _run_day(t.get("market", "")).isoformat())
+        return t
+    _update(tid, fn)
+    print(f"{tid} → {status}")
+    return 0
 
 
 def _loosened_stop(old_check: str, new_check: str) -> tuple:
@@ -534,14 +565,17 @@ def cmd_set_trigger(tid: str, trig_id: str, check: str, basis: str, why: str,
         raise SystemExit("check judge는 --when(사람이 판정할 조건)이 있어야 한다")
     if not basis:
         raise SystemExit("--basis가 없다 — `basis` 없는 가격 트리거는 만들지 않는다(theses_levels.md)")
-    data = load()
-    t = next((x for x in data["theses"] if x.get("id") == tid), None)
-    if t is None:
-        raise SystemExit(f"그런 id가 없다: {tid}")
-    for field in ("exit_triggers", "entry_triggers"):
-        trg = next((x for x in (t.get(field) or []) if x.get("id") == trig_id), None)
-        if trg is None:
-            continue
+    done = {}
+
+    def fn(t):
+        for field in ("exit_triggers", "entry_triggers"):
+            trg = next((x for x in (t.get(field) or []) if x.get("id") == trig_id), None)
+            if trg is not None:
+                _retrigger(t, field, trg)
+                return t
+        raise SystemExit(f"{tid}에 트리거 {trig_id}가 없다 (entry/exit 모두)")
+
+    def _retrigger(t, field, trg):
         old = dict(trg)
         cand = {**trg, "check": check, "basis": basis, "when": when or trg.get("when"),
                 "size_pct": size_pct if size_pct is not None else trg.get("size_pct")}
@@ -580,31 +614,86 @@ def cmd_set_trigger(tid: str, trig_id: str, check: str, basis: str, why: str,
         # ★ 새 값으로 다시 건 다리는 **살아난다** — 소진 표시를 지운다(옛 집행은 corrections에 남는다).
         for k in ("fired", "fired_at", "fired_note"):
             trg.pop(k, None)
-        save(data)
-        print(f"{tid} {field}.{trig_id}: {old.get('check')} → {check} (corrections에 기록)")
-        return 0
-    raise SystemExit(f"{tid}에 트리거 {trig_id}가 없다 (entry/exit 모두)")
+        done.update(field=field, old=old.get("check"))
+
+    _update(tid, fn)
+    print(f"{tid} {done['field']}.{trig_id}: {done['old']} → {check} (corrections에 기록)")
+    return 0
+
+
+def cmd_set_evidence(tid: str, add: list, drop: list, why: str, role: str = "support") -> int:
+    """논지의 근거를 다시 세운다(2026-10-19 · 새 기능 — 지금까지 논지 근거를 고칠 명령이 없었다). 옛 근거는 `corrections[]`에 남고,
+    새 사실은 저장소에 있어야 하며 판정 불일치(disputed)가 아니어야 한다. 받치는 근거에 틀린 사실이 남으면 거부한다(`--drop`으로 뺀다).
+    재검토 표시는 지워진다 — 새 근거 위의 매수는 다음 run에서 검증을 거쳐 나간다(같은 run에서 고쳐 내면 risk_guard 회차 기억이 막는다)."""
+    if not str(why or "").strip():
+        raise SystemExit("--why가 없다 — 무엇이 틀렸고 새 근거가 무엇을 받치나")
+    add = [x.strip() for x in add if x and x.strip()]
+    drop = [x.strip() for x in drop if x and x.strip()]
+    if not add and not drop:
+        raise SystemExit("--facts(더할 사실) 또는 --drop(뺄 사실)이 하나는 있어야 한다")
+    for fid in add:
+        r = db.q1("SELECT verified_status FROM ev_fact WHERE id=?", (fid,))
+        if not r:
+            raise SystemExit(f"저장소에 없는 사실 {fid} — `facts.py add`가 준 번호만")
+        if r["verified_status"] == "disputed":
+            raise SystemExit(f"{fid}는 판정 불일치(disputed)다 — 틀린 사실로 근거를 세우지 않는다")
+    done = {}
+
+    def fn(t):
+        ev = list(t.get("evidence") or [])
+        have = {e.get("fact_id") for e in ev if isinstance(e, dict)}
+        miss = [f for f in drop if f not in have]
+        if miss:
+            raise SystemExit(f"{tid} 근거에 없는 사실을 빼려 했다: {miss}")
+        kept = [e for e in ev if not (isinstance(e, dict) and e.get("fact_id") in drop)]
+        today = _run_day(t.get("market", "")).isoformat()
+        for fid in add:
+            if fid not in have:
+                kept.append({"fact_id": fid, "role": role, "claim": _fact_line(fid), "as_of": today, "added": f"set-evidence {today}"})
+        left = [e.get("fact_id") for e in kept if isinstance(e, dict) and e.get("fact_id")
+                and (e.get("role") or "support") != "against"
+                and (db.q1("SELECT verified_status FROM ev_fact WHERE id=?", (e["fact_id"],)) or {}).get("verified_status") == "disputed"]
+        if left:
+            raise SystemExit(f"{tid} 받치는 근거에 아직 틀린 사실이 있다: {left} — --drop으로 빼라")
+        t["evidence"] = kept
+        t.setdefault("corrections", []).append({"ts": today, "what": "근거 " + " ".join([f"−{f}" for f in drop] + [f"+{f}" for f in add])
+                                                + " (set-evidence)", "why": why})
+        done["n"] = len(kept)
+        return t
+    _update(tid, fn)
+    db.thesis_review_clear(tid)
+    print(f"{tid} 근거 {' '.join([f'−{f}' for f in drop] + [f'+{f}' for f in add])} → {done['n']}건 (corrections에 기록 · 재검토 표시 지움 · "
+          f"새 근거의 매수는 다음 run 검증 뒤)")
+    return 0
+
+
+def _fact_line(fid: str) -> str:
+    try:
+        import facts as _f
+        return _f.render_line(fid)[:120]
+    except Exception:                                       # noqa: BLE001 — 한 줄 렌더 실패가 근거 기록을 막지 않는다
+        return fid
 
 
 def cmd_set_driver(tid: str, axis_id: str, why: str) -> int:
     """보유·대기 논지의 `price_driver`를 정한다 — 옛 값은 `corrections[]`에 남긴다(FB-261012-5)."""
     if not why:
         raise SystemExit("--why가 없다 — 왜 이 축으로 거래된다고 보나(`priced` 축 선두 대비·보도)")
-    data = load()
-    t = next((x for x in data["theses"] if x.get("id") == tid), None)
-    if t is None:
-        raise SystemExit(f"그런 id가 없다: {tid}")
-    axes = open_axes_of(t["ticker"])
-    if axes and axis_id not in axes:
-        raise SystemExit(f"{axis_id}는 {t['ticker']}가 든 열린 축이 아니다 — 후보: {axes}")
-    old = t.get("price_driver")
-    t["price_driver"] = axis_id
-    t.setdefault("corrections", []).append({"ts": _run_day(t.get("market", "")).isoformat(),
-                                            "what": f"price_driver {old} → {axis_id} (set-driver)", "why": why})
-    probs = [x for g in t.get("exit_triggers") or [] if not g.get("fired") for x in [driver_problem(t, g)] if x]
-    save(data)
-    print(f"{tid} price_driver: {old} → {axis_id}")
-    for x in probs:
+    done = {}
+
+    def fn(t):
+        axes = open_axes_of(t["ticker"])
+        if axes and axis_id not in axes:
+            raise SystemExit(f"{axis_id}는 {t['ticker']}가 든 열린 축이 아니다 — 후보: {axes}")
+        done["old"] = t.get("price_driver")
+        t["price_driver"] = axis_id
+        t.setdefault("corrections", []).append({"ts": _run_day(t.get("market", "")).isoformat(),
+                                                "what": f"price_driver {done['old']} → {axis_id} (set-driver)", "why": why})
+        done["probs"] = [x for g in t.get("exit_triggers") or [] if not g.get("fired") for x in [driver_problem(t, g)] if x]
+        return t
+    _update(tid, fn)
+    print(f"{tid} price_driver: {done['old']} → {axis_id}")
+    for x in done["probs"]:
         print(f"  ※ {x}")
     return 0
 
@@ -614,33 +703,34 @@ def cmd_fire(tid: str, trig_id: str, note: str, undo: bool = False) -> int:
 
     평소에는 `fill.py`가 체결 시 자동으로 찍는다. 이 명령은 그 전에 나간 집행을 메울 때만 쓴다.
     """
-    data = load()
-    t = next((x for x in data["theses"] if x.get("id") == tid), None)
-    if t is None:
-        raise SystemExit(f"그런 id가 없다: {tid}")
-    for field in ("exit_triggers", "entry_triggers"):
-        trg = next((x for x in (t.get(field) or []) if x.get("id") == trig_id), None)
-        if trg is None:
-            continue
-        if undo:
-            for k in ("fired", "fired_at", "fired_note"):
-                trg.pop(k, None)
-            t.setdefault("history", []).append(
-                {"ts": datetime.now(KST).isoformat(), "status": t.get("status"),
-                 "note": f"{trig_id} 소진 표시 해제 — {note}"})
-        else:
-            if not note:
-                raise SystemExit("--note가 없다 — 무엇이 언제 집행됐는지 적어라(수량·가격·주문번호)")
-            trg["fired"] = True
-            trg["fired_at"] = datetime.now(KST).isoformat()
-            trg["fired_note"] = note
-            t.setdefault("history", []).append(
-                {"ts": datetime.now(KST).isoformat(), "status": t.get("status"),
-                 "note": f"{trig_id} 소진 표시 — {note}"})
-        save(data)
-        print(f"{tid} {field}.{trig_id}: {'소진 해제' if undo else '소진 표시'}")
-        return 0
-    raise SystemExit(f"{tid}에 트리거 {trig_id}가 없다 (entry/exit 모두)")
+    done = {}
+
+    def fn(t):
+        for field in ("exit_triggers", "entry_triggers"):
+            trg = next((x for x in (t.get(field) or []) if x.get("id") == trig_id), None)
+            if trg is None:
+                continue
+            if undo:
+                for k in ("fired", "fired_at", "fired_note"):
+                    trg.pop(k, None)
+                t.setdefault("history", []).append(
+                    {"ts": datetime.now(KST).isoformat(), "status": t.get("status"),
+                     "note": f"{trig_id} 소진 표시 해제 — {note}"})
+            else:
+                if not note:
+                    raise SystemExit("--note가 없다 — 무엇이 언제 집행됐는지 적어라(수량·가격·주문번호)")
+                trg["fired"] = True
+                trg["fired_at"] = datetime.now(KST).isoformat()
+                trg["fired_note"] = note
+                t.setdefault("history", []).append(
+                    {"ts": datetime.now(KST).isoformat(), "status": t.get("status"),
+                     "note": f"{trig_id} 소진 표시 — {note}"})
+            done["field"] = field
+            return t
+        raise SystemExit(f"{tid}에 트리거 {trig_id}가 없다 (entry/exit 모두)")
+    _update(tid, fn)
+    print(f"{tid} {done['field']}.{trig_id}: {'소진 해제' if undo else '소진 표시'}")
+    return 0
 
 
 def main() -> int:
@@ -673,6 +763,12 @@ def main() -> int:
     sd.add_argument("--id", required=True)
     sd.add_argument("--axis", required=True)
     sd.add_argument("--why", required=True)
+    se = sub.add_parser("set-evidence", help="논지 근거를 다시 세운다 — 틀린 사실을 빼고 새 사실을 더한다(재검토 표시를 푼다)")
+    se.add_argument("--id", required=True)
+    se.add_argument("--facts", default="", help="더할 사실 F-…(쉼표로 여럿 · 저장소에 있고 disputed가 아닌 것)")
+    se.add_argument("--drop", default="", help="뺄 사실 F-…(쉼표로 여럿)")
+    se.add_argument("--role", default="support", choices=["support", "background", "against"])
+    se.add_argument("--why", required=True)
     fr = sub.add_parser("fire", help="트리거를 소진(집행됨)으로 표시 — 평소엔 fill.py가 자동으로 찍는다")
     fr.add_argument("--id", required=True)
     fr.add_argument("--trigger", required=True)
@@ -700,6 +796,8 @@ def main() -> int:
         return cmd_fire(args.id, args.trigger, args.note, args.undo)
     if args.cmd == "set-driver":
         return cmd_set_driver(args.id, args.axis, args.why)
+    if args.cmd == "set-evidence":
+        return cmd_set_evidence(args.id, args.facts.split(","), args.drop.split(","), args.why, args.role)
     if args.cmd == "set-trigger":
         return cmd_set_trigger(args.id, args.trigger, args.check, args.basis, args.why,
                                args.when, args.size_pct, args.reach_prob, args.reach_n, args.stock, allow_loosen=args.allow_loosen)
@@ -709,7 +807,7 @@ def main() -> int:
         import execute as ex
         today = datetime.now(KST).strftime("%y%m%d")
         for mkt in ("kr", "us"):
-            for f in sorted(STORE.parent.glob(f"trades_*_{mkt}.json"))[-2:]:
+            for f in sorted((HERE / "journal").glob(f"trades_*_{mkt}.json"))[-2:]:
                 ex.refresh_thesis_unsynced(f)
     except Exception as e:                                  # noqa: BLE001
         print(f"  (trades thesis_unsynced 갱신 생략: {type(e).__name__})", file=sys.stderr)

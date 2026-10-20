@@ -31,6 +31,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import db  # noqa: E402 — 논지·축·포지션 고점·손실 판정은 저장소에서
+
 KST = timezone(timedelta(hours=9))
 OUTDIR = HERE / "data" / "feedback"
 INVALIDATION_WORDS = re.compile(r"훼손|무효|반증|invalidat|thesis broken", re.I)
@@ -41,6 +43,7 @@ MISJUDGE_TYPES = ("방향", "동인", "시점", "가지 누락", "집중", "크�
 
 
 def _j(p, default=None):
+    """run 파일(거래 기록·스냅샷·손실 판정 파일) 읽기."""
     try:
         return json.loads(Path(p).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -61,10 +64,32 @@ def _iso_date(s) -> date | None:
 # ───────────────────────────────────────────────────────── 체결 → 실현 손익(FIFO)
 
 def _trades_same(f) -> list:
-    """거래 기록의 trades — 지금 계좌 계열의 파일만(2026-10-15 · 실계좌 전환 뒤 모의 거래를 실계좌 지표로 세지 않게 · 표시 없는 옛 파일은 모의)."""
-    from kis_client import same_account
+    """거래 기록의 trades — 지금 계좌 계열의 파일만(2026-10-15 · 계좌 전환에 대비해 모의 거래를 실계좌 지표로 세지 않게 · 표시 없는 옛 파일은 모의)."""
+    import portfolio
+    from kis_client import acct_family
     d = _j(f, {}) or {}
-    return (d.get("trades") or []) if same_account(d) else []
+    return (d.get("trades") or []) if portfolio.file_family(d) == acct_family() else []   # account_mode → svr → runs[](2026-10-19 R07)
+
+
+def _lot_price_from_snaps(market: str, stamp: str, ticker: str, qty: float) -> float:
+    """체결가 없이 잔고 증감으로 확정된 매수의 실제 단가 — 그 run 캡처(매수 전)와 다음 캡처(매수 뒤)의 수량·평단으로
+    (뒤 수량 × 뒤 평단 − 앞 수량 × 앞 평단) ÷ 늘어난 수량. 수량 증가가 이 체결과 다르거나 스냅샷이 없으면 0(부르는 쪽이 주문가로).
+    국내 체결은 잔고 증감으로 확정되는 일이 많아 주문 지정가로 손익을 쟀다(2026-10-17 피드백 FB-261017-1)."""
+    mk = market.lower()
+    try:
+        before = db.q1("SELECT qty, avg_price FROM ex_position WHERE market=? AND ticker=? AND phase='capture' AND run_id=?",
+                       (mk, ticker, f"{stamp}_{mk}"))
+        after = db.q1("SELECT qty, avg_price FROM ex_position WHERE market=? AND ticker=? AND phase='capture' AND run_id>?"
+                      " AND run_id LIKE ? ORDER BY run_id LIMIT 1", (mk, ticker, f"{stamp}_{mk}", f"%_{mk}"))
+    except Exception:                                # noqa: BLE001 — 조회 실패는 주문가로 돌아간다
+        return 0.0
+    if not after:
+        return 0.0
+    qb, ab = (float(before["qty"] or 0), float(before["avg_price"] or 0)) if before else (0.0, 0.0)
+    qa, aa = float(after["qty"] or 0), float(after["avg_price"] or 0)
+    if qa - qb <= 0 or abs((qa - qb) - qty) > 1e-9 or aa <= 0:
+        return 0.0
+    return round((qa * aa - qb * ab) / (qa - qb), 4)
 
 
 def fills(market: str) -> list:
@@ -82,7 +107,10 @@ def fills(market: str) -> list:
                     continue
                 # 매도 확정은 `filled_qty` 없이 잔고 증감(`delta`)만 남기는 경우가 있다 — 그때는 증감 절댓값 → 주문 수량 순.
                 q = float(fl.get("filled_qty") or abs(float(fl.get("delta") or 0)) or t.get("qty") or 0)
-                p = float(fl.get("avg_price") or t.get("price") or fl.get("limit_price") or 0)
+                p = float(fl.get("avg_price") or 0)
+                if not p and str(t.get("action") or "").upper() == "BUY":
+                    p = _lot_price_from_snaps(market, m.group(1), str(t.get("ticker")), q)   # 잔고 증감으로 확정된 국내 매수
+                p = p or float(t.get("price") or fl.get("limit_price") or 0)
             else:
                 if str(t.get("status") or "").upper() not in ("SENT", "FILLED", "PARTIAL"):
                     continue
@@ -131,7 +159,7 @@ def _entered(t: dict) -> date | None:
 
 
 def _axes() -> dict:
-    return {a.get("id"): a for a in (_j(HERE / "journal" / "market_map.json", {}) or {}).get("axes") or [] if a.get("id")}
+    return {a.get("id"): a for a in db.market_map_load().get("axes") or [] if a.get("id")}
 
 
 def driver_state(ax: dict) -> str:
@@ -164,7 +192,8 @@ def _latest_positions() -> dict:
 
 
 def _peaks() -> dict:
-    return _j(HERE / "journal" / "position_peaks.json", {}) or {}
+    """{_schema, KR: {ticker: {peak_price, peak_at}}, US: …} — ex_position_peak."""
+    return db.peaks_all()
 
 
 # ───────────────────────────────────────────────────────── 후보와 판정 입력
@@ -174,7 +203,7 @@ def candidates(week: str, days: int = 20) -> list:
     절반을 넘은 것 ③ 보유 중 추적 다리가 없는 것. 행마다 판정 입력(울린 시계)과 제안 판정을 붙인다."""
     wk = _d(week)
     lo = wk - timedelta(days=int(days * 7 / 5) + 2)
-    th = (_j(HERE / "journal" / "theses.json", {}) or {}).get("theses") or []
+    th = db.theses_all()
     axes = _axes()
     pos = _latest_positions()
     peaks = _peaks()
@@ -281,7 +310,7 @@ def forecasts_due(week: str) -> list:
         if not ax.get("direction") or not ax.get("horizon_weeks") or not _iso_date(ax.get("opened")):
             continue
         due = _iso_date(ax.get("opened")) + timedelta(weeks=int(ax["horizon_weeks"]))
-        if due <= wk:
+        if due <= wk and (ax.get("status") or "open") == "open":     # 판정된 것·기각은 빼고 미판정만(2026-10-19 · Codex U06 — 설명문과 맞춤)
             out.append({"axis_id": aid, "direction": ax.get("direction"), "due": str(due), "status": ax.get("status") or "open",
                         "confidence": ax.get("confidence"), "expected": str(ax.get("expected") or "")[:160]})
     return sorted(out, key=lambda r: r["due"])
@@ -296,23 +325,41 @@ def stale_scenarios() -> list:
         return [{"id": "?", "market": "", "why": f"조회 실패 — {type(e).__name__}: {e}", "condition": ""}]
 
 
-def _prev_verdict_file(week: str) -> Path | None:
-    files = sorted(p for p in OUTDIR.glob("손실판정_*.json") if re.search(r"_(\d{6})\.json$", p.name)
-                   and re.search(r"_(\d{6})\.json$", p.name).group(1) < week)
-    return files[-1] if files else None
+def sync_verdicts() -> int:
+    """손실 판정 파일(`data/feedback/손실판정_<week>.json` — 토요일 보고서 §2-b가 쓴다)의 행을 저장소(op_loss_review)에 옮긴다.
+    멱등(키는 (주, 논지) — 같은 주 한 종목에 논지가 둘이면 행도 둘). 반환 옮긴 행 수.
+    판정 읽기(보정표·오판 비율)는 표에서 한다 — 읽기 전에 이 함수가 파일을 먼저 맞춘다."""
+    n = 0
+    for f in sorted(OUTDIR.glob("손실판정_*.json")):
+        m = re.search(r"_(\d{6})\.json$", f.name)
+        d = _j(f, None) if m else None
+        if not d:
+            continue
+        rows = [r for r in d.get("rows") or [] if isinstance(r, dict) and r.get("ticker")]
+        db.loss_review_replace(str(d.get("week") or m.group(1)), rows)   # 그 주는 파일이 원본 — 파일에서 지운 행은 표에서도 지운다
+        n += len(rows)
+    return n
+
+
+def _verdict_week(week: str, inclusive: bool) -> str | None:
+    """저장소에 판정이 있는 주 가운데 `week` 이전(inclusive면 그 주 포함) 가장 최근 주."""
+    sync_verdicts()
+    weeks = sorted({str(r.get("week")) for r in db.q("SELECT DISTINCT week FROM op_loss_review")})
+    weeks = [w for w in weeks if (w <= week if inclusive else w < week)]
+    return weeks[-1] if weeks else None
 
 
 def verdict_flips(week: str, rows: list) -> dict:
     """지난주 손실 판정이 이번 주에 뒤집혔나 — 보정표. 일시적 → 다리 발화(손실로 닫힘)면 너무 느슨,
     오판 → 아직 보유 중이고 고점 재돌파(고점 대비 ≥ 0)면 너무 빡빡."""
-    pf = _prev_verdict_file(week)
-    if not pf:
+    pw = _verdict_week(week, inclusive=False)
+    if not pw:
         return {"file": "", "judged": 0, "loose": [], "strict": [], "rate": None}
     # 판정 때 **보유 중이던** 행만 — 이미 닫힌 손실을 '일시적'으로 적은 행은 다음 주에 뒤집힐 수가 없다.
-    prev = [r for r in (_j(pf, {}) or {}).get("rows") or [] if r.get("verdict") in ("오판", "일시적", "관찰")
+    prev = [r for r in db.loss_review_rows(pw) if r.get("verdict") in ("오판", "일시적", "관찰")
             and str(r.get("kind") or "").startswith("held")]
     now = {r["thesis_id"]: r for r in rows}
-    th = {t["id"]: t for t in (_j(HERE / "journal" / "theses.json", {}) or {}).get("theses") or []}
+    th = {t["id"]: t for t in db.theses_all()}
     loose, strict = [], []
     for r in prev:
         cur, t = now.get(r.get("thesis_id")), th.get(r.get("thesis_id")) or {}
@@ -321,19 +368,20 @@ def verdict_flips(week: str, rows: list) -> dict:
         if r["verdict"] == "오판" and t.get("status") == "held" and cur and (cur.get("from_peak_pct") or -1) >= 0:
             strict.append(r["thesis_id"])
     n = len(prev)
-    return {"file": pf.name, "judged": n, "loose": loose, "strict": strict,
+    return {"file": f"손실판정_{pw}.json", "judged": n, "loose": loose, "strict": strict,
             "rate": round(100 * (len(loose) + len(strict)) / n, 1) if n else None}
 
 
 def misjudged_rate(week: str) -> float | None:
-    """가장 최근 손실 판정 파일(이번 주 것 포함)에서 오판 비율 — 오판 / (오판+일시적+관찰)."""
-    files = sorted(p for p in OUTDIR.glob("손실판정_*.json") if p.name <= f"손실판정_{week}.json")
-    rows = (_j(files[-1], {}) or {}).get("rows") or [] if files else []
+    """가장 최근 손실 판정(이번 주 것 포함 · op_loss_review)에서 오판 비율 — 오판 / (오판+일시적+관찰)."""
+    w = _verdict_week(week, inclusive=True)
+    rows = db.loss_review_rows(w) if w else []
     j = [r for r in rows if r.get("verdict") in ("오판", "일시적", "관찰")]
     return round(100 * sum(r["verdict"] == "오판" for r in j) / len(j), 1) if j else None
 
 
 def collect(week: str, days: int = 20) -> dict:
+    sync_verdicts()
     rows = candidates(week, days)
     net = {mk: sum(r["pnl"] for r in rows if r["market"] == mk and r["kind"] == "closed") for mk in ("KR", "US")}
     return {"rows": rows, "net_realized": net, "forecasts_due": forecasts_due(week),

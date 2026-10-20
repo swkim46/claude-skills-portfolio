@@ -45,8 +45,12 @@ description: >-
 > |---|---|---|
 > | 직접 호출(기본) | ② → FIRE → ③ resolve | FAIL이면 유형 단위로 고치고 재감사 — 통과할 때까지 |
 > | `world-study` | 매 run 한 번 · 기다리지 않음 | 결과가 오면 판정이 바뀌는 지적만 한 번 |
-> | `trade-run` 갈래 ② 배경 서술 | 묶음(A·B)마다 최대 두 번 · **교정이 전파되는 즉시 백그라운드**(교정 0이면 판정표가 끝나는 순간) — 1차 FAIL이면 고친 새 판으로 ②를 다시 돌려 2차 | 1차 뒤 한 번 · 2차 결과로는 고치지 않음 (2026-10-07 · 2026-10-14 배경화) |
-> | `trade-run` 갈래 ① 주문 근거 | **교정이 전파되는 즉시 백그라운드**(주문은 감사를 기다리지 않고, run을 닫기 전에 결과를 받는다) · 최대 5회 · 주문 전용 lens(`kind: order` — 산출물 이름에 `주문근거`가 있으면 엔진이 붙인다) | 매 FAIL 뒤 판정표 재채점 → `fc_track1.py decide --mode post` — 체결된 매수의 근거가 무너지면 소급 매도 (2026-10-13 17:30 · 2026-10-14) |
+> | `trade-run` 갈래 ② 배경 서술 | 묶음(A·B)마다 최대 두 번 · **교정이 반영되는 즉시 백그라운드**(교정 0이면 판정표가 끝나는 순간) — 1차 FAIL이면 고친 새 판으로 ②를 다시 돌려 2차 · 판정은 `facts.py verdict`로 저장소에 넣고 판정표는 `facts.py render-verdict`가 렌더한다 | 1차 뒤 한 번 · 2차 결과로는 고치지 않음 (2026-10-07 · 2026-10-14 배경화) |
+> | `trade-run` 갈래 ① 주문 근거 | **교정이 반영되는 즉시 백그라운드**(주문은 감사를 기다리지 않고, run을 닫기 전에 결과를 받는다) · 최대 5회 · 주문 전용 lens(`kind: order` — 산출물 이름에 `주문근거`가 있으면 엔진이 붙인다) · 판정·렌더는 ②와 같다(`--batch track1`) | 매 FAIL 뒤 판정 재채점(`facts.py verdict`) → `facts.py decide --mode post` — 체결된 매수의 근거가 무너지면 소급 매도 (2026-10-13 17:30 · 2026-10-14) |
+>
+> **trade-run에서는 판정표·교정을 손으로 쓰지 않는다(2026-10-17)** — 판정은 행(JSONL)으로 `facts.py verdict`, 교정은 사실 한 행을 `facts.py correct`로
+> 고치고 판정표(교정 지시서 포함)는 `facts.py render-verdict`가 같은 양식으로 만든다. 기계 검사는 `lint_verdict.py` 대신 `facts.py lint`(같은 (e)(i)(k)(l)(o)(p)(s)(z)(ⓙ)(x)(f))이고,
+> 사본이 없으므로 `fc_propagate.py`(교정 전파)는 trade-run에서 쓰지 않는다 — 참조 검사는 `facts.py check-refs`의 `REFS OK`다. `lint_verdict.py`는 `world-study`·직접 호출에 그대로 쓴다.
 >
 > **trade-run은 정식 감사 전에 모의 감사를 한 번 돈다(2026-10-15)** — `SG audit-packet-preview fact-check verdict deliverable=<판정표> dir=<폴더>`가
 > 정식 감사와 같은 lens·지시문을 찍고(큐·원장 기록 없음), 다른 에이전트가 그 패킷으로 판정표를 본 뒤 지적을 유형 단위로 고치고 정식 judge로 간다
@@ -54,9 +58,9 @@ description: >-
 >
 > **호출한 스킬이 `init`을 맡으면(trade-run 배경 에이전트 · 2026-10-14) ①의 `SG init`과 ③ 끝의 `SG clear`를 하지 않는다** —
 > `init`은 같은 `dir=`의 fact-check 감사 큐·토큰을 통째로 지우므로, 한 폴더에서 묶음 여럿이 동시에 돌면 서로의 대기 감사를 지운다.
-> 그 자리의 에이전트는 ①·①-bis·②(form·judge·FIRE)만 하고, 판정표 밖의 파일(노트·시그널·원장)은 고치지 않는다 — 교정은 `corrections`
-> 블록으로만 낸다(전파 `apply`는 호출한 본 세션이 한다 — `fc_propagate.py`). 교정이 있으면 전파 전에 ②를 돌리지 않는다 —
-> 감사 lens `correction-propagation`이 전파 전 판정표를 반드시 FAIL로 잡아 감사 횟수만 먹는다.
+> 그 자리의 에이전트는 ①·①-bis·②(form·judge·FIRE)만 하고, 판정표 밖의 파일(노트·시그널)은 고치지 않는다 — 판정·교정은 저장소에
+> 행으로 넣는다(`facts.py verdict`·`facts.py correct` · 노트 재렌더 `stage.py render-note`는 호출한 본 세션이 한다). 교정이 있으면 재렌더(`REFS OK`) 전에 ②를 돌리지 않는다 —
+> 감사 lens `correction-propagation`이 재렌더 전 노트의 옛 값을 FAIL로 잡아 감사 횟수만 먹는다.
 > **같은 내용의 판정표를 10분 안에 다시 judge하면 엔진이 새 감사를 띄우지 않는다**(2026-10-15 — 10-14 미국은 2분 간격 두 감사가 회차를 두 번 먹었다).
 > 고친 뒤 judge하면 옛 요청은 대체되고, 대체된 요청의 결과는 원장에 `superseded`로 남아 회차로 세지 않는다.
 > 감사자는 결과 전문을 파일로 남기고 `--record … findings_file=<경로>`로 넘긴다(패킷이 경로를 제안한다 — 원장엔 400자만 남는다).
@@ -394,26 +398,10 @@ lint가 심각도 줄에 `(🔵 = 교정표 N행 + 교정 없는 UNVERIFIABLE M�
    ① 연결 판정 행이 원문에서 인용한 단서·예외·주어를 조치 문구에 그대로 담는다(lint (l)이 `단서:` 낱말을 대조한다)
    ② 판정 행에 없는 새 수치·요건은 그 원문 인용을 판정 행이나 근거 칸에 먼저 두고, 계산값에는 `(계산: …)`을 붙인다(lint (n) 경고)
    ③ `근거` 칸은 URL 또는 판정 행 지목(`클레임 N` · `3(e)` · `L…` · `교정 N과 같은 근거`) — 출처 이름이나 '— G1 표'만은 안 된다(lint (r)).
-   **교정이 있으면 기계용 블록도 쓴다**(2026-10-13 — 감사 48건 전부 FAIL의 첫째 원인이 전파 누락이었다):
-   ````
-   ```corrections
-   {"id": 1, "claim": 7, "old": ["옛 문구", "변형"], "new": "새 문구", "op": "replace", "family": [["같은 사실의 다른 표현 정규식"]], "marker": "est"}
-   ```
-   ````
-   `op` = `replace`(도구가 바꾼다) · `manual`(고칠 자리만 짚는다) · `marker` = 정정 뒤에도 남아도 되는 표지(문자열·목록).
-   `python3 <REPO>/.claude/skills/fact-check/scripts/fc_propagate.py plan|apply|verify <판정표> --stamp <YYMMDD> --market <mkt> [--project <폴더>] [--write]`
-   → `verify --write`가 남은 사본 0이면 `PROPAGATE OK` 줄을 판정표에 쓴다(범위는 호출 프로젝트의 이번 run 산출물 — 현재 `ai-trading-bot`).
-   교정 표는 있는데 블록이 없으면 `PROPAGATE FAIL`이다.
-   **범위(2026-10-15 확장 — 감사가 찾은 옛 값이 전부 도구가 안 훑던 파일에 있었다)**: 노트·시그널·승인·이어받기·전망·섹터에 더해
-   리서치 갈래(`research_branch*`) · 출처 등록 입력(`srcledger_add*.jsonl`) · 논지 등록 입력(`theses_add_*`) · 이번 run 섹터 기록(`sector_watch.jsonl`) ·
-   **살아 있는 원장 행**(축·섹터의 현행 칸 · 오늘 이후 일정 · 열린 시나리오 · armed·held 논지) · 거래 기록(`trades_*.json` — 고치지 않고
-   `apply`가 `corrections_applied`를 덧붙인다). 범위 밖: `corpus_*`(지난 파일 검색 결과) · 도구 출력(`tools_*`·`levels_*` 등) · 판정 기록(`AI클레임_*`) ·
-   지난 스탬프 파일 — 교정 표 `위치` 칸에 적지 않는다. `verify --write`는 OK 줄 다음에 **`PROPAGATE SCOPE` 줄(훑은 파일 목록)**을 쓴다.
-   10-15 국내 감사 뒤 더한 것: 작업기록(`worklog_*`) · 시나리오 판정 입력(`sc_judge*.jsonl`) · 이번 run 배분 원장 행 · **날짜 표기 변형 자동 확장**
-   ('10-15'를 고치면 '10/15' 사본도 찾는다). 노트 새 판(v1_1·v1_2)을 만든 뒤에는 `verify --write`를 다시 돌려 SCOPE 줄이 최신 판을 가리키게 한다
-   (감사가 'SCOPE에 v1_2 없음'으로 잡았다).
-   `old`는 그 사실에만 있는 구체 문구로 쓴다 — 넓어진 범위에서 짧은 문구('10-30')는 무관한 행까지 잡는다.
-2. **판정표(고정 양식 — `lint_verdict.py`가 읽는다):** 열은
+   **trade-run에서 부르면 교정 표를 손으로 쓰지 않는다(2026-10-17)** — 교정은 `facts.py correct F-… --set 칸=값 --reason … --verdict <판정 #>`로
+   사실 한 행을 고치고(저장소가 옛 값을 판으로 남긴다), 교정 지시서는 `facts.py render-verdict`가 판정표 안에 렌더한다. 노트는 호출한 본 세션이
+   `stage.py render-note`로 다시 렌더한다 — 사본이 없으므로 전파 단계가 없다.
+2. **판정표(고정 양식 — `lint_verdict.py`가 읽는다 · trade-run은 같은 양식을 `facts.py render-verdict`가 저장소에서 만든다):** 열은
    `원 문구(위치) | 하위 클레임 | 판정 | 티어 | 원문 인용 | URL | T1 시도 | 비고`.
    - `원 문구(위치)` = 고정본의 문구를 따옴표로 그대로 + `(클레임 N)` 또는 `(<파일>.md:L<n>)`.
    - `판정` = 4값으로 시작한다. MISMATCH·STALE은 `비고`에 `교정 N`을 적는다.

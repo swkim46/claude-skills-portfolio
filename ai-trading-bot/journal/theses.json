@@ -1,4 +1,37 @@
 {
   "schema_version": "1.0",
-  "theses": []
+  "theses": [
+    {
+      "id": "kr-005930-ai_memory-sample",
+      "market": "KR",
+      "ticker": "005930",
+      "name": "삼성전자",
+      "axis": "ai_memory",
+      "axis_id": "ai_memory",
+      "axis_label": "AI 메모리 수요 (견본)",
+      "axis_why": "견본 — 지도의 축 ai_memory가 양 시장 종목(005930·MSFT)을 함께 달고 있어 조인 키 검사에 쓴다",
+      "thesis": "견본 논지 — AI 서버 투자가 고대역폭 메모리 수요로 이어진다는 축에 걸린 국내 메모리 종목 (가상 문장)",
+      "invalidation": "견본 — 축 전망이 기한 안에 반증되면 무효",
+      "status": "armed",
+      "created": "2026-09-01",
+      "expires": "2026-12-31",
+      "horizon_days": 84,
+      "entry_price": null,
+      "entered_on": null,
+      "evidence": [],
+      "entry_triggers_archived": [],
+      "exit_triggers": [
+        {
+          "id": "x1",
+          "when": "견본 — 논지 훼손",
+          "check": "price <= 60000",
+          "size_pct": 100.0,
+          "basis": "견본 값 — 실제 가격 기준이 아니다"
+        }
+      ],
+      "history": [],
+      "corrections": []
+    }
+  ],
+  "_comment": "합성 견본 — 회귀 테스트(㊿ 교차 시장 사슬)가 논지의 축 id가 시장 지도의 축에 실재하는지 확인하는 데만 쓴다. 실제 논지 원장은 비공개이며, 운영에서는 저장소(journal/trading.db)의 jd_thesis 표가 원본이고 이 파일은 db.py가 쓰는 읽기 전용 렌더본이다."
 }

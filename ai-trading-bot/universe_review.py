@@ -10,7 +10,7 @@
 이 스크립트는 **결정하지 않는다.** 재료 커버리지를 세어 사람이 판정할 표를 만들 뿐이다.
 `watchlist.json`은 재료를 읽는 이 단계에서는 고치지 않는다(인젝션 방어). 변경은 재료와 분리된 자리에서 한다.
 
-커버리지 이력은 `journal/universe_coverage.json`에 쌓인다 — "몇 회 연속 안 나왔나"를
+커버리지 이력은 저장소(op_coverage · 렌더본 `journal/universe_coverage.json`)에 쌓인다 — "몇 회 연속 안 나왔나"를
 기억이 아니라 기록으로 판정하기 위해서다.
 
 사용:
@@ -18,15 +18,14 @@
     python3 universe_review.py --market kr --material ... --stamp 260908   # 이력에 기록
 """
 import argparse
-import json
 import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import db
+
 HERE = Path(__file__).parent
-WATCHLIST = HERE / "config" / "watchlist.json"
-COVERAGE = HERE / "journal" / "universe_coverage.json"
 KST = timezone(timedelta(hours=9))
 
 # 재료에 나오지 않은 채 이만큼 지나면 "판단 근거가 끊겼다"고 본다.
@@ -62,35 +61,19 @@ def count_mentions(text: str, entry: dict) -> tuple:
 
 
 def load_coverage() -> tuple:
-    """(커버리지, 읽었는가). **못 읽으면 옆으로 치워 보존하고 되쓰기를 막는다.**
+    """(커버리지, 읽었는가) — 저장소 op_coverage.
 
     ★ 예전에는 실패를 `{}`로 갈음했다. 그러면 전 종목의 `absent_runs`가 0으로 보여
     이번 run에서 1이 되고, `--stamp`가 그 값을 **되써서 누적 미등장 이력을 파괴한다.**
     제거 문턱(`STALE_RUNS`)에 영원히 도달할 수 없게 되므로, 유니버스 정리가 구조적으로
-    불가능해진다 — 조용히 꺼진 규칙의 전형이다.
+    불가능해진다 — 조용히 꺼진 규칙의 전형이다. 그래서 저장소를 못 읽으면 빈 이력으로 잇지 않고
+    여기서 멈춘다(예외가 그대로 올라간다). 두 번째 값은 옛 호출 모양을 지키려고 남긴다(항상 True).
     """
-    if not COVERAGE.exists():
-        return {}, True                     # 아직 없음 — 처음 쌓는 것은 정상이다
-    try:
-        d = json.loads(COVERAGE.read_text(encoding="utf-8"))
-        if not isinstance(d, dict):
-            raise ValueError("최상위가 dict가 아니다")
-        return d, True
-    except (json.JSONDecodeError, OSError, ValueError) as e:
-        aside = COVERAGE.with_name(
-            f"{COVERAGE.stem}.corrupt_{datetime.now(KST):%y%m%d_%H%M%S}.json")
-        try:
-            COVERAGE.rename(aside)
-            where = aside.name
-        except OSError:
-            where = "(보존 실패)"
-        print(f"\n★ {COVERAGE.name}을 읽을 수 없어 {where}로 옮겨 보존했다 ({e}).\n"
-              f"  누적 미등장 이력을 되쓰지 않는다 — 복구한 뒤 다시 돌려라.", file=sys.stderr)
-        return {}, False
+    return db.coverage_load(), True
 
 
 def review(market: str, material: Path, stamp: str = None) -> int:
-    wl = json.loads(WATCHLIST.read_text(encoding="utf-8"))
+    wl = db.watchlist_doc()
     entries = wl.get(market.upper()) or []
     if not entries:
         print(f"{market.upper()} 유니버스가 비어 있다.", file=sys.stderr)
@@ -114,7 +97,7 @@ def review(market: str, material: Path, stamp: str = None) -> int:
             stale.append(e)
         elif hits == 0:
             verdict = "재료 없음 (이번 run 판단 불가)"
-        axis = e.get("axis", "(축 미기재)")
+        axis = e.get("axis") or "(축 미기재)"          # 저장소 행은 빈 칸이 ''로 온다 — .get 기본값으로는 안 걸린다
         print(f"  {e['ticker'] + ' ' + e.get('name', ''):22} {axis:16} {hits:>5}  {absent:>9}  {verdict}")
         if used:
             print(f"    └ {', '.join(used)}")
@@ -123,12 +106,15 @@ def review(market: str, material: Path, stamp: str = None) -> int:
     # 축 중복 — 같은 축에 여러 종목이면 사람이 볼 수 있게 띄운다(자동 제거는 하지 않는다).
     axes = {}
     for e in entries:
-        axes.setdefault(e.get("axis", "(축 미기재)"), []).append(e.get("name", e["ticker"]))
+        axes.setdefault(e.get("axis") or "(축 미기재)", []).append(e.get("name", e["ticker"]))
+    no_axis = axes.pop("(축 미기재)", [])               # 축이 없는 종목은 한 축이 아니다 — 묶음에서 빼고 따로 센다
     dup = {k: v for k, v in axes.items() if len(v) > 1}
     if dup:
         print("\n  같은 축에 묶인 종목 — 함께 움직이므로 실질 베팅 수는 종목 수보다 적다:")
         for k, v in dup.items():
             print(f"    · {k}: {', '.join(v)}")
+    if no_axis:
+        print(f"\n  축 미기재 {len(no_axis)}종목 — 축 중복 판정에서 뺐다(지도에 축을 달 대상): {', '.join(no_axis)}")
 
     if stamp and not cov_ok:
         print("\n  ★ 커버리지 이력을 읽지 못했으므로 **기록하지 않는다** — "
@@ -139,16 +125,17 @@ def review(market: str, material: Path, stamp: str = None) -> int:
         import sessions as _ss
         sess = _ss.session_iso(stamp, market)
         now_kst = datetime.now(KST).isoformat(timespec="seconds")
-        for key, hits, absent in rows:
-            cov[key] = {"absent_runs": absent, "last_seen": (cov.get(key, {}).get("last_seen")
-                        if not hits else sess),
-                        "updated": sess, "updated_kst": now_kst}
-        COVERAGE.parent.mkdir(parents=True, exist_ok=True)
-        COVERAGE.write_text(json.dumps(cov, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"\n  커버리지 이력 기록: {COVERAGE.name}")
+        # 종목 행만 바꾼다(한 트랜잭션) — 다른 시장 종목의 이력은 건드리지 않는다. 렌더본은 db가 커밋 뒤 내보낸다.
+        with db.tx():
+            for key, hits, absent in rows:
+                db.coverage_put(key, {"absent_runs": absent, "last_seen": (cov.get(key, {}).get("last_seen")
+                                      if not hits else sess),
+                                      "updated": sess, "updated_kst": now_kst})
+        print("\n  커버리지 이력 기록: op_coverage(렌더본 universe_coverage.json)")
 
     print("\n  들어올 후보는 분석 단계에서 `watchlist_candidates`로, 나갈 후보는")
-    print("  `watchlist_removals`로 시그널에 올린다. 반영은 사람이 watchlist.json을 고쳐야 한다.")
+    print("  `watchlist_removals`로 시그널에 올린다. 반영은 `universe_apply.py`가 규칙으로 검증해 저장소에 넣는다"
+          "(config/watchlist.json은 저장소 렌더본 — 손으로 고치지 않는다).")
     return 0
 
 

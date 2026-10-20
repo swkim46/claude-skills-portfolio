@@ -302,19 +302,6 @@
         ]
       },
       {
-        "id": "fc2_joined",
-        "variants": [
-          {
-            "ask": "배경 서술 묶음(②-A·②-B)마다 합류했는가 — 교정이 있던 묶음은 `fc_propagate apply`·`verify --write`(PROPAGATE OK)·노트 v1_1 뒤 게이트 ②를 통과해 감사를 띄웠고(교정 0인 묶음은 배경이 이미 띄웠다), run을 닫기 전에 감사 결과를 받았거나 두 번 침묵한 감사는 `미수신`으로 적었는가 · `[AI]` 0건이면 Y (Y/N)",
-            "must": "Y"
-          },
-          {
-            "ask": "판정표 끝이 '본 세션 적용 대기'로 남은 묶음이 있거나, 감사 결과를 기다리지 않고 `미수신` 기록도 없이 run을 닫으려 하는가 · `[AI]` 0건이면 N (Y/N)",
-            "must": "N"
-          }
-        ]
-      },
-      {
         "id": "close_ran",
         "variants": [
           {
@@ -349,6 +336,58 @@
           },
           {
             "ask": "승인 뒤 따로 나간 매도가 판 돈이 재투자도 되지 않고 미룬 사유도 없이 현금으로 남아 있는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "fc2_joined",
+        "variants": [
+          {
+            "ask": "배경 서술 묶음(②-A·②-B)마다 합류했는가 — 교정이 있던 묶음은 `facts.py correct` 뒤 본 세션이 `stage.py render-note`로 노트를 다시 렌더했고 판정표 끝 `REFS OK`를 확인했으며(교정 0인 묶음은 배경이 이미 게이트 ②·감사를 띄웠다), run을 닫기 전에 감사 결과를 받았거나 두 번 침묵한 감사는 `미수신`으로 적었는가 · `[AI]` 0건이면 Y (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "판정표 끝에 `REFS OK`가 없거나 교정한 뒤 노트를 다시 렌더하지 않은 묶음이 있거나, 감사 결과를 기다리지 않고 `미수신` 기록도 없이 run을 닫으려 하는가 · `[AI]` 0건이면 N (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "undersized_resolved",
+        "variants": [
+          {
+            "ask": "approved의 undersized_short가 false인가 — 확인된 축(열린 + 전망 · 현재가 > 평균가) 보유 가운데 이 시장 보유 평균×0.5 미만인 것마다 이 run의 증액 BUY 또는 holds[].small_why{kind, why, expected_upside_pct}(계좌 기여)가 있다 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "approved의 undersized_short가 true인가 — 확인된 축의 소액 보유에 증액 BUY도 작게 두는 사유·계좌 기여도 없다 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "factor_resolved",
+        "variants": [
+          {
+            "ask": "approved의 factor_short가 false이고 factor.state가 missing이 아닌가 — 꺾인 요인마다 시그널 factor_judgments[]가 있고 정리로 판정한 보유마다 이 run의 SELL이 있다 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "approved의 factor_short가 true이거나 factor.state가 missing인가 — 요인 판정 없음 · 결정 빠진 보유 · 정리 종목 SELL 없음 · 1단 요인 상태 없음 중 하나 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "reroll_reported",
+        "variants": [
+          {
+            "ask": "approved rejected[]의 '거부 회피 재실행' 행(없으면 0건)을 §11에 사유 그대로 적었고, 그 제안을 파일 수정·재발행으로 살리지 않았는가 — 행이 0건이면 Y (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "approved rejected[]의 '거부 회피 재실행' 행을 §11에서 빼거나 바꿔 적었거나, 그 제안을 파일 수정·재발행으로 살렸는가 — 행이 0건이면 N (Y/N)",
             "must": "N"
           }
         ]
@@ -447,6 +486,12 @@
         "check": "contains",
         "file": "{realcheck}",
         "pat": "\\[실전점검\\]",
+        "min": 1
+      },
+      {
+        "check": "contains",
+        "file": "{approved}",
+        "pat": "\"screen\": \\{",
         "min": 1
       }
     ],
@@ -729,19 +774,6 @@
         ]
       },
       {
-        "id": "fc2_joined",
-        "variants": [
-          {
-            "ask": "배경 서술 묶음(②-A·②-B)마다 합류했는가 — 교정이 있던 묶음은 `fc_propagate apply`·`verify --write`(PROPAGATE OK)·노트 v1_1 뒤 게이트 ②를 통과해 감사를 띄웠고(교정 0인 묶음은 배경이 이미 띄웠다), run을 닫기 전에 감사 결과를 받았거나 두 번 침묵한 감사는 `미수신`으로 적었는가 · `[AI]` 0건이면 Y (Y/N)",
-            "must": "Y"
-          },
-          {
-            "ask": "판정표 끝이 '본 세션 적용 대기'로 남은 묶음이 있거나, 감사 결과를 기다리지 않고 `미수신` 기록도 없이 run을 닫으려 하는가 · `[AI]` 0건이면 N (Y/N)",
-            "must": "N"
-          }
-        ]
-      },
-      {
         "id": "close_ran",
         "variants": [
           {
@@ -776,6 +808,32 @@
           },
           {
             "ask": "승인 뒤 따로 나간 매도가 판 돈이 재투자도 되지 않고 미룬 사유도 없이 현금으로 남아 있는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "fc2_joined",
+        "variants": [
+          {
+            "ask": "배경 서술 묶음(②-A·②-B)마다 합류했는가 — 교정이 있던 묶음은 `facts.py correct` 뒤 본 세션이 `stage.py render-note`로 노트를 다시 렌더했고 판정표 끝 `REFS OK`를 확인했으며(교정 0인 묶음은 배경이 이미 게이트 ②·감사를 띄웠다), run을 닫기 전에 감사 결과를 받았거나 두 번 침묵한 감사는 `미수신`으로 적었는가 · `[AI]` 0건이면 Y (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "판정표 끝에 `REFS OK`가 없거나 교정한 뒤 노트를 다시 렌더하지 않은 묶음이 있거나, 감사 결과를 기다리지 않고 `미수신` 기록도 없이 run을 닫으려 하는가 · `[AI]` 0건이면 N (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "retro_tool_only",
+        "variants": [
+          {
+            "ask": "이 run의 되돌림 매도(REV-…)는 전부 decide --mode post가 낸 행(buy_ref·fc_rows 있음)이고, reverse는 대상 종목(holds_unverified·stale_support)에만 hold_overturned로 썼으며, stale_support 종목마다 같은 run에서 재확인 또는 보유 재판정으로 끝났는가 — 소급·낡은 근거가 없으면 Y (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "체결 매수를 post 밖에서(판단·reverse·수동 매도) 되판 것이 있거나, buy_unsupported 행을 손으로 만들었거나, stale_support 종목을 재확인도 보유 재판정도 없이 다음 run으로 넘긴 것이 있는가 — 소급·낡은 근거가 없으면 N (Y/N)",
             "must": "N"
           }
         ]
@@ -880,19 +938,6 @@
           },
           {
             "ask": "KILL 스위치 확인을 건너뛰고 집행으로 넘어가는가 (Y/N)",
-            "must": "N"
-          }
-        ]
-      },
-      {
-        "id": "riskguard_clean",
-        "variants": [
-          {
-            "ask": "risk_guard가 승인한 approved 파일을 그대로 보내는가 — 거부를 피하려고 시그널을 고쳐 다시 돌린 적이 없는가 (Y/N)",
-            "must": "Y"
-          },
-          {
-            "ask": "risk_guard 거부를 우회하려고 제안이나 한도를 손본 적이 있는가 (Y/N)",
             "must": "N"
           }
         ]
@@ -1036,19 +1081,6 @@
           },
           {
             "ask": "공매도·인버스 등 long-only를 벗어난 표현이 들어갔는가 (Y/N)",
-            "must": "N"
-          }
-        ]
-      },
-      {
-        "id": "no_reroll_after_reject",
-        "variants": [
-          {
-            "ask": "risk_guard 거부 건을 사유대로 보고만 했는가 (Y/N)",
-            "must": "Y"
-          },
-          {
-            "ask": "거부를 피하려고 시그널을 고쳐 risk_guard를 다시 돌렸는가 (Y/N)",
             "must": "N"
           }
         ]
@@ -1314,19 +1346,6 @@
         ]
       },
       {
-        "id": "fc1_background_joined",
-        "variants": [
-          {
-            "ask": "갈래 ① 주문 근거를 시그널 초안 직후 배경 에이전트로 띄웠고, `risk_guard` 직전에 그 판정표의 `LINT OK`·`PROPAGATE OK`를 확인(교정이 있었으면 본 세션이 `fc_propagate apply`·`verify --write`)한 뒤 `decide --mode pre`를 돌렸는가 — 배경이 두 번 멈췄으면 남은 행을 본 세션이 UNVERIFIABLE+시도 기록으로 채운 경우도 Y · 제안 0(규율 전용)이면 Y (Y/N)",
-            "must": "Y"
-          },
-          {
-            "ask": "`decide --mode pre`를 갈래 ① 판정표의 `LINT OK`·`PROPAGATE OK` 없이 돌렸거나, 교정이 남은('본 세션 적용 대기') 판정표로 주문을 결정했는가 — 제안 0(규율 전용)이면 N (Y/N)",
-            "must": "N"
-          }
-        ]
-      },
-      {
         "id": "refill_candidates_listed",
         "variants": [
           {
@@ -1348,6 +1367,58 @@
           },
           {
             "ask": "실계좌(국내·미국 현금 공유)인데 시그널에 market_share가 없거나 why가 비었는가 — 모의 run이면 N (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "fc1_background_joined",
+        "variants": [
+          {
+            "ask": "갈래 ① 주문 근거를 시그널 초안 직후(`db.py import` 뒤) 배경 에이전트로 띄웠고, `risk_guard` 직전에 그 판정표의 `LINT OK`·`REFS OK`를 확인(교정이 있었으면 `facts.py correct` 뒤 `stage.py render-note`로 다시 렌더)한 뒤 `facts.py decide --mode pre`를 돌렸는가 — 배경이 두 번 멈췄으면 남은 행을 본 세션이 UNVERIFIABLE+시도 기록으로 채운 경우도 Y · 제안 0(규율 전용)이면 Y (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "`facts.py decide --mode pre`를 갈래 ① 판정표의 `LINT OK`·`REFS OK` 없이 돌렸거나, 교정한 뒤 다시 렌더하지 않은 판정표로 주문을 결정했는가 — 제안 0(규율 전용)이면 N (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "undersized_resolved",
+        "variants": [
+          {
+            "ask": "approved의 undersized_short가 false인가 — 확인된 축(열린 + 전망 · 현재가 > 평균가) 보유 가운데 이 시장 보유 평균×0.5 미만인 것마다 이 run의 증액 BUY 또는 holds[].small_why{kind, why, expected_upside_pct}(계좌 기여)가 있다 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "approved의 undersized_short가 true인가 — 확인된 축의 소액 보유에 증액 BUY도 작게 두는 사유·계좌 기여도 없다 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "factor_resolved",
+        "variants": [
+          {
+            "ask": "approved의 factor_short가 false이고 factor.state가 missing이 아닌가 — 꺾인 요인마다 시그널 factor_judgments[]가 있고 정리로 판정한 보유마다 이 run의 SELL이 있다 (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "approved의 factor_short가 true이거나 factor.state가 missing인가 — 요인 판정 없음 · 결정 빠진 보유 · 정리 종목 SELL 없음 · 1단 요인 상태 없음 중 하나 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "reroll_reported",
+        "variants": [
+          {
+            "ask": "approved rejected[]의 '거부 회피 재실행' 행(없으면 0건)을 §11에 사유 그대로 적었고, 그 제안을 파일 수정·재발행으로 살리지 않았는가 — 행이 0건이면 Y (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "approved rejected[]의 '거부 회피 재실행' 행을 §11에서 빼거나 바꿔 적었거나, 그 제안을 파일 수정·재발행으로 살렸는가 — 행이 0건이면 N (Y/N)",
             "must": "N"
           }
         ]
@@ -1394,12 +1465,6 @@
       {
         "check": "contains",
         "file": "{signal}",
-        "pat": "\"evidence\"",
-        "min": 1
-      },
-      {
-        "check": "contains",
-        "file": "{signal}",
         "pat": "\"horizon_days\"",
         "min": 1
       },
@@ -1437,6 +1502,18 @@
         "check": "contains",
         "file": "{signal}",
         "pat": "\"refill_candidates\"",
+        "min": 1
+      },
+      {
+        "check": "contains",
+        "file": "{signal}",
+        "pat": "\"facts\"\\s*:\\s*\\[\\s*\\{",
+        "min": 1
+      },
+      {
+        "check": "contains",
+        "file": "{approved}",
+        "pat": "\"screen\": \\{",
         "min": 1
       }
     ]
@@ -1830,6 +1907,45 @@
           },
           {
             "ask": "이어받기 `## 지지 이탈` 표에 있는데 노트 §6에 `[지지 이탈]` 재판정 줄이 없는 종목이 하나라도 있는가 — 표가 '없음'이면 N (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "pass_quotes_map",
+        "variants": [
+          {
+            "ask": "열린 전망 수혜 이름에 붙인 [통과]마다 지도가 그 이름에 적은 분류(동인·노출·부호)를 인용하고 오늘 그 분류가 안 맞는 이유를 적었는가 (그런 [통과]가 없으면 Y) (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "열린 전망 수혜 이름의 [통과] 가운데 지도가 그 이름에 적은 분류를 인용하지 않고 넘긴 것이 있는가 (그런 [통과]가 없으면 N) (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "response_scoped",
+        "variants": [
+          {
+            "ask": "진입을 막는 시나리오 대응마다 막는 업종·요인 범위를 적었고 반대 시장의 원 대응보다 넓지 않은가 (막는 대응이 없으면 Y) (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "'새 진입 없음'처럼 범위 없이 이 시장 진입 전체를 막는 시나리오 대응이 있는가 (막는 대응이 없으면 N) (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "factor_judged",
+        "variants": [
+          {
+            "ask": "캡처 `## 요인 상태`에 꺾임(또는 unknown)인 요인이 있으면 노트 §7에 `[요인 판정] <요인>` 블록(원인 · 상태 · 바스켓 보유 전부의 저점매수/유지/정리와 사유)을 썼고 그 요인 종목의 `[하락 원인]` 줄에 요인 상태를 붙였는가 — 꺾인 요인이 없으면 Y (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "꺾인(또는 unknown) 요인이 있는데 `[요인 판정]` 블록이 없거나, 바스켓 보유 가운데 결정이 빠진 종목이 있거나, 대응을 '증액 중단·약한 논지부터'처럼 방향으로 미리 정해 썼는가 — 꺾인 요인이 없으면 N (Y/N)",
             "must": "N"
           }
         ]
@@ -2947,6 +3063,32 @@
           },
           {
             "ask": "반대 시장 전망을 보지 않고 세운 전망이 있거나, 한 시장 종목뿐인데 사유가 없거나, 같은 요인 반대 방향을 잇지도 갈라 적지도 않았거나, §2에 교차: 줄 없는 갱신 축이 있는가 (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "dart_inputs_read",
+        "variants": [
+          {
+            "ask": "1단 공시 목록에 뜬 유니버스 종목의 잠정실적·주요 공시와 판정일이 지난 예정 사건의 결과를 열어 노트 그 종목 줄에 판정을 적었는가 (그런 공시·사건이 없었으면 Y) (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "공시 목록에 뜬 유니버스 종목의 잠정실적이나 판정일이 지난 예정 사건의 결과를 열지 않고 '다음 사건 뒤 판정'으로 미룬 것이 있는가 (그런 공시·사건이 없었으면 N) (Y/N)",
+            "must": "N"
+          }
+        ]
+      },
+      {
+        "id": "basket_names_proposed",
+        "variants": [
+          {
+            "ask": "전망이 수단 바스켓으로 적은 유니버스 밖 이름마다 편입 후보로 냈거나 [통과] 사유를 적었는가 (그런 이름이 없으면 Y) (Y/N)",
+            "must": "Y"
+          },
+          {
+            "ask": "전망의 수단 바스켓에 있는 유니버스 밖 이름 가운데 후보로도 [통과]로도 처리하지 않은 것이 있는가 (그런 이름이 없으면 N) (Y/N)",
             "must": "N"
           }
         ]

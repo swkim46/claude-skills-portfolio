@@ -10,8 +10,9 @@
 그림자 벤치마크: 첫 실행일에 equity와 벤치마크 ETF 가격을 기준점으로 박아두고,
 이후 매일 "같은 돈을 그날 그 ETF에 넣고 방치했다면 지금 얼마인가"를 계산한다.
 
-position_peaks.json은 risk_guard의 트레일링 스톱이 읽는다 — 저널이 멈추면 트레일링도
-멈추므로, 이 스크립트는 매 run 마지막에 반드시 돌아야 한다.
+보유 고점(저장소 ex_position_peak · 예전 position_peaks.json)은 risk_guard의 트레일링 스톱이 읽는다 —
+저널이 멈추면 트레일링도 멈추므로, 이 스크립트는 매 run 마지막에 반드시 돌아야 한다.
+자산 곡선·벤치마크 기준점·감시 목록·run 기록은 모두 저장소(`db.py`)에서 읽고 쓴다(2026-10-17 이전).
 
 사용:
     python3 journal.py --daily --market kr
@@ -24,7 +25,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import peaks as peaks_store
+import db
 import risk_guard as rg
 from kis_client import KisClient, KisError, us_buying_power, balance_for, acct_family, same_account
 
@@ -32,10 +33,6 @@ HERE = Path(__file__).parent
 CONFIG_DIR = HERE / "config"
 JOURNAL_DIR = HERE / "journal"
 WEEKLY_DIR = JOURNAL_DIR / "weekly"
-EQUITY_PATH = JOURNAL_DIR / "equity_curve.jsonl"
-PEAKS_PATH = JOURNAL_DIR / "position_peaks.json"
-BENCHMARK_PATH = CONFIG_DIR / "benchmark.json"
-WATCHLIST_PATH = CONFIG_DIR / "watchlist.json"
 
 KST = timezone(timedelta(hours=9))
 
@@ -74,15 +71,18 @@ def today_cost_and_turnover(balance: dict, market: str, stamp: str = None) -> di
         stamp = _ss.run_stamp(market.lower())      # 현재 run의 스탬프(현지 거래일 · 2026-10-14)
     day = stamp
     turnover = 0.0
+    import portfolio
     for p in sorted(JOURNAL_DIR.glob(f"trades_{day}_{market.lower()}*.json")):
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
+        if portfolio.file_family(data) != acct_family():           # 지금 계좌 계열의 기록만(2026-10-19 · R07)
+            continue
         for t in data.get("trades", []):
             # 나간 금액은 risk_guard와 같은 한 곳에서 센다(status·fill.verdict 규칙이 거기 있다).
             amt = rg.sent_amount(t) if t.get("action") == "BUY" else (
-                (t.get("qty") or 0) * (t.get("price") or 0) if t.get("status") != "FAILED" else None)
+                (t.get("qty") or 0) * (t.get("price") or 0) if t.get("status") not in ("FAILED", "REJECTED", "UNSENT") else None)   # 접수 0(거절·미전송·옛 FAILED)은 회전이 아니다
             if amt:
                 turnover += amt
     return {"fees": None, "turnover": turnover,
@@ -96,37 +96,6 @@ def _read_json(path: Path, default=None):
         return json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return default
-
-
-def _write_json(path: Path, data) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _read_accum(path: Path) -> tuple:
-    """누적 파일 읽기 — **(데이터, 읽었는가)**. 못 읽으면 옆으로 치워 보존한다.
-
-    `_read_json`처럼 기본값으로 갈음해도 되는 파일과, 그러면 **이력이 사라지는** 파일이
-    있다. 후자는 '아직 없음'과 '읽지 못함'을 구분해야 하고, 읽지 못했으면 **쓰지 않아야**
-    한다 — `execute.py`가 거래 기록에 쓰는 것과 같은 처방(지우지 말고 치우고 알린다).
-    """
-    if not path.exists():
-        return {}, True                      # 아직 없음 — 처음 박는 것은 정상이다
-    try:
-        d = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(d, dict):
-            raise ValueError("최상위가 dict가 아니다")
-        return d, True
-    except (json.JSONDecodeError, OSError, ValueError) as e:
-        aside = path.with_name(f"{path.stem}.corrupt_{datetime.now(KST):%y%m%d_%H%M%S}.json")
-        try:
-            path.rename(aside)
-            where = aside.name
-        except OSError:
-            where = "(보존 실패)"
-        print(f"\n★ {path.name}을 읽을 수 없어 {where}로 옮겨 보존했다 ({e}).",
-              file=sys.stderr)
-        return {}, False
 
 
 # ------------------------------------------------------------------ 일별 기록
@@ -153,29 +122,16 @@ def update_peaks(positions: list, market: str = "KR") -> dict:
     ★ 예전에는 시장 구분이 없는 평평한 dict였고 `set(peaks) - held`로 안 들고 있는
     종목을 지웠다. 두 시장을 번갈아 돌리므로 **미국 run이 국내 peak 전체를 지우고
     국내 run이 미국 peak 전체를 지웠다** — 트레일링 스톱의 고점이 매일 리셋된다.
-    표기 규칙은 `peaks.py` 하나에만 둔다(읽는 쪽 risk_guard와 갈리지 않게).
+    지금은 저장소 한 곳(`db.peaks_update` — 시장별 행 · 한 트랜잭션)이 표기 규칙을 갖는다(읽는 쪽 risk_guard와 갈리지 않게).
+    시세 0 이하인 행은 예전처럼 보유로 치지 않는다(그 종목 고점은 지워진다).
     """
-    return peaks_store.update(market, positions)
+    return db.peaks_update(market, [p for p in positions or [] if (p.get("price") or 0) > 0])
 
 
 def _load_runs() -> list:
-    """`run_log.jsonl` 전건. 못 읽는 줄은 세지 않되 **몇 줄을 못 읽었는지 알린다** —
-    조용히 건너뛰면 기권율의 분모가 줄어 지표가 좋아 보인다."""
-    p = JOURNAL_DIR / "run_log.jsonl"
-    if not p.exists():
-        return []
-    out, bad = [], 0
-    for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
-        if not line.strip():
-            continue
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            bad += 1
-    if bad:
-        print(f"  ※ run_log.jsonl에서 {bad}줄을 못 읽었다 — 기권율 분모가 실제보다 작다.",
-              file=sys.stderr)
-    return out
+    """run 기록(저장소 op_run_log) 전건 — 행 단위로 들어가므로 '못 읽은 줄'이 생기지 않는다(기권율 분모가 그대로다).
+    """
+    return db.log_rows("run_log")
 
 
 def _avoidance_block(days: int) -> list:
@@ -185,8 +141,8 @@ def _avoidance_block(days: int) -> list:
     실패 양상은 손실이 아니라 기권이다(실측: 첫 실 run이 `no_trade`로 끝난 날 벤치마크는
     +2.45%였고 계좌는 0.00%였다). 재지 않는 것은 관리되지 않는다.
 
-    세 지표의 출처가 다 다르다 — `run_log.jsonl`(기권율) · `equity_curve.jsonl`(기다린 비용) ·
-    `scenarios.json`(실현됐는데 대응했나). 마지막 것이 **영속 id가 없어 계산 불가**였고,
+    세 지표의 출처가 다 다르다 — run 기록(기권율) · 자산 곡선(기다린 비용) ·
+    시나리오(실현됐는데 대응했나) — 셋 다 저장소 표다. 마지막 것이 **영속 id가 없어 계산 불가**였고,
     그래서 `scenarios.py`를 만들었다.
     """
     since = (datetime.now(KST) - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -213,7 +169,7 @@ def _avoidance_block(days: int) -> list:
 
     # ② 기다린 비용 — 그 기간 벤치마크 수익률. "기다리는 비용이 낮다"는 판단의 사후 검증이다.
     for mkt in ("KR", "US"):
-        hist = [r for r in latest_per_day(_load_equity())
+        hist = [r for r in latest_per_day([x for x in _load_equity() if same_account(x)])     # 지금 계좌 계열만(R07)
                 if r.get("market") == mkt and str(r.get("date") or "") >= since]
         pair = [r for r in hist if r.get("shadow_benchmark_equity")]
         if len(pair) >= 2:
@@ -254,7 +210,7 @@ def _scenario_metric(days: int) -> list:
 
 def daily(market: str, real: bool = False, stamp: str = None) -> int:
     client = KisClient.for_mode()            # 계좌 모드(2026-10-12) — 저널은 읽기만 한다
-    watchlist = _read_json(WATCHLIST_PATH, {}) or {}
+    watchlist = db.watchlist_doc()
 
     # 해외 현금은 예수금이 아니라 **구매력**이다 — 수집과 같은 함수(`kis_client.balance_for`)를 쓴다(2026-10-15 통합).
     # 예전엔 여기만 예수금(USD 0)을 읽어 equity=0이 되고, 그래서 아래 `equity > 0` 앵커 조건이 영영 거짓이었다.
@@ -274,32 +230,25 @@ def daily(market: str, real: bool = False, stamp: str = None) -> int:
     equity = cash + sum(p.get("eval_amt", 0) or 0 for p in positions)
     bench = benchmark_price(client, market, watchlist)
 
-    # 기준점은 최초 1회만 박는다.
-    # ★ 못 읽는 파일을 기본값 `{}`으로 갈음하면 `key not in base`가 참이 되어
-    #   **기준점이 오늘로 재설정되고 누적·초과수익이 0으로 리셋된다** — 이 프로젝트의
-    #   성공 지표(③벤치마크 병기 기록의 완전성) 자체를 파괴하는 자리다. 그래서 여기서는
-    #   '읽지 못함'과 '아직 없음'을 반드시 구분하고, 읽지 못했으면 **쓰지 않는다.**
-    base, base_readable = _read_accum(BENCHMARK_PATH)
-    # ★ 기준점은 계좌 계열마다(2026-10-15 · 실계좌 전환) — 모의는 예전 키(KR·US) 그대로, 실계좌는 `KR:real`·`US:real`.
+    # 기준점은 최초 1회만 박는다(저장소 op_benchmark_anchor — 시장 키 한 행).
+    # ★ 예전 파일 시절에는 못 읽는 파일을 `{}`로 갈음하면 기준점이 오늘로 재설정되어 누적·초과수익이 0이 됐다
+    #   (성공 지표 ③ 파괴) — 그래서 '읽지 못함'을 따로 막았다. 저장소는 행이 있거나 없거나 둘 중 하나다.
+    # ★ 기준점은 계좌 계열마다(2026-10-15 · 실계좌 전환 준비) — 모의는 예전 키(KR·US) 그대로, 실계좌는 `KR:real`·`US:real`.
     #   같은 키를 쓰면 실계좌 첫 행이 모의 시작 자산(약 1.5억)에 대어 누적 −90%로 찍힌다.
     fam = acct_family(client.mode)
     key = market if fam == "paper" else f"{market}:{fam}"
-    if not base_readable:
-        print("★ 벤치마크 기준점을 읽지 못했다 — **새 기준점을 박지 않는다.** "
-              "옆으로 치워 보존했으니 복구한 뒤 다시 돌려라. 지금 박으면 누적수익이 "
-              "0으로 리셋되고 그게 이 프로젝트의 성공 지표다.", file=sys.stderr)
-    elif key not in base and equity > 0 and bench.get("price"):
-        base[key] = {
+    b = db.benchmark_get(key) or {}
+    if not b and equity > 0 and bench.get("price"):
+        b = {
             "started_at": datetime.now(KST).isoformat(),
             "start_equity": equity,
             "benchmark_ticker": bench["ticker"],
             "start_benchmark_price": bench["price"],
         }
-        _write_json(BENCHMARK_PATH, base)
+        db.benchmark_set(key, b)
         print(f"벤치마크 기준점 기록: {key} equity={equity:,.0f} "
               f"{bench['ticker']}={bench['price']:,.2f}")
 
-    b = base.get(key, {})
     shadow = None
     if b.get("start_benchmark_price") and bench.get("price"):
         shadow = b["start_equity"] * (bench["price"] / b["start_benchmark_price"])
@@ -365,9 +314,7 @@ def daily(market: str, real: bool = False, stamp: str = None) -> int:
             row["cum_benchmark_pct"] = round((shadow - start) / start * 100, 3)
             row["excess_pct"] = round(row["cum_pnl_pct"] - row["cum_benchmark_pct"], 3)
 
-    EQUITY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with EQUITY_PATH.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    db.equity_append(row)                           # 추가만 하는 표(ex_equity_point) — 렌더본 equity_curve.jsonl도 함께 쓴다
 
     update_peaks(positions, market)
 
@@ -422,16 +369,8 @@ def daily(market: str, real: bool = False, stamp: str = None) -> int:
 # ------------------------------------------------------------------ 주간 리포트
 
 def _load_equity() -> list:
-    if not EQUITY_PATH.exists():
-        return []
-    rows = []
-    for line in EQUITY_PATH.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return rows
+    """자산 곡선 전건(저장소 ex_equity_point · 기록 순서)."""
+    return db.equity_rows()
 
 
 def _max_drawdown(values: list) -> float:
@@ -459,7 +398,7 @@ def _forecast_block(days: int) -> list:
         import market_map as mm
         buf = _io.StringIO()
         with _ctx.redirect_stdout(buf):
-            mm.forecast_score(mm._read(mm.MAP, {"axes": []}), days)
+            mm.forecast_score(db.market_map_load(), days)
         out += [l for l in buf.getvalue().splitlines() if not l.startswith("## ")]
     except Exception as e:                    # noqa: BLE001 — 리포트가 이것 때문에 죽으면 안 된다
         out.append(f"*(전망 채점 실패: {type(e).__name__}: {e})*")
@@ -482,32 +421,53 @@ def _account_floor_line() -> str:
         return f"*(계좌 30일 수익률 계산 실패: {type(e).__name__})*"
 
 
+def _decompose_block(days: int) -> list:
+    """통합자산 변화 분해(2026-10-19 · Codex R06 · 측정 판 2) — 입출금(정확) · 환율 효과(근사) · 비용(추정) · 가격 손익(잔차) ·
+    실현/평가(추정). 수익률이 무엇으로 이뤄졌는지 보이게 한다 — 코드가 바르게 잰다는 것이지 수익성이 나아졌다는 뜻이 아니다."""
+    try:
+        import portfolio
+        fam = acct_family()
+        d1 = datetime.now(KST).date().isoformat()
+        d0 = (datetime.now(KST).date() - timedelta(days=days)).isoformat()
+        r = portfolio.decompose(fam, d0, d1)
+    except Exception as e:                    # noqa: BLE001
+        return [f"*(통합자산 분해 실패: {type(e).__name__})*", ""]
+    if not r.get("ok"):
+        return [f"- 통합자산 분해 — 산정 불가({r.get('why') or '곡선 행·환율 없음'})", ""]
+    f = lambda v: "미측정" if v is None else f"{v:+,.0f}원"
+    return [f"- 통합자산 분해({r['since']}~{r['until']} · {fam}): 시작 {r['nav0']:,.0f}원 → 끝 {r['nav1']:,.0f}원 = 변화 {f(r['d_nav'])} · "
+            f"입출금 {f(r['flows_krw'])} · 환율 효과 {f(r['fx_effect_krw'])}(근사) · 비용 {f(r['fees_krw_est'] and -r['fees_krw_est'])}(추정 · 가격 손익에 포함) · "
+            f"가격 손익 {f(r['price_pnl_krw'])}(잔차) · 실현 {f(r['realized_krw_est'])} · 평가 {f(r['unrealized_krw_est'])}(추정)", ""]
+
+
 def weekly(days: int = 7) -> int:
     rows = [r for r in _load_equity() if same_account(r)]    # 지금 계좌 계열만(2026-10-15 — 실계좌 주간에 모의 행이 섞이지 않게)
     if not rows:
-        print("equity_curve.jsonl이 비어 있다 — 아직 리포트할 것이 없다.", file=sys.stderr)
+        print("자산 곡선(ex_equity_point)이 비어 있다 — 아직 리포트할 것이 없다.", file=sys.stderr)
         return 1
 
     since = (datetime.now(KST) - timedelta(days=days)).strftime("%Y-%m-%d")
     recent = [r for r in rows if r.get("date", "") >= since]
 
     # 규율 지표는 거래 기록에서 센다.
+    import portfolio
+    fam = acct_family()
     trades, disc_sells, failed = [], 0, 0
     for p in sorted(JOURNAL_DIR.glob("trades_*.json")):
         data = _read_json(p, {}) or {}
-        if data.get("generated_at", "")[:10] < since:
+        if data.get("generated_at", "")[:10] < since or portfolio.file_family(data) != fam:    # 지금 계좌 계열만(R07)
             continue
         for t in data.get("trades", []):
             trades.append(t)
             if t.get("source") == "discipline":
                 disc_sells += 1
-            if t.get("status") == "FAILED":
+            if t.get("status") in ("FAILED", "REJECTED", "UNSENT"):          # 접수 0 — 거절·미전송·옛 FAILED(2026-10-19 상태 어휘)
                 failed += 1
 
     rejected_reasons = {}
     for p in sorted((HERE / "signals").glob("approved_*.json")):
         data = _read_json(p, {}) or {}
-        if data.get("generated_at", "")[:10] < since:
+        if data.get("generated_at", "")[:10] < since or portfolio.file_family(data) != fam:    # 지금 계좌 계열만(R07)
             continue
         for r in data.get("rejected", []):
             key = str(r.get("why", ""))[:60]
@@ -521,6 +481,7 @@ def weekly(days: int = 7) -> int:
         "",
         _account_floor_line(),
         "",
+        *_decompose_block(days),
         "## 성과 (벤치마크 병기)",
         "",
         "| 시장 | equity | 누적 | 벤치마크 누적 | 초과 | MDD |",
@@ -545,7 +506,7 @@ def weekly(days: int = 7) -> int:
 
     try:
         import costs as _costs
-        _d = _costs.drag(days)
+        _d = _costs.drag(days, fam)                    # 분자·분모 같은 계좌 계열(R07)
         if _d.get("pct") is not None:
             lines += ["", f"- 비용 추정(최근 {days}일): 체결 {_d['fills']}건 · 회전 {_d['turnover_krw']:,}원 · "
                           f"비용 {_d['cost_krw']:,}원 = 자산의 **{_d['pct']:.3f}%** — 위 수익률에서 이만큼이 수수료·세금·환전으로 빠진다"

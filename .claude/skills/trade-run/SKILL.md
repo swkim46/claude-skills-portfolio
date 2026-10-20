@@ -66,6 +66,10 @@ description: >-
   한낮에 깨우든 같은 규칙이다. *실사례(2026-09-18): 루틴 지침의 "±90분 밖이면 건너뜀"이 장이
   열린 13:00 실행을 통째로 막았다 — 시각 창은 이 문서에도 루틴 지침에도 두지 않는다.*
 - `config/KILL`이 있으면 즉시 중단하고 그 사실만 보고한다.
+- **저장소 판이 코드 판과 다르면**(`db.SchemaOutdated: 저장소 판 n < 코드 판 m` — 2026-10-19 · Codex R12) `python3 db.py migrate`를
+  한 번 돌리고(시작 전 백업 `journal/_db_backup/trading_pre_migrate_v<n>.db` · 판마다 검증 · 실패하면 그 판만 롤백) 마지막 줄을 작업기록에
+  남긴 뒤 이어간다. `MIGRATE FAIL`이면 run을 멈추고 그 출력만 보고한다. `SchemaNewer`(저장소가 코드보다 새 판)면 코드가 되돌려진 것이니
+  멈추고 보고한다 — 저장소를 고치지 않는다.
 - 이 세션 스탬프의 `signals/signal_<YYMMDD>_<mkt>.json`이 이미 있으면(스탬프 = 거래하는 세션의 현지 날짜 — §9 〈날짜 규칙〉) **중복 run이다 — 사람에게 묻지 않고
   규칙으로 가른다.** ① 직전 run이 중간에 끊겼으면 **끊긴 단계부터 재개**한다(아래 〈중단·재개〉).
   ② 새 판단으로 다시 돌려야 하면 `SG clear trade-run dir=<프로젝트폴더>` 후 1단부터 돌리고,
@@ -84,7 +88,7 @@ description: >-
   회전 매도해 메운다**(축이 확인돼 이익 중인 보유는 자금원이 아니다 — FB-261003-7). **사람에게 환전·입금을 묻지 않는다** — 입금된 돈 안에서 알아서 한다
   (2026-09-16 사용자 지시 · `references/stage5_decide.md` §4-a-bis). 보고에 "사람 결정이 필요한 것"
   항목을 만들지 않는다.
-- **★ 계좌는 `config/limits.json`의 `account_mode` 하나가 정한다(2026-10-12 실계좌 전환).** `paper`(모의) ·
+- **★ 계좌는 `config/limits.json`의 `account_mode` 하나가 정한다(2026-10-12 실계좌 전환 계획).** `paper`(모의) ·
   `real_readonly`(실계좌를 읽기만 — 주문은 dry-run까지, `execute.py --send`는 거부된다) · `real`(실계좌 주문 —
   `real_trading_enabled`도 true여야 열린다). **두 값은 사람만 바꾼다 — run은 손대지 않는다.** 캡처 머리의 `[계좌]` 줄을
   노트 머리말과 보고 첫 줄에 그대로 옮긴다. 실계좌는 통합증거금이라 국내·미국 현금이 한 주머니다 — `risk_guard`가 한 번만 센다.
@@ -130,6 +134,8 @@ description: >-
   모자라면 `risk_guard`가 증분을 비례로 키우고(`scaled_up`), 그래도 못 채운 원인이 한도가 아니면 approved에
   `deficit_short: true`를 찍어 **`dispatch`·`no_trade` 게이트가 막는다**. 그 시장 현금이 모자라면 거부하지 않고
   **현금에 맞춰 깎아서 산다**(판단된 예약은 뺀다). 상세는 `references/stage5_decide.md`.
+  확인된 축의 소액 보유에 증액도 사유도 없으면(`undersized_short` · FB-261017-8) · 꺾인 요인에 판정이 없거나 정리 판정에 SELL이 없으면
+  (`factor_short` · FB-261017-7)도 같은 두 게이트가 막는다.
 
 ## 0-b. ★ 우리의 우위는 **속도가 아니다**
 
@@ -165,6 +171,8 @@ description: >-
    **논지를 확인해주는** 역할이 된다. 앞설 수 있는 자리는 정보가 빠른 곳이 아니라 **행동이 뉴스보다
    먼저 정해지는 곳**이다 — ① 인과 사슬의 2차·3차 ② 법·제도가 강제하는 행동(자사주 소각 창·지수
    정기변경) ③ 날짜가 공개된 이벤트. 셋 다 지연과 무관하게 주~월 호흡으로 잡힌다.
+   **이제 run마다 센다** — 리서치가 찾은 사실 중 뉴스레터가 그 대상을 다루기 전에 안 것의 수가 run 기록(`ex_run.before_news_n`)에 남는다
+   (`stage.py close`가 `facts.py before-news`로 센다 · 토요일 `trade-feedback` 지표 `before_news_facts_7d`).
 
 ---
 
@@ -174,7 +182,7 @@ description: >-
 |---|---|---|---|---|---|
 | 1 | **수집·측정** | `references/stage1_capture.md` | `material_*.md` · `snapshot_*.json` · `run_evidence/tools_*.md` · `journal/worklog_*.md` | 머리말 · §3 · **§6 유니버스 표** | `capture` |
 | 2 | **이어받기** | `references/stage2_carry.md` | `journal/carry_*.md` | §1-A · §1-B | `carry` |
-| 3 | **전망·리서치** | `references/stage3_map.md` | **`analysis/전망_*.md`** · `analysis/섹터_*.md` · `journal/market_map.json` | §2 · §4 · §5 | `map` |
+| 3 | **전망·리서치** | `references/stage3_map.md` | **`analysis/전망_*.md`** · `run_evidence/research_branch*_*` · 종류별 사실 행(`facts.py add`) · `journal/market_map.json` | §2 · §4 · §5 | `map` |
 | 4 | **종목·노트 확정** | `references/stage4_note.md` | `analysis/분석노트_*.md` | §0 · §6~§10 | `note` |
 | 5 | **결정** | `references/stage5_decide.md` | `signals/signal_*.json` · `approved_*.json` | **§11 규율 판정** | `dispatch` \| `no_trade` |
 | 6 | **집행·마감** | `references/stage6_execute.md` | `journal/trades_*.json`(`fill_confirmed`) · `equity_curve.jsonl` · `position_peaks.json` | **§11 체결 확정** | `execute` |
@@ -191,16 +199,20 @@ description: >-
 - **변수·함수·alias·`cd` 상태는 다음 호출에 남지 않는다.** 명령은 매번 **전체 경로로** 쓴다.
   이 문서의 `SG`는 *표기*일 뿐이다 — 실제 명령은 `python3 <REPO>/.claude/skills/_stepgate/stepgate.py …`.
   zsh는 `$J`를 단어 분리하지 않으므로 변수에 담은 명령은 **정의한 그 호출 안에서도** 죽는다.
-- **반복 호출은 파일로**: `scenarios.py judge --batch <jsonl>` · `srcledger.py add --batch <jsonl>`
-  (행마다 JSON 한 건). 한 건만 볼 때는 `scenarios.py list --id <id>`.
+- **반복 호출은 파일로**: `scenarios.py judge --batch <jsonl>` · `facts.py add --batch <jsonl>` · `facts.py mention --batch <jsonl>` ·
+  `facts.py verdict --batch <jsonl>`(행마다 JSON 한 건). 한 건만 볼 때는 `scenarios.py list --id <id>` · `facts.py line <F-id>`.
+- **저장소(`journal/trading.db`)는 `db.py`만 연다** — 사실·판정·교정은 `facts.py`로, 조회는 `python3 db.py show <표> --where "…"`로 한다.
+  SQLite를 직접 열어 고치지 않는다.
 - zsh에서 `=`로 시작하는 인자 금지(`echo ====` → `=cmd` 확장). 구분선은 `printf '%s\n' ----`.
 - 한글이 든 파이썬은 `python3 - <<EOF`가 아니라 **파일로 쓰고**(`# -*- coding: utf-8 -*-` 첫 줄) 실행한다.
 - **스탬프 시각을 손으로 적지 않는다** — `python3 stage.py stamp --note <노트> --sec <§N>` /
   `--worklog <작업기록> --stage <단계>`가 실제 시각으로 찍는다(멱등).
 - **링크 본문은 WebFetch가 아니라 `python3 fetch.py <url>`** — 네이버·DART viewer는 WebFetch가 막힌다.
+  **DART 공시 링크(`dsaf001/main.do?rcpNo=`)는 `fetch.py`가 목차 절마다 viewer 본문을 받아 잇는다**(분기보고서 100절 안팎 · 15초 안팎 ·
+  한 절만 필요하면 `--section '<목차 낱말>'` · 한글은 응답이 밝힌 문자셋으로 읽는다).
   **PDF 주소는 반드시 `fetch.py`로 연다 — WebFetch·내장 브라우저 금지.** 둘 다 사용자 화면에 다운로드 카드를 띄우고
   본문은 못 읽는다. `fetch.py`는 PDF를 감지해 본문을 뽑고, 기관이 스크립트를 막으면 아카이브 사본으로 다시 묻고,
-  여는 링크마다 `journal/fetch_log.jsonl`에 기록을 남긴다 — `crosscheck.py`가 리서치·노트에 인용된 PDF 주소를 그 기록과
+  여는 링크마다 접속 기록(저장소 `op_fetch`)을 남긴다 — `crosscheck.py`가 리서치·노트에 인용된 PDF 주소를 그 기록과
   대조해 기록이 없으면 실패로 센다. 본문이 비면(스캔 이미지) §10에 '열지 못한 것'으로 적고 다른 수단으로 재시도하지 않는다.
   *실사례(2026-09-24~10-02): 리서치 하위 작업이 PDF 16건을 WebFetch로 열어 run 중간에 다운로드 버튼이 떴고, 16건 전부
   '깨진 PDF'로 본문을 못 읽었다.* **일반 규칙: 렌더 대신 저장·설치·권한 요청을 부르는 형식은 그 수단에서 빼고 전용 경로로 연다.**
@@ -232,15 +244,17 @@ description: >-
 > 보고에 없으면 사용자가 파일을 열어야 알 수 있고, 그러면 "현금 비중은 실패"라는 판정이 매일 눈에 안 띈다.
 >
 > **★ 〈계좌 현황〉 블록 바로 앞에 두 줄을 둔다** (2026-10-07 · 2026-10-13 fact-check 두 갈래). ⓪ `주문 근거 검증 n건 PASS(감사 r회) · 제외 m건(종목·사유)`
-> (주문 전엔 판정표 검증만 · 감사는 전파 즉시 배경 · 최대 5회 · run을 닫기 전에 결과 반영 · 재채점이 체결 매수의 근거를 뒤집으면 소급 매도 —
+> (주문 전엔 판정표 검증만 · 감사는 교정 반영 즉시 배경 · 최대 5회 · run을 닫기 전에 결과 반영 · 재채점이 체결 매수의 근거를 뒤집으면 소급 매도 —
 > `stage6_execute.md` 〈갈래 ①〉 · 2026-10-13 17:30 · 2026-10-14) · 감사가 끝내 안 왔으면 `감사 미수신`을 그 줄에 적는다
 > ⓪의 실제 줄: `주문 근거 n건 · 감사 r회 PASS|FAIL · 소급 m건(종목·수량·사유) · 제외 k건` ① `배경 검증 1차: 기계형 n · 판단형 m → 수정 1회 → 2차 …`
 > (판단형만 남으면 `기계 검사 통과 · 판단형 N건(유형)` · `stage6_execute.md` 〈갈래 ② 감사〉 · `stage4_note.md` 5-C 8번)
 > ② `python3 <REPO>/.claude/skills/_stepgate/stepgate.py findings fact-check for=trade-run`의
 > 마지막 줄 `승격 대기 N건` — 0이 아니면 무엇이 몇 run에서 걸렸는지 적는다. 게이트를 고치는 것은 run이 아니라 토요일
 > `trade-feedback`(skill-maintainer 절차)이다 — run이 자기 게이트를 고치면 게이트가 독립성을 잃는다.
-> ④ **`[실전점검]` 줄과 점검표**(2026-10-15 — 다음 주 실전 전환) — `python3 stage.py close`가 만든
+> ④ **`[실전점검]` 줄과 점검표**(2026-10-15 — 실계좌 전환 준비) — `python3 stage.py close`가 만든
 > `data/run_evidence/real_check_<st>_<mkt>.md`의 머리줄과 표를 그대로 붙인다(12항목 · ★ 줄이 맨 앞). 기억으로 쓰지 않는다.
+> 같은 `stage.py close` 출력의 `REFS OK` 줄(이번 run 사실 참조 검사)과 `[사실]` 줄(새·재사용·되풀이·뉴스보다 먼저)도 옮긴다 — `REFS FAIL`이거나
+> 재렌더 ★가 떴으면 그 줄을 맨 앞에 두고, ★면 `stage.py render-note` 뒤 close를 다시 돌린다.
 > 푸시를 보냈으면 바로 `python3 push_log.py --stamp <st> --market <mkt> --text "<보고 첫 줄>"`(못 보냈으면 `--failed`).
 > ③ **`[테스트]` 줄**(2026-10-11) — 1단 캡처의 `### 테스트` 줄을 그대로 옮긴다. 이 run에서 `.py`를 하나라도 고쳤으면
 > `python3 run_tests.py`를 돌리고 그 결과 줄로 바꾼다. **★가 붙었으면(멈춤·실패·건수 감소·7일 넘은 기록) 숨기지 않고 맨 앞에 둔다** —
@@ -257,17 +271,17 @@ description: >-
 
 - **연구 세 갈래는 1단 게이트 직후 띄운다**(`stage3_map.md` 〈리서치〉 5) — 입력이 그때 다 있다. 2단을 하는 동안 돈다.
 - **fact-check는 전부 배경이다(2026-10-14)** — `[AI]` 줄이 확정되는 대로 묶음으로 고정해 배경 에이전트를 띄운다(②-A 3단 끝 · ②-B 4단
-  심층 끝 · ① 시그널 초안 직후). 감사는 그 판정표의 교정이 전파되는 즉시 뜬다. 본 세션은 경계에서 합류만 하고, 기다리는 자리는 둘이다 —
+  심층 끝 · ① 시그널 초안 직후). 감사는 그 판정표의 교정이 반영되는 즉시 뜬다. 본 세션은 경계에서 합류만 하고, 기다리는 자리는 둘이다 —
   주문 전 ① 판정표, run 끝 ①·② 감사 결과(`stage4_note.md` 5-C 〈배경 에이전트〉).
 - **fact-check 감사 횟수는 갈래마다 다르다** — ② 배경 서술은 묶음마다 최대 두 번·수정은 1차 뒤 한 번(`stage4_note.md` 5-bis) ·
   ① 주문 근거는 최대 다섯 번·FAIL마다 재채점(소급 매도 가능 · `stage6_execute.md` 〈갈래 ①〉). 통과는 횟수가 아니라 **쓰는 자리의 규율**로 받는다
-  (2026-10-15 — 부재 단정 검색 기록·`받치는 것:`·전파 범위·고정본 덧붙이기 · fact-check §5).
+  (2026-10-15 — 부재 단정 검색 기록·`받치는 것:`·사실 단위 교정·고정본 덧붙이기 · fact-check §5).
   감사가 반복해 잡는 유형은 게이트 문항으로 올린다.
 - **★ 멈춘 하위 작업을 기다리지 마라.** 하위 작업은 출력 파일에 행마다 바로 덧붙이게 하고(범위 상한 약 20분 · fact-check 조달은 상한 없음),
   본 문맥은 자기 일을 하다가 그 파일의 수정 시각을 본다. **10분 동안 그대로이고 완료 알림도 없으면 중단**하고,
   이미 쓴 행은 쓰고 남은 범위만 직접 하거나 **한 번만** 다시 띄운다. 멈춤이 두려워 병렬을 버리면 그게 다시 시간을 쓴다.
 - **결정론 검사는 절이 끝날 때마다** 돌린다 — `crosscheck.py` · `market_map.py gaps --check` ·
-  `verify_numbers.py --run <st> <mkt>` · `srcledger.py check`. 단계 끝에 몰아 돌리면 처음 실패한 것을 고치느라 다시 돈다.
+  `verify_numbers.py --run <st> <mkt>` · `facts.py check`. 단계 끝에 몰아 돌리면 처음 실패한 것을 고치느라 다시 돈다.
 - **게이트·`stage.py`는 프로젝트 폴더(`life/ai-trading-bot`)에서 부른다** — 셸 작업 폴더가 밖이면 상대 경로 기준이
   0건으로 읽힌다(2026-10-01 dispatch 첫 판정 FAIL — 엔진이 `dir=` 기준으로도 찾게 고쳤지만 원칙은 같다).
 - **도구 동작은 코드를 열어 확인하지 않는다** — 회전 매도·같은 run 매도 대금·전송 순서·다리 소진은
@@ -333,14 +347,14 @@ description: >-
 | 2 | **`carry`** | 이어받기 직후 | 회고 유실 · 발화 트리거 무시 — **매 run이 백지에서 다시 판단하게 된다** |
 | 3 | **`map`** | 지도·리서치 직후 | 막힌 고리 방치 · 리서치 증발 — **종목 뉴스로 매매하게 된다** |
 | 4 | **`note`** | 노트 확정·검증 직후 | 얕은 노트 · 고아 논지 · 숫자 오류 |
-| 5 | **`dispatch`** (제안 ≥1건) 또는 **`no_trade`** (0건) | `--send` **직전** | **사람 확인을 대신한다** — 순서 우회·자릿수 오류·매도조건 없는 매수 · 결정 회피 |
+| 5 | **`dispatch`** (제안 ≥1건) 또는 **`no_trade`** (0건) | `--send` **직전** | **사람 확인을 대신한다** — 순서 우회·자릿수 오류·매도조건 없는 매수 · 결정 회피 · 거부 회피 재실행은 `risk_guard`가 제안 단위로 거른다(그 제안만 거부 · 나머지 전송) |
 | 6 | **`execute`** | **주문 확정 직후** — 접수·미체결 상태로는 run을 닫지 않는다 | **접수를 체결로 오인한 보고 · 미체결 방치**(`fill_confirmed.open_orders` 0 필수) |
 
 ```
 python3 risk_guard.py signals/signal_<…>.json --snapshot data/snapshot_<…>.json
 python3 execute.py signals/approved_<…>.json            # dry-run (필수)
 SG form trade-run dispatch dir=<프로젝트폴더>            # ★ 사람 확인 자리
-SG judge trade-run dispatch <id>=<값> … deliverable=<분석노트 절대경로> dir=<프로젝트폴더>
+SG judge trade-run dispatch <id>=<값> … deliverable=<approved_*.json 절대경로> note=<분석노트 절대경로> signal=<시그널 절대경로> approved=<approved_*.json 절대경로> dir=<프로젝트폴더>
 python3 execute.py signals/approved_<…>.json --send --note <분석노트>   # GATE PASS 뒤에만 · 전송 뒤 fill로 확정까지
 python3 fill.py journal/trades_<…>.json --note <분석노트>              # 미확정이 남았을 때만, 종료코드 0까지 반복
 SG form trade-run execute dir=<프로젝트폴더>             # ★ 체결 확정 확인
@@ -387,7 +401,7 @@ SG judge trade-run execute <id>=<값> … deliverable=<trades_*.json 절대경�
 **★ 날짜 규칙(2026-10-14~) — 스탬프와 기록 안의 날짜는 *거래하는 세션의 현지 날짜*다.** 국내 = 한국 날짜,
 미국 = 미국 동부 날짜. 장 마감 뒤·주말·휴장에 시작한 run은 그 run이 준비하는 **다음 거래일**이다
 (한국 22:35 미국 run = 동부 그날 · 한국 01:24 = 동부 전날 장중이므로 그 전날 · 한국 06:30 = 동부 마감 뒤라 그날 · 토요일 = 월요일).
-- 계산은 한 곳에서만 한다 — `stage.py capture`가 `sessions.run_stamp`로 스탬프를 정하고 **현재 run 포인터**(`journal/current_run.json`)를
+- 계산은 한 곳에서만 한다 — `stage.py capture`가 `sessions.run_stamp`로 스탬프를 정하고 **현재 run 포인터**(저장소 `op_current_run` — `python3 db.py show op_current_run`)를
   써 둔다. 뒤 단계 도구(`theses.py`·`market_map.py`·`scenarios.py`·`journal.py`·`universe_review.py`…)는 그 포인터의 세션 날짜로 적는다.
   시각(`ts`)은 그대로 한국 시각이다 — 날짜 칸만 세션 날짜다.
 - 같은 run을 마감 뒤에 이어 가면(작업기록에 `execute`·`no_trade` 표시가 없으면) 포인터가 **그 스탬프를 잇는다** — 다음 거래일로 갈라지지 않는다.
@@ -437,13 +451,14 @@ python3 market_map.py bridge --closed <직전 run의 시장>    # 시장이 다�
 - [ ] **`carry` GATE PASS** — 직전 `scenarios` 판정 · 반대편 회고 · 발화 트리거가 파일에 있는가
 - [ ] **`map` GATE PASS** — 막힌 고리 0 · 슬롯 3개 · 리서치 1건이 실물로 남았는가
 - [ ] **`note` GATE PASS** — `NOTE-LINT OK`(매매 필수 요소 · `[AI]`→`[S번호]`) · 배경 fact-check ②-A·②-B를 띄웠다(판정표는 기다리지 않는다)
-- [ ] **갈래 ① — 배경 ① 합류(`risk_guard` 직전) · 주문 전 판정표 검증(`decide --mode pre` · `TRACK1 RESULT`) · 승인 파일에 `track1`·`note_lint` · 감사는 전파 즉시 최대 5회
+- [ ] **갈래 ① — 배경 ① 합류(`risk_guard` 직전) · 주문 전 판정표 검증(`decide --mode pre` · `TRACK1 RESULT`) · 승인 파일에 `track1`·`note_lint` · 감사는 교정 반영 즉시 최대 5회
       (`decide --mode post` · `TRACK1 POST`) · 결정을 뒤집는 결과는 소급 매도(장중 같은 run · 닫혔으면 다음 run 자동)**
 - [ ] **갈래 ② — 묶음마다 합류 · 감사 최대 두 번(2차 결과로 수정 0) · run을 닫기 전에 결과를 기다렸거나 `미수신`을 적었다**
-- [ ] **`dispatch` 또는 `no_trade` GATE PASS** — 집행하면 전자, 기권하면 후자. **면제 없음** · 미달이면 `deficit_short: false`인가
+- [ ] **`dispatch` 또는 `no_trade` GATE PASS** — 집행하면 전자, 기권하면 후자. **면제 없음** · `deficit_short`·`undersized_short`·`factor_short`가 false인가
 - [ ] **`execute` GATE PASS** — 전송했으면 필수. 접수·체결·취소·만료를 구분해 보고했고 **미확정 0건**인가(살아 있는 주문 재전송 0건 · 재발주는 취소 확정 뒤에만). **승인 초과 0건**이거나 사고(`INC-…`)가 기록·보고됐는가 — 같은 approved 재호출은 멱등이다
 - [ ] **보고의 근거가 산출 파일과 게이트 토큰인가** — 기억으로 쓴 문장 0
 - [ ] **보고 끝에 〈계좌 현황〉 블록이 있는가** — `account_status.py --refresh` 출력 그대로(주식:현금 비율 · 수익률 · 합산 투자비중 vs 목표). 기권·장외 run도 예외 없음
+- [ ] **`stage.py close`가 `REFS OK`를 찍었는가** — 노트·시그널이 가리키는 사실이 전부 있고 출처·인용·기준일이 찼다(`REFS FAIL`이면 보고 맨 앞)
 - [ ] **규칙을 폐지했으면 셋을 같이 고쳤는가** — ① 문서 ② 봉인 루브릭 ③ `req_audit` 금지 앵커(`NOT:`).
       셋 중 하나가 빠지면 **게이트가 죽은 규칙을 계속 집행한다**. *실사례(2026-09-23): 09-22에 폐지한 이벤트 절반
       규칙을 `dispatch` 게이트가 계속 물어, run이 답할 수 없는 항목에 "해당 없음"을 적어야 했다.*
@@ -475,8 +490,10 @@ python3 market_map.py bridge --closed <직전 run의 시장>    # 시장이 다�
 - 횡단 규격: `references/theses_levels.md` (논지 원장 · 기저율 · 가격 기준)
 - 요구 대조: `req_audit.py` — 사용자가 말한 요구 전건이 문서에 있고 게이트가 검문하는지
   기계 검사(**건수는 로스터가 정한다** — 여기 숫자를 적으면 요구가 늘 때마다 이 문서가 낡는다)
-- 단계 드라이버: `stage.py market|capture|carry|map|stamp` — 시장 선택 · 각 단계의 산출 파일과 노트 뼈대 · 스탬프
-- 배분 원장: `allocation.py prev|record|show` — 주식 비율·국면·현금 명분·예약의 **이어받는 판단**(`journal/allocation.jsonl`)
+- 단계 드라이버: `stage.py market|capture|carry|map|render-note|close|stamp` — 시장 선택 · 각 단계의 산출 파일과 노트 뼈대 · 노트 렌더(`{{F-id}}`·§12·§3) · 마감 · 스탬프
+- **사실 저장소: `facts.py add|mention|known|reuse|queue|render-claims|verdict|lint|render-verdict|correct|check|check-refs|decide`** — 조사 결과는
+  종류별 행(`kind` + 필수 칸)으로만 들어가고 노트·판정표·§12는 그 렌더본이다. 저장소 `journal/trading.db`는 `db.py`만 연다(`db.py show|import`)
+- 배분 원장: `allocation.py prev|record|show` — 주식 비율·국면·현금 명분·예약의 **이어받는 판단**(저장소 `jd_allocation`)
 - 논지 다리: `theses.py fire --id <논지> --trigger <x3> --note "…"` — 집행된 다리를 소진 표시(평소엔 `fill.py`가 자동)
 - 실행 시간 계측: `sessions.py timing` — run·단계 소요와 읽은 분량(재료·이어받기·도구 KB)
 - **누적 코퍼스: `corpus.py index|search`** — 프로젝트가 **이미 가진** 자료를 뒤진다.
@@ -489,13 +506,13 @@ python3 market_map.py bridge --closed <직전 run의 시장>    # 시장이 다�
 - **무인 운영자: `run_auto.py`** — 정규 슬롯에서 이 파이프라인을 부르는 쪽. 소유권 경계는
   위 〈무인 운영자는 `run_auto.py`다〉. **이 스킬을 고치면 그 프롬프트도 같이 본다**
 
-- 시장 지도·일정: `market_map.py`(show/calendar/gaps/add-axis/add-event) · `journal/market_map.json`·`calendar.json`
-- 논지 원장: `theses.py`(list/check/add/set-status/set-trigger) · 저장소 `journal/theses.json`
-- 휴장·사고 기록: `config/holidays.json`(거래소 휴장 — `kis_client.is_holiday`, 매년 12월 갱신) ·
-  `journal/incidents.jsonl`(승인 초과 사고 `INC-…` — `fill.finalize`가 자동 기록)
+- 시장 지도·일정: `market_map.py`(show/calendar/gaps/add-axis/add-event) · `journal/market_map.json`(저장소 렌더본 · 읽기 전용) · 일정은 저장소 `cal_event`(`market_map.py calendar`)
+- 논지 원장: `theses.py`(list/check/add/set-status/set-trigger) · 저장소 표 `jd_thesis`·`jd_thesis_leg`
+- 휴장·사고 기록: `config/holidays.json`(거래소 휴장 — `kis_client.is_holiday`, 매년 12월 갱신 · 저장소 사본 `mk_holiday`로 동기화 · 캡처가 커버리지 줄을 찍는다) ·
+  저장소 `op_incident`(승인 초과 사고 `INC-…` — `fill.finalize`가 자동 기록)
 - **체결 확정: `fill.py`** — 접수된 주문을 체결·취소·만료로 확정(살아 있는 주문 재전송 없음 · 취소 확정 뒤 최신가 재발주 1회) · **장중 감시: `stops.py`** — run 사이 손절·목표
 - **링크 본문: `fetch.py <url>`** — WebFetch가 막히는 곳(네이버·DART)과 **PDF**(본문 추출 · 막히면 아카이브 사본 ·
-  열기 기록 `journal/fetch_log.jsonl`) · 스탬프: `stage.py stamp`
+  열기 기록 저장소 `op_fetch` · DART 공시는 목차 절마다 · `--section`) · 스탬프: `stage.py stamp`
 - **아쉬움 감사: `regret.py`** — 창 안 저점→고점 최대 상승폭으로 놓친 급등을 세고 '막은 것'을 유형으로 가른다 ·
   메인 종목 `main_names.py --refresh`(시총 상위 국내·미국 각 30 — 브로커 시가총액으로 순위, 분기마다 갱신)
 - 유니버스 검토: `universe_review.py`(커버리지) · `universe_apply.py`(규칙 검증 후 자동 반영)

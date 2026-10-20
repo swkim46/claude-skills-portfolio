@@ -25,31 +25,17 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import db
+
 HERE = Path(__file__).resolve().parent
-JOURNAL_DIR = HERE / "journal"
 KST = timezone(timedelta(hours=9))
 
 NO_CASH_REASON = ("", "없음", "none", "n/a", "-")
 
 
-def _ledger() -> Path:
-    return JOURNAL_DIR / "allocation.jsonl"
-
-
 def rows() -> list:
-    p = _ledger()
-    if not p.exists():
-        return []
-    out = []
-    for ln in p.read_text(encoding="utf-8").splitlines():
-        ln = ln.strip()
-        if not ln:
-            continue
-        try:
-            out.append(json.loads(ln))
-        except json.JSONDecodeError:
-            continue
-    return out
+    """배분 원장(저장소 jd_allocation) 전 행 — 기록 순서."""
+    return db.allocation_rows()
 
 
 def last(exclude_id: str = None) -> dict:
@@ -153,10 +139,7 @@ def default_reserved(market: str, equity_by_market: dict, theses: list = None,
     ③ `check: judge` 칸 — "지금 산다"는 판단 칸은 가격을 기다리는 사다리가 아니다(사지 않았으면 기다릴 돈도 없다)
     ④ 만기(`expires`)가 지난 논지."""
     if theses is None:
-        try:
-            theses = json.loads((JOURNAL_DIR / "theses.json").read_text(encoding="utf-8")).get("theses") or []
-        except (OSError, json.JSONDecodeError):
-            theses = []
+        theses = db.theses_all()
     buying = {str(x) for x in (buying or ())}
     today = today or datetime.now(KST).date().isoformat()
     out = []
@@ -173,7 +156,7 @@ def default_reserved(market: str, equity_by_market: dict, theses: list = None,
         if eq <= 0:
             continue
         rungs = [r for r in (t.get("entry_triggers") or []) if isinstance(r, dict)]
-        nxt = next((r for r in rungs if not r.get("fired")), None)
+        nxt = next((r for r in rungs if not (r.get("fired") or r.get("fired_at"))), None)   # 안 산 칸 = 체결 표시·시각이 없는 칸
         if not nxt or str(nxt.get("check") or "").strip().lower() == "judge":
             continue
         pct = float(nxt.get("size_pct") or 0)
@@ -221,10 +204,10 @@ def record(approved: dict, approved_ref: str = "") -> dict:
            "reserved": al.get("reserved") or [], "change": al.get("change"), "market_share": al.get("market_share"),
            "gap_pct": al.get("gap_pct"), "deployable": al.get("deployable"),
            "recorded_at": datetime.now(KST).isoformat(), "approved_ref": approved_ref}
-    rs = [r for r in rows() if r.get("id") != row["id"]]
-    rs.append(row)
-    JOURNAL_DIR.mkdir(parents=True, exist_ok=True)
-    _ledger().write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rs), encoding="utf-8")
+    # 같은 id는 지우고 끝에 다시 넣는다 — 옛 원장처럼 재실행한 run의 행이 `last()`(가장 최근 판단)가 된다. 한 트랜잭션.
+    with db.tx():
+        db.STORES["allocation"].delete(row["id"])
+        db.allocation_record(row)
     return row
 
 

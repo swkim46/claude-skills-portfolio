@@ -30,9 +30,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import db  # noqa: E402 — 아쉬움 기록(op_regret)·유니버스·시총 상위·논지·후보 대기는 저장소에서 읽는다
+
 KST = timezone(timedelta(hours=9))
-LEDGER = HERE / "journal" / "regret.jsonl"
-MAIN_NAMES = HERE / "config" / "main_names.json"
 MOVE_PCT = 8.0                      # 창 안 저점→고점 최대 상승폭 이 이상이면 '크게 움직였다'
 LOOKBACK_DAYS = 5                   # 매 run 창(거래일). 주간 피드백은 20을 넘긴다
 TINY_POS_PCT = 2.0                  # 보유 평가액이 그 시장 자산의 이 % 미만이면 '극소 크기'
@@ -51,10 +52,16 @@ TYPE_KO = {
 
 
 def _j(p, default=None):
+    """run 파일(스냅샷·승인·거래 기록) 읽기 — 원장은 저장소(db)에서 읽는다."""
     try:
         return json.loads(Path(p).read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return default
+
+
+def _universe(market: str) -> list:
+    """감시 목록(유니버스) 행 — dim_company(in_watchlist)."""
+    return db.companies(market.upper())
 
 
 def _st(d: str) -> str:
@@ -69,10 +76,14 @@ def _prev_stamp(stamp: str, days: int) -> str:
 
 
 def snapshots(market: str) -> list:
+    """그 시장 스냅샷 [(스탬프, 내용)] — 지금 계좌 계열의 것만(2026-10-19 · Codex R07 · 모의 보유가 실계좌 아쉬움 비중에 섞이지 않게)."""
+    import portfolio
+    from kis_client import acct_family
+    fam = acct_family()
     out = []
     for f in sorted(glob.glob(str(HERE / "data" / f"snapshot_2*_{market}.json"))):
         m = re.search(r"snapshot_(\d{6})_", f)
-        if m and (d := _j(f)):
+        if m and (d := _j(f)) and portfolio.file_family(d) == fam:
             out.append((m.group(1), d))
     return out
 
@@ -109,8 +120,7 @@ def moves(market: str, stamp: str, lookback: int = LOOKBACK_DAYS) -> list:
     snaps = [(s, d) for s, d in snapshots(market) if s <= stamp][-(lookback + 1):]
     if len(snaps) < 2:
         return []
-    wl = _j(HERE / "config" / "watchlist.json", {}) or {}
-    names = {r["ticker"]: r.get("name", "") for r in (wl.get(market.upper()) or [])}
+    names = {r["ticker"]: r.get("name", "") for r in _universe(market)}
     series = {}
     for s, d in snaps:
         for tk, v in (d.get("prices") or {}).items():
@@ -141,7 +151,7 @@ def watch_names(market: str) -> dict:
         if src not in r["src"]:
             r["src"].append(src)
 
-    for r in ((_j(HERE / "config" / "watchlist.json", {}) or {}).get(mk) or []):
+    for r in _universe(mk):
         put(r.get("ticker"), r.get("name"), r.get("excd"), "universe")
     _, by_id = mm.axes_index()
     for a in by_id.values():
@@ -149,26 +159,30 @@ def watch_names(market: str) -> dict:
             tk = str(n.get("ticker") or "").strip()
             if tk and mm._market_of(tk) == mk:
                 put(tk, n.get("name"), n.get("excd"), "map")
-    for r in ((_j(MAIN_NAMES, {}) or {}).get(mk) or []):
+    for r in db.main_names(mk):                           # 시총 상위 — dim_company.main_rank
         put(r.get("ticker"), r.get("name"), r.get("excd"), "main")
     return out
 
 
 def daily_rows(client, ticker: str, market: str, excd: str, end: str, days: int) -> list:
-    """일봉 `days+1`행(날짜 오름차순). 미국은 시세용 거래소 코드로 묻고, 비면 나머지 두 곳도 묻는다."""
+    """일봉 `days+1`행(날짜 오름차순). 미국은 시세용 거래소 코드로 묻고, 비면 나머지 두 곳도 묻는다.
+    일봉은 저장소(mk_bar)를 거친다 — 같은 run의 가격 수준·기저율과 같은 조회 키로 묻는다(국내 150일 창 · 미국은 끝 날짜가
+    오늘 이후면 기준일 없이). 반환은 원래 구간 그대로다(아래에서 끝 날짜·행 수로 자른다)."""
     from kis_client import KisError, quote_excd
+    from base_rates import kr_daily
     end_d = datetime.strptime("20" + end, "%Y%m%d")
     endS = end_d.strftime("%Y%m%d")
     rows = []
     if market.upper() == "KR":
         start = end_d - timedelta(days=days * 2 + 12)
-        rows = client.domestic_daily(ticker, start.strftime("%Y%m%d"), endS)
+        rows = kr_daily(client, ticker, start.strftime("%Y%m%d"), endS)
     else:
+        bymd = endS          # 기준일 정리(마지막 닫힌 세션 이후 = 최신 조회 · 동부 날짜)는 db.overseas_daily가 한다(옛 한국 날짜 비교 제거 · U04)
         first = (excd or "NASD").upper()
         first = first if first in ORDER_CODES else {"NAS": "NASD", "NYS": "NYSE", "AMS": "AMEX"}.get(first, "NASD")
         for ex in [first] + [e for e in ORDER_CODES if e != first]:
             try:
-                rows = client.overseas_daily(ticker, quote_excd(ex), endS)
+                rows = db.overseas_daily(client, ticker, excd=quote_excd(ex), bymd=bymd)
             except KisError:
                 rows = []
             if rows:
@@ -183,7 +197,7 @@ def moves_fetch(market: str, stamp: str, days: int = LOOKBACK_DAYS, errors: list
     sys.path.insert(0, str(HERE))
     from kis_client import KisClient, KisError
     c = client or KisClient.for_mode()
-    uni = {r["ticker"] for r in ((_j(HERE / "config" / "watchlist.json", {}) or {}).get(market.upper()) or [])}
+    uni = {r["ticker"] for r in _universe(market)}
     out = []
     for tk, info in watch_names(market).items():
         try:
@@ -249,10 +263,10 @@ class Ctx:
                     self.materials.append((m.group(1), Path(f).read_text(encoding="utf-8", errors="ignore")))
                 except OSError:
                     pass
-        self.theses = (_j(HERE / "journal" / "theses.json", {}) or {}).get("theses") or []
+        self.theses = db.theses_all()
         self.snaps = [(s, d) for s, d in snapshots(market) if s <= stamp]
-        self.pending = _j(HERE / "journal" / "universe_pending.json", {}) or {}
-        self.uni = {r["ticker"] for r in ((_j(HERE / "config" / "watchlist.json", {}) or {}).get(market.upper()) or [])}
+        self.pending = db.pending_load()                     # 편입 후보 대기(op_pending)
+        self.uni = {r["ticker"] for r in _universe(market)}
 
 
 # 티커가 금융 일반 낱말과 같은 종목 — 일반 낱말로 쓰인 **문맥만 지우고** 나머지는 티커로 센다.
@@ -265,7 +279,8 @@ def _mentions(text: str, ticker: str, name: str) -> bool:
     if ticker in AMBIGUOUS_TICKERS:
         text = re.sub(AMBIGUOUS_TICKERS[ticker], " ", text)
     if re.fullmatch(r"\d{6}", ticker):
-        hit = ticker in text
+        # 가격 숫자(`price >= 322000` · `1,322,000`)를 종목 코드로 세지 않는다 — 앞뒤가 숫자·쉼표·점이 아니고 비교 기호 바로 뒤가 아닐 때만
+        hit = re.search(rf"(?<![\d,.])(?<![<>=]\s)(?<![<>=]){ticker}(?![\d,.])", text) is not None
     else:
         hit = re.search(rf"(?<![A-Za-z]){re.escape(ticker)}(?![A-Za-z])", text) is not None
     return hit or (len(name or "") >= 2 and name in text)
@@ -513,23 +528,14 @@ def render(rows: list, market: str, stamp: str, days: int = LOOKBACK_DAYS, thres
 
 
 def record(rows: list) -> None:
-    LEDGER.parent.mkdir(parents=True, exist_ok=True)
-    with LEDGER.open("a", encoding="utf-8") as f:
+    """급등 행을 아쉬움 기록(op_regret · 추가만)에 적재한다."""
+    with db.tx():
         for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            db.log_append("regret", r)
 
 
 def load_ledger(since: str = "") -> list:
-    rows = []
-    if LEDGER.exists():
-        for line in LEDGER.read_text(encoding="utf-8").splitlines():
-            try:
-                r = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if r.get("stamp", "") >= since:
-                rows.append(r)
-    return rows
+    return [r for r in db.log_rows("regret") if r.get("stamp", "") >= since]
 
 
 def weekly(days: int) -> str:
@@ -569,7 +575,7 @@ def main() -> int:
     ap.add_argument("--threshold", type=float, default=MOVE_PCT)
     ap.add_argument("--days", type=int, default=None, help=f"창 길이(거래일, 기본 {LOOKBACK_DAYS}) · --weekly면 집계 기간(일, 기본 7)")
     ap.add_argument("--out", default="")
-    ap.add_argument("--record", action="store_true", help="journal/regret.jsonl에 적재")
+    ap.add_argument("--record", action="store_true", help="아쉬움 기록(저장소 op_regret)에 적재")
     ap.add_argument("--fetch", action="store_true", help="KIS 일봉(고가 포함) — 유니버스 밖 축 종목·시총 상위 포함")
     ap.add_argument("--weekly", action="store_true")
     a = ap.parse_args()

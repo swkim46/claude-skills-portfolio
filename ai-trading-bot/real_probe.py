@@ -23,6 +23,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import db
 from kis_client import (KisClient, KisError, market_session, us_daytime_session, orderable_from_psamount,
                         kr_cash_from_margin, account_mode)
 
@@ -120,6 +121,39 @@ def verdicts(raw: dict, expect_krw: float = None) -> list:
     return rows
 
 
+def probe_balances(raw: dict) -> dict:
+    """조회 묶음 원본 → 시장별 잔고 요약 {kr, us} — 저장소 잔고 스냅샷(ex_balance phase='probe')에 남길 칸만.
+    계좌 번호는 담지 않는다."""
+    def num(v):
+        try:
+            return float(v) if v not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+    kb = raw.get("kr_balance") or {}
+    s2 = _out(kb, "output2")
+    im = _out(raw.get("intgr_margin") or {})
+    pool = kr_cash_from_margin(im) if im else None
+    itgr = bool(str(im.get("ovrs_stck_itgr_mgna_dvsn_name") or "").strip())
+    ps = raw.get("us_psamount") or {}
+    o = orderable_from_psamount(_out(ps), "real")
+    return {
+        "kr": {"cash": num(s2.get("dnca_tot_amt")), "cash_field": "dnca_tot_amt", "equity": num(s2.get("tot_evlu_amt")),
+               "orderable": (pool or {}).get("cash"), "orderable_field": (pool or {}).get("field"), "cash_shared": itgr,
+               "positions": len(kb.get("output1") or []), "currency": "KRW", "rt_cd": kb.get("rt_cd"), "msg_cd": kb.get("msg_cd")},
+        "us": {"buying_power": o["orderable_cash"], "cash_field": o["field"], "exchange_rate": o["exchange_rate"],
+               "max_qty": o["max_qty"], "cash_shared": o["shared"], "currency": "USD", "rt_cd": ps.get("rt_cd"),
+               "msg_cd": ps.get("msg_cd")},
+    }
+
+
+def record_balances(stamp: str, raw_real: dict, at: str = None) -> int:
+    """실계좌 잔고 요약을 저장소 잔고 스냅샷으로 남긴다(ex_balance · phase='probe' · 시장마다 한 행). 반환 쓴 행 수."""
+    with db.tx():
+        for m, bal in probe_balances(raw_real).items():
+            db.balance_put(stamp, m, "probe", bal, at=at)
+    return 2
+
+
 def shadow(stamp: str, market: str, quiet: bool = True) -> dict:
     """모의 시그널을 실계좌 잔고·실계좌 규칙으로 risk_guard에 다시 넣는다(주문·원장 쓰기 없음). 반환 요약 dict."""
     import contextlib
@@ -137,7 +171,7 @@ def shadow(stamp: str, market: str, quiet: bool = True) -> dict:
         return {"ok": False, "why": f"시그널 없음 — {sig_path.name}"}
     now = datetime.now(KST)
     real = KisClient(svr="real", allow_real=True, read_only=True)
-    wl = json.loads((HERE / "config" / "watchlist.json").read_text(encoding="utf-8"))
+    wl = db.watchlist_doc()                               # 유니버스(dim_company) — 옛 config/watchlist.json 모양
     kb = real.domestic_balance()
     ub = real.overseas_balance()
     bp = us_buying_power(real, wl)
@@ -286,6 +320,8 @@ def main() -> int:
         mp.write_text(prev.rstrip() + "\n\n---\n\n" + "\n".join(L) + "\n", encoding="utf-8")
     else:
         mp.write_text("\n".join(L) + "\n", encoding="utf-8")
+    # 실계좌 잔고 요약을 저장소 잔고 스냅샷으로도 남긴다(phase='probe') — 파일 두 개(원본·판정)는 그대로 run 증거다
+    record_balances(a.stamp, raw["real"], now.isoformat())
     print("\n".join(L))
     return 0 if not bad else 1
 

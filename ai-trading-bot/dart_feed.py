@@ -9,7 +9,8 @@ DART 공시 피드 — 국내 종목의 최근 공시를 재료에 붙인다.
 '못 찾음'과 '없음'을 구분하는 것은 이 프로젝트 전체의 규율이다.
 
 corp_code(고유번호)는 종목코드와 다르다. 전체 목록이 zip으로만 제공되므로 1회 받아
-watchlist 종목만 추려 config/dart_corp_codes.json에 캐시한다.
+감시 목록(저장소 dim_company) 국내 종목만 추려 config/dart_corp_codes.json에 캐시한다.
+run이 받은 공시는 재료 층 `mat_dart`(접수번호 한 행)에 남는다 — 재료 md의 공시 절은 같은 결과의 렌더다.
 
 사용:
     python3 dart_feed.py --refresh-codes     # corp_code 캐시 생성/갱신
@@ -18,6 +19,7 @@ watchlist 종목만 추려 config/dart_corp_codes.json에 캐시한다.
 import argparse
 import io
 import json
+import sqlite3
 import sys
 import urllib.error
 import urllib.parse
@@ -27,10 +29,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from xml.etree import ElementTree
 
+import db
+
 HERE = Path(__file__).parent
 CONFIG_DIR = HERE / "config"
 CODES_PATH = CONFIG_DIR / "dart_corp_codes.json"
-WATCHLIST_PATH = CONFIG_DIR / "watchlist.json"
 ENV_CANDIDATES = [HERE / ".env", HERE.parent / ".env"]
 
 KST = timezone(timedelta(hours=9))
@@ -79,8 +82,7 @@ def refresh_codes(key: str, scope: str = "universe") -> dict:
     if scope == "all":
         wanted = None
     else:
-        watchlist = json.loads(WATCHLIST_PATH.read_text(encoding="utf-8"))
-        wanted = {e["ticker"]: e.get("name", "") for e in watchlist.get("KR", []) if e.get("ticker")}
+        wanted = {e["ticker"]: e.get("name", "") for e in db.companies("KR") if e.get("ticker")}
         if not wanted:
             print("watchlist KR이 비어 있다 — 캐시할 것이 없다.", file=sys.stderr)
             return {}
@@ -169,8 +171,31 @@ def load_codes() -> dict:
 
 # ------------------------------------------------------------------ 공시 조회
 
-def recent_filings(tickers: list, days: int = 3) -> dict:
-    """반환: {status, filings:[...], skipped_reason, errors}. 키 없으면 skipped."""
+def store_filings(rows: list, stamp: str, market: str = "kr") -> int:
+    """받은 공시를 재료 층 `mat_dart`에 넣는다(접수번호가 키 — 같은 공시는 한 행). `run_id`는 **처음 받은 run**을 남기고,
+    제목·접수일·주소는 새로 받은 값으로 맞춘다(정정 공시가 같은 번호로 제목만 바뀌는 일이 있다). 반환 새로 넣은 행 수."""
+    if not rows:
+        return 0
+    rid = db.run_id(stamp, market) if stamp else None
+    n = 0
+    with db.tx() as c:
+        for r in rows:
+            if not r.get("rcp_no"):
+                continue
+            n += c.execute("SELECT 1 FROM mat_dart WHERE rcp_no=?", (r["rcp_no"],)).fetchone() is None
+            c.execute("INSERT INTO mat_dart (rcp_no, corp_code, ticker, report_nm, rcept_dt, url, fetched, raw_path, kind, run_id,"
+                      " corp_name, filer) VALUES (?,?,?,?,?,?,0,NULL,NULL,?,?,?) ON CONFLICT(rcp_no) DO UPDATE SET"
+                      " corp_code=excluded.corp_code, ticker=excluded.ticker, report_nm=excluded.report_nm,"
+                      " rcept_dt=excluded.rcept_dt, url=excluded.url, corp_name=excluded.corp_name, filer=excluded.filer,"
+                      " run_id=COALESCE(mat_dart.run_id, excluded.run_id)",
+                      (r["rcp_no"], r.get("corp_code"), r.get("ticker"), r.get("report_nm"), r.get("rcept_dt"),
+                       r.get("url"), rid, r.get("corp_name"), r.get("filer")))
+    return n
+
+
+def recent_filings(tickers: list, days: int = 3, stamp: str = "", market: str = "kr") -> dict:
+    """반환: {status, filings:[...], skipped_reason, errors}. 키 없으면 skipped.
+    `stamp`를 주면(재료 수집 run) 받은 공시를 `mat_dart`에 남긴다 — 반환 모양은 그대로다."""
     key = api_key()
     if not key:
         return {"status": "skipped", "filings": [],
@@ -186,7 +211,7 @@ def recent_filings(tickers: list, days: int = 3) -> dict:
 
     end = datetime.now(KST)
     begin = end - timedelta(days=days)
-    filings, errors = [], {}
+    filings, errors, rows = [], {}, []
 
     fallback = None
     for ticker in tickers:
@@ -230,8 +255,17 @@ def recent_filings(tickers: list, days: int = 3) -> dict:
                 "filer": item.get("flr_nm", ""),
                 "url": VIEWER + (item.get("rcept_no", "") or ""),
             })
+            rows.append({"rcp_no": item.get("rcept_no") or "", "corp_code": meta.get("corp_code"), "ticker": ticker,
+                         "report_nm": (item.get("report_nm", "") or "").strip(), "rcept_dt": item.get("rcept_dt", ""),
+                         "url": VIEWER + (item.get("rcept_no", "") or ""),
+                         "corp_name": item.get("corp_name", meta.get("corp_name", "")), "filer": item.get("flr_nm", "")})
 
     filings.sort(key=lambda f: (f["date"], f["ticker"]), reverse=True)
+    if stamp:
+        try:
+            store_filings(rows, stamp, market)
+        except sqlite3.Error as e:                # 저장소 기록 실패가 공시 조회 결과(재료)를 막지 않는다
+            print(f"★ 공시 목록을 저장소에 못 넣었다({type(e).__name__}: {e})", file=sys.stderr)
     # ★ 전 종목이 실패했는데 `status: ok` + `filings: []`를 돌려주면, 읽는 쪽은
     #   **'공시가 없었다'로 읽는다.** 실패를 데이터 없음으로 바꾸는 전형적인 자리다.
     #   요청한 종목 전부가 실패했으면 그것은 빈 결과가 아니라 **실패**다.
@@ -292,8 +326,7 @@ def main() -> int:
         refresh_codes(key)
         return 0
 
-    watchlist = json.loads(WATCHLIST_PATH.read_text(encoding="utf-8"))
-    tickers = [e["ticker"] for e in watchlist.get("KR", []) if e.get("ticker")]
+    tickers = [e["ticker"] for e in db.companies("KR") if e.get("ticker")]
     print(to_markdown(recent_filings(tickers, args.days)))
     return 0
 

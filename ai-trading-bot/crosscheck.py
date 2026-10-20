@@ -19,6 +19,10 @@
         --out data/run_evidence/crosscheck_260910_kr.md
 
 종료코드 0=대조 실패 0건 · 1=실패 있음 · 2=대조 자체를 못 함(입력 없음).
+
+원장(지도·논지·일정·접속 기록·사실·재료 언급)은 저장소(`db.py`)에서 읽는다(2026-10-17) — 리서치 확장은 이번 run이 `facts.py add`로
+세운 사실(ex_run.facts_new·facts_repeat), 되풀이는 사실의 repeat 칸, §3 보드 전수는 재료 언급(mat_mention: 발행분 × 섹터).
+섹터 합본(`analysis/섹터_*.md`)은 2026-10-17부터 만들지 않는다 — 그 항목 줄은 '해당 없음'으로 남긴다(게이트가 줄을 센다).
 """
 from __future__ import annotations
 
@@ -32,6 +36,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+import db  # noqa: E402
+
 KST = timezone(timedelta(hours=9))
 OUTLIERS_N = 3          # 상·하위 몇 종목까지 "다뤄야 하는가"
 
@@ -103,14 +111,7 @@ def check_prev_carried(market: str, stamp: str, note: str) -> list:
         return [("직전 run 산출 반영", True, "직전 run이 없다 — 이어받을 것이 없다")]
     pst = pv["session_date"][2:].replace("-", "")
     rows = []
-
-    def _j(name):
-        try:
-            return json.loads((HERE / "journal" / name).read_text(encoding="utf-8")) or {}
-        except (json.JSONDecodeError, OSError):
-            return {}
-
-    axes = [a for a in _j("market_map.json").get("axes", [])
+    axes = [a for a in db.market_map_load().get("axes") or []
             if str(a.get("updated") or "").replace("-", "")[2:] == pst]
     if axes:
         miss = [a["id"] for a in axes
@@ -120,7 +121,7 @@ def check_prev_carried(market: str, stamp: str, note: str) -> list:
                      f"**등장하지 않은 축 {len(miss)}개**: {', '.join(miss)} — "
                      f"직전 run({pv['market'].upper()} {pv['session_date']})이 세운 축이 "
                      f"오늘 노트에 한 번도 안 나온다. 조사가 하루 만에 버려진 것이다"))
-    evs = [e for e in _j("calendar.json").get("events", [])
+    evs = [e for e in db.calendar_all()
            if str(e.get("added") or "").replace("-", "")[2:] == pst]
     if evs:
         miss = [e["event"] for e in evs if str(e.get("event"))[:14] not in note]
@@ -323,18 +324,114 @@ def check_cycle(note: str) -> list:
 
 
 def check_research_is_today(market: str, stamp: str) -> list:
-    """리서치 파일이 **이번 run이 만든 것**인가 — 어제 파일이 오늘 근거가 되면 안 된다."""
-    files = sorted((HERE / "analysis").glob(f"섹터_*_{stamp}_*.md"))
-    return [(f"오늘자 섹터 리서치({stamp})", bool(files),
-             ", ".join(p.name for p in files) if files else
-             "**이번 run 날짜의 `analysis/섹터_*.md`가 없다** — 리서치가 파일로 안 남았다")]
+    """(2026-10-17 중단) 섹터 합본 파일(`analysis/섹터_*.md`)은 더 만들지 않는다 — 리서치는 저장소 사실(`facts.py add`)과
+    갈래 파일(`data/run_evidence/research_branch*`)로 남는다. 항목 줄은 게이트가 세므로 '해당 없음'으로 남긴다."""
+    return [(f"오늘자 섹터 리서치({stamp})", True, "해당 없음(2026-10-17 중단)")]
 
 
 EXPANSION_HEAD = "## 재료 확장"
 
 
+def _research_files(market: str, stamp: str) -> list:
+    """이번 run 리서치 파일 — 갈래 파일(`data/run_evidence/research_branch*_<st>_<mkt>.md`) + 옛 섹터 합본(있으면 · 중단 전 run)."""
+    return sorted({*(HERE / "data" / "run_evidence").glob(f"research_branch*_{stamp}_{market}*.md"),
+                   *(HERE / "analysis").glob(f"섹터_*_{stamp}_*.md")})
+
+
+def _run_facts(market: str, stamp: str) -> tuple:
+    """이번 run이 세운 조사 사실 — (리서치 신규[행], 되풀이[행], 재사용 수, 재료에서 꺼낸 행 수). 도구 사실(origin=tool)은 세지 않는다.
+    재료에서 꺼낸 사실(origin issue·link·ws_event·dart)은 뉴스레터·공시가 이미 준 것이라 확장이 아니다 — 따로 센다."""
+    rid = db.run_id(stamp, market)
+    rows = db.q("SELECT f.id, f.url, f.repeat, f.created_run, f.origin FROM ev_fact_run r JOIN ev_fact f ON f.id=r.fact_id"
+                " WHERE r.run_id=? AND COALESCE(f.origin,'')<>'tool'", (rid,))
+    made = [r for r in rows if r["created_run"] == rid]
+    if not rows:                                       # 이번 run에 단 S 번호가 없어도 이번 run이 만든 행은 센다
+        made = db.q("SELECT id, url, repeat, created_run, origin FROM ev_fact WHERE created_run=? AND COALESCE(origin,'')<>'tool'",
+                    (rid,))
+    research = [r for r in made if (r["origin"] or "research") == "research"]
+    new = [r for r in research if not r["repeat"]]
+    rep_ = [r for r in research if r["repeat"]]
+    return new, rep_, len([r for r in rows if r["created_run"] != rid]), len(made) - len(research)
+
+
+def check_research_expansion(market: str, stamp: str) -> list:
+    """**리서치가 재료를 확장했는가.** 이번 run이 `facts.py add`로 세운 사실(ex_run.facts_new · 없으면 사실 표에서 센다) 가운데
+    재료(이번 run 발행분의 링크 mat_link)를 되풀이하지 않은 것이 있어야 한다 — 되풀이는 등록 때 사실의 repeat 칸에 찍힌다.
+    리서치는 출처 확인이 아니라 **더 많은 사실·상황을 아는 것**이다(2026-09-22 사용자) — 확장이 0이면 그 run은 뉴스레터만 읽고 판단한 것이다."""
+    name = "리서치 재료 확장"
+    new, rep_, reused, from_mat = _run_facts(market, stamp)
+    r = db.run_get(stamp, market) or {}
+    n_new, n_rep = len(new), len(rep_)                 # ex_run.facts_new는 재료에서 꺼낸 행까지 센다 — 확장은 리서치 행만
+    if not n_new and not n_rep:
+        return [(name, False, "**이번 run이 세운 리서치 사실이 0건이다**"
+                 + (f"(재료에서 꺼낸 사실 {from_mat}건은 확장이 아니다)" if from_mat else "")
+                 + " — 3단 리서치 결과를 `facts.py add`로 종류별 행으로 등록하라"
+                 "(사실 · 출처(등급 · as-of) · 원문 인용 — 확장 0건은 리서치가 아니다)")]
+    if not n_new:
+        return [(name, False, f"**{n_rep}행 전부 재료에 이미 있는 링크의 되풀이** — 확장이 아니다")]
+    try:
+        import facts as _f
+        norm = _f._norm_url
+    except Exception:                                  # noqa: BLE001
+        norm = str
+    urls = {norm(x["url"]) for x in new if x.get("url")}
+    return [(name, True, f"확장 {n_new}행(되풀이 {n_rep}행 · 재료에서 꺼낸 {from_mat}행 제외) · 새 출처 {len(urls)}건 · 재사용 {r.get('facts_reused') if r.get('facts_reused') is not None else reused}건(저장소 ev_fact)")]
+
+
+def _cites_research(text: str, stems: set, urls: set, ids: set = frozenset()) -> bool:
+    t = text or ""
+    if "재료 확장" in t or "[확장" in t:
+        return True
+    if any(st in t for st in stems):
+        return True
+    if any(i in t for i in ids):
+        return True
+    return any(u in t for u in urls)
+
+
+def check_research_cited(market: str, stamp: str) -> list:
+    """**확장이 판단에 실렸는가.** 이번 run이 새로 세우거나 갱신한 전망(축 `updated`=오늘)·논지(`created`=오늘)가 리서치를
+    인용해야 한다 — 이번 run 사실 id(F-…)·그 URL·리서치 파일명·`재료 확장` 중 하나(논지 근거가 사실 id를 가리키면 그것이 인용이다).
+    인용이 0이면 리서치가 판단에 안 들어간 것이다."""
+    name = "리서치 인용(전망·논지)"
+    today = f"20{stamp[:2]}-{stamp[2:4]}-{stamp[4:6]}"
+    files = _research_files(market, stamp)
+    stems = {f.stem for f in files} | {f.name for f in files}
+    _rows, urls, _n = _expansion_rows(files)
+    new, rep_, _reused, _from_mat = _run_facts(market, stamp)
+    urls |= {x["url"] for x in new if x.get("url")}
+    ids = {x["id"] for x in new + rep_} | {r["fact_id"] for r in db.q("SELECT fact_id FROM ev_fact_run WHERE run_id=?",
+                                                                       (db.run_id(stamp, market),))}
+    uncited, checked = [], 0
+    for ax in db.market_map_load().get("axes") or []:
+        if ax.get("updated") != today and ax.get("opened") != today:
+            continue
+        checked += 1
+        blob = json.dumps({k: ax.get(k) for k in ("thesis", "chain", "origin", "indicators", "beneficiaries", "breaks_if", "research")},
+                          ensure_ascii=False)
+        if not _cites_research(blob, stems, urls, ids):
+            uncited.append(f"전망 {ax.get('id')}")
+    for t in db.theses_all():
+        if not str(t.get("created") or "").startswith(today):
+            continue
+        # 2026-10-14부터 국내·미국 run이 같은 세션 날짜를 쓴다 — 논지는 시장에 속하므로 반대 시장 run이 그날 세운 논지는 이 run 몫이 아니다
+        # (실사례 261019: US run이 KR run의 kr-lowpbr-hana-261019를 '오늘 세운 논지'로 셌다). 전망(축)은 요인 단위라 시장 필터를 걸지 않는다.
+        if str(t.get("market") or "").upper() not in ("", market.upper()):
+            continue
+        checked += 1
+        blob = json.dumps({k: t.get(k) for k in ("thesis", "evidence", "axis_why", "invalidation", "research")}, ensure_ascii=False)
+        if not _cites_research(blob, stems, urls, ids):
+            uncited.append(f"논지 {t.get('id')}")
+    if not checked:
+        return [(name, True, "오늘 새로 세운 전망·논지 없음 — 대조할 것이 없다")]
+    if uncited:
+        return [(name, False, f"**리서치 인용 없음 {len(uncited)}/{checked}**: " + ", ".join(uncited)
+                 + " — 전망 thesis/chain·논지 thesis/evidence에 이번 run 사실 id(F-…)·리서치 파일명 또는 `재료 확장` 행(URL)을 인용하라")]
+    return [(name, True, f"오늘 세운 전망·논지 {checked}건 전부 리서치 인용")]
+
+
 def _expansion_rows(files: list) -> tuple:
-    """리서치 파일들의 `## 재료 확장` 절 → (행 목록, URL 집합, 절이 있는 파일 수)."""
+    """리서치 파일들의 `## 재료 확장` 절 → (행 목록, URL 집합, 절이 있는 파일 수) — 인용 대조용(확장 수는 저장소 사실에서 센다)."""
     rows, urls, n_sec = [], set(), 0
     for f in files:
         txt = f.read_text(encoding="utf-8", errors="ignore")
@@ -353,75 +450,36 @@ def _expansion_rows(files: list) -> tuple:
     return rows, urls, n_sec
 
 
-def check_research_expansion(market: str, stamp: str) -> list:
-    """**리서치가 재료를 확장했는가.** 리서치 파일에 `## 재료 확장 — 뉴스레터에 없던 것` 절이 있고, 그 행이 재료
-    (`material_*.md`)에 이미 있는 링크의 되풀이가 아니어야 한다. 리서치는 출처 확인이 아니라 **더 많은 사실·상황을
-    아는 것**이다(2026-09-22 사용자) — 확장이 0이면 그 run은 뉴스레터만 읽고 판단한 것이다."""
-    name = "리서치 재료 확장"
-    files = sorted((HERE / "analysis").glob(f"섹터_*_{stamp}_*.md"))
-    if not files:
-        return [(name, False, "**오늘자 리서치 파일이 없다** — `analysis/섹터_*_<stamp>_*.md`")]
-    rows, urls, n_sec = _expansion_rows(files)
-    if not n_sec:
-        return [(name, False, f"**`{EXPANSION_HEAD}` 절이 없다** — 뉴스레터에 없던 사실·상황을 행으로 남겨라(사실 · 출처(등급) · 바꾸는 해석)")]
-    if not rows:
-        return [(name, False, f"**`{EXPANSION_HEAD}` 절이 비어 있다** — 확장 0건은 리서치가 아니다")]
-    mat = HERE / "data" / f"material_{stamp}_{market}.md"
-    mtxt = mat.read_text(encoding="utf-8", errors="ignore") if mat.exists() else ""
-    repeated = {u for u in urls if u in mtxt}
-    fresh = [r for r in rows if not any(u in r for u in repeated)]
-    if not fresh:
-        return [(name, False, f"**{len(rows)}행 전부 재료에 이미 있는 링크의 되풀이** — 확장이 아니다")]
-    return [(name, True, f"확장 {len(fresh)}행(되풀이 {len(rows) - len(fresh)}행 제외) · 새 출처 {len(urls - repeated)}건 · 파일 {n_sec}개")]
-
-
-def _cites_research(text: str, stems: set, urls: set) -> bool:
-    t = text or ""
-    if "재료 확장" in t or "[확장" in t:
-        return True
-    if any(st in t for st in stems):
-        return True
-    return any(u in t for u in urls)
-
-
-def check_research_cited(market: str, stamp: str) -> list:
-    """**확장이 판단에 실렸는가.** 이번 run이 새로 세우거나 갱신한 전망(축 `updated`=오늘)·논지(`created`=오늘)가 리서치를
-    인용해야 한다 — 파일명·`재료 확장`·확장 절의 URL 중 하나. 인용이 0이면 리서치가 판단에 안 들어간 것이다."""
-    name = "리서치 인용(전망·논지)"
-    today = f"20{stamp[:2]}-{stamp[2:4]}-{stamp[4:6]}"
-    files = sorted((HERE / "analysis").glob(f"섹터_*_{stamp}_*.md"))
-    stems = {f.stem for f in files} | {f.name for f in files}
-    _rows, urls, _n = _expansion_rows(files)
-    uncited, checked = [], 0
+def check_board_mentions(market: str, stamp: str) -> list:
+    """**§3 섹터 보드가 재료 전수인가**(2026-10-17) — 이번 run 발행분마다 섹터 로스터(1단 보드 기록) 전부에 재료 언급 행(mat_mention)이
+    있어야 한다. 다루지 않은 섹터도 '해당 없음' 행으로 남긴다(누락을 침묵이 아니라 행으로 · `facts.py mention`의 섹터 '*' 한 행)."""
+    name = "§3 섹터 보드 전수(재료 언급)"
+    rid = db.run_id(stamp, market)
+    issues = db.material_issues_for_run(rid) or [r["id"] for r in db.q(
+        "SELECT id FROM mat_issue WHERE run_id=? OR first_run=? ORDER BY id", (rid, rid))]
+    if not issues:
+        return [(name, True, "이번 run 재료 발행분 0통 — 대조할 것이 없다")]
     try:
-        m = json.loads((HERE / "journal" / "market_map.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        m = {}
-    for ax in m.get("axes") or []:
-        if ax.get("updated") != today and ax.get("opened") != today:
-            continue
-        checked += 1
-        blob = json.dumps({k: ax.get(k) for k in ("thesis", "chain", "origin", "indicators", "beneficiaries", "breaks_if", "research")},
-                          ensure_ascii=False)
-        if not _cites_research(blob, stems, urls):
-            uncited.append(f"전망 {ax.get('id')}")
-    try:
-        th = json.loads((HERE / "journal" / "theses.json").read_text(encoding="utf-8")).get("theses") or []
-    except (OSError, json.JSONDecodeError):
-        th = []
-    for t in th:
-        if not str(t.get("created") or "").startswith(today):
-            continue
-        checked += 1
-        blob = json.dumps({k: t.get(k) for k in ("thesis", "evidence", "axis_why", "invalidation", "research")}, ensure_ascii=False)
-        if not _cites_research(blob, stems, urls):
-            uncited.append(f"논지 {t.get('id')}")
-    if not checked:
-        return [(name, True, "오늘 새로 세운 전망·논지 없음 — 대조할 것이 없다")]
-    if uncited:
-        return [(name, False, f"**리서치 인용 없음 {len(uncited)}/{checked}**: " + ", ".join(uncited)
-                 + " — 전망 thesis/chain·논지 thesis/evidence에 리서치 파일명 또는 `재료 확장` 행(URL)을 인용하라")]
-    return [(name, True, f"오늘 세운 전망·논지 {checked}건 전부 리서치 인용")]
+        import facts as _f
+        roster = _f.board_roster(stamp, market)[0]
+        ments = _f.board_mentions(stamp, market, roster)
+    except Exception as e:                             # noqa: BLE001
+        return [(name, False, f"재료 언급을 못 읽었다 — {type(e).__name__}: {e}")]
+    if not roster:
+        return [(name, False, "**섹터 로스터가 없다** — 1단 capture가 이 세션 보드를 적재하지 않았다(--no-record?)")]
+    have = {(m.get("eff_issue"), code) for code, ms in ments.items() for m in ms}   # 링크 언급은 그 링크의 발행분으로
+    miss = {}
+    for iid in issues:
+        gap = [r["name"] for r in roster if (iid, r["key"]) not in have]
+        if gap:
+            miss[iid] = gap
+    n_m = sum(len(ms) for ms in ments.values())
+    if not miss:
+        return [(name, True, f"발행분 {len(issues)}통 × 섹터 {len(roster)}개 전부 행 있음(언급 행 {n_m})")]
+    n_gap = sum(len(v) for v in miss.values())
+    ex = "; ".join(f"#{k}: {', '.join(v[:4])}" + (" …" if len(v) > 4 else "") for k, v in list(miss.items())[:4])
+    return [(name, False, f"**빈 칸 {n_gap}개(발행분 {len(miss)}/{len(issues)}통)** — {ex} · `facts.py mention`으로 발행분마다 섹터 전부에 행을 적어라"
+             "(다루지 않은 섹터는 `{\"issue_id\": N, \"subject_type\": \"sector\", \"subject_id\": \"*\", \"board_verdict\": \"해당 없음\"}` 한 행)")]
 
 
 def check_corpus(market: str, stamp: str, note: str) -> list:
@@ -455,17 +513,11 @@ PDF_URL = re.compile(r"https?://[^\s)\]>`|\"']+?\.pdf(?:\?[^\s)\]>`|\"']*)?(?=[\
 
 
 def _fetch_log() -> dict:
-    """`journal/fetch_log.jsonl` → url → [행]. `fetch.py`가 여는 링크마다 한 줄씩 남긴다."""
+    """시도 기록(저장소 ev_fetch · `db.fetch_rows()` — 옛 op_fetch 행도 이전 v3가 옮겼다) → url → [행].
+    `fetch.py`가 여는 링크마다 한 행씩 남긴다(행에 url·kind·chars가 있다)."""
     out = {}
-    try:
-        for ln in (HERE / "journal" / "fetch_log.jsonl").read_text(encoding="utf-8").splitlines():
-            try:
-                r = json.loads(ln)
-            except json.JSONDecodeError:
-                continue
-            out.setdefault(r.get("url", ""), []).append(r)
-    except OSError:
-        pass
+    for r in db.fetch_rows():
+        out.setdefault(r.get("url", ""), []).append(r)
     return out
 
 
@@ -474,8 +526,7 @@ def check_pdf_sources(market: str, stamp: str, note: str) -> list:
     있어야 한다. 기록이 없으면 WebFetch·내장 브라우저로 연 것이다 — 둘 다 사용자 화면에 다운로드 카드를 띄우고
     본문은 못 읽는다(2026-09-24~10-02 16회 전부 실패). 못 열었으면 노트 §10에 '열지 못한 것'으로 적으면 통과한다."""
     name = "PDF 출처 → fetch.py 열기 기록"
-    files = sorted({*(HERE / "analysis").glob(f"섹터_*_{stamp}_*.md"),
-                    *(HERE / "analysis").glob(f"*_{stamp}_{market}*.md")})
+    files = sorted({*_research_files(market, stamp), *(HERE / "analysis").glob(f"*_{stamp}_{market}*.md")})
     texts = [note] + [f.read_text(encoding="utf-8", errors="ignore") for f in files]
     urls = sorted({u for t in texts for u in PDF_URL.findall(t)})
     if not urls:
@@ -506,11 +557,8 @@ THESIS_ID = re.compile(r"\b(?:kr|us)-[a-z0-9-]+-\d{6}\b")
 
 
 def _names(market: str) -> dict:
-    try:
-        wl = json.loads((HERE / "config" / "watchlist.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return {r["ticker"]: r.get("name", "") for r in wl.get(market.upper()) or []}
+    """유니버스 {종목: 이름} — 저장소 dim_company(config/watchlist.json은 그 렌더본)."""
+    return {r["ticker"]: r.get("name", "") for r in db.companies(market.upper()) if r.get("ticker")}
 
 
 def _judged_lines(text: str, ticker: str, name: str) -> bool:
@@ -596,14 +644,44 @@ def check_queue_one_day(market: str, stamp: str, note: str) -> list:
              f"오늘 재료에 근거가 있으면 `watchlist_candidates`로 재제안, 아니면 §8에 `[내림] <이유>`")]
 
 
+DART_INPUT = re.compile(r"잠정|실적|매출액또는손익구조|단일판매|공급계약|자기주식|유상증자|무상증자|합병|분할|최대주주변경")
+
+
+def check_dart_read(market: str, stamp: str, note: str) -> list:
+    """**판정 입력 공시를 읽었는가**(FB-261017-4) — 이번 run 1단 공시 목록(`mat_dart` · 처음 받은 run이 이 run)에 뜬 유니버스 종목의
+    잠정실적·주요 공시(공급계약·자기주식·증자·합병 등)마다 노트에 그 종목 이름(또는 코드)과 그 공시(접수번호 또는 보고서 낱말 — 예 `잠정`)가
+    한 줄에 있어야 한다. 실사례(2026-10-12~16): 유니버스 종목의 잠정실적이 공시 목록에 떴는데 세 run이 열지 않고 '조사불가 · 3Q 뒤 판정'으로
+    미뤘고, 그 결과로 오른 상승을 놓쳤다."""
+    name = "공시 목록 → 노트 판정(잠정실적·주요 공시)"
+    if market != "kr":
+        return [(name, True, "해당 없음(국내 공시 피드)")]
+    rid = db.run_id(stamp, market)
+    try:
+        uni = {c["ticker"]: c.get("name") or "" for c in db.companies("KR")}
+        rows = db.q("SELECT rcp_no, ticker, corp_name, report_nm FROM mat_dart WHERE run_id=? ORDER BY rcept_dt, rcp_no", (rid,))
+    except Exception as e:                        # noqa: BLE001
+        return [(name, False, f"공시 목록을 읽지 못했다 — {type(e).__name__}: {e}")]
+    want = [r for r in rows if r["ticker"] in uni and DART_INPUT.search(r["report_nm"] or "")]
+    if not want:
+        return [(name, True, f"이번 run 공시 {len(rows)}건 중 판정 입력(잠정실적·주요 공시) 0건")]
+    lines = note.splitlines()
+    miss = []
+    for r in want:
+        nm = r["corp_name"] or uni.get(r["ticker"]) or ""
+        key = DART_INPUT.search(r["report_nm"] or "").group(0)
+        ok = any((r["ticker"] in ln or (len(nm) >= 2 and nm in ln)) and (r["rcp_no"] in ln or key in ln) for ln in lines)
+        if not ok:
+            miss.append(f"{r['ticker']} {nm} '{(r['report_nm'] or '')[:40]}' ({r['rcp_no']})")
+    return [(name, not miss, f"{len(want)}건 전부 노트에서 판정" if not miss else
+             f"**안 읽은 {len(miss)}건: {'; '.join(miss[:6])}" + (" …" if len(miss) > 6 else "") + "** — "
+             f"`python3 fetch.py <공시 URL>`로 열어 그 종목 줄에 결과와 판정(논지 갱신·[통과] 사유)을 적어라 — 접수번호나 보고서 낱말을 같은 줄에")]
+
+
 def check_forecast_beneficiaries(market: str, stamp: str, note: str) -> list:
     """**열린 전망의 2·3차 수혜 중 유니버스 종목마다 논지 또는 거른 이유가 있는가**(FB-261003-1).
     첫 피드백: 전망이 2차 수혜로 이름을 적은 장비주들이 논지 없이 +30~50% 올랐다 — 적어 놓고 평가하지 않았다."""
     name = "열린 전망 2·3차 수혜 → 논지·[통과]"
-    try:
-        m = json.loads((HERE / "journal" / "market_map.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return [(name, False, "market_map.json을 못 읽었다")]
+    m = db.market_map_load()
     nm = _names(market)
     want = {}
     for ax in m.get("axes") or []:
@@ -639,10 +717,7 @@ def _fired_entries(market: str, stamp: str) -> list:
     m = re.search(r"★ 발화[^\n]*\n(.*?)(?:\n\s*\n|\Z)", src, re.S)
     if not m:
         return []
-    try:
-        th = {t["id"]: t for t in json.loads((HERE / "journal" / "theses.json").read_text(encoding="utf-8")).get("theses") or []}
-    except (OSError, json.JSONDecodeError):
-        th = {}
+    th = {t["id"]: t for t in db.theses_all() if t.get("id")}
     out = []
     for tk, cond, tid in re.findall(r"\[매수\]\s+(\S+)[^\n]*?조건\s+([^\(\n]+?)\s+\(.*?\n.*?논지\s+(\S+)", m.group(1)):
         t = th.get(tid) or {}
@@ -662,25 +737,37 @@ def check_drop_cause(market: str, stamp: str, note: str) -> list:
     nm = _names(market)
     sec = section(note, "## §6", "## §7") or note
     lines = [ln for ln in sec.splitlines() if "[하락 원인]" in ln]
+    # 꺾인 요인(1단 요인 상태 · FB-261017-7)의 종목이면 그 줄에 요인 상태를 붙인다 — '회사 뉴스 없음 → 집행'이 아니라 요인 판정이 다스린다
+    fired_of = {}
+    for st in db.factor_state(db.run_id(stamp, market)):
+        if st.get("fired"):
+            for m in st.get("members") or []:
+                fired_of.setdefault(str(m.get("ticker")), []).append(st["driver"])
     miss = []
+    nofac = []
     for tk, tid, cond, _b in rows:
         nmk = nm.get(tk, "")
-        if not any(tk in ln or (len(nmk) >= 2 and nmk in ln) for ln in lines):
+        mine = [ln for ln in lines if tk in ln or (len(nmk) >= 2 and nmk in ln)]
+        if not mine:
             miss.append(f"{tk}({cond})")
-    return [(name, not miss, f"{len(rows)}건 전부 판정" if not miss else
-             f"**[하락 원인] 없는 {len(miss)}건: {', '.join(miss)}** — §6에 `[하락 원인] <종목> — 업종 동반 y/n · 회사 뉴스 "
-             f"있음/없음 · 원인 … · 논지 동인 해당/비해당 → 집행/무효`를 적어라(동인이면 그것이 무효 조건이다)")]
+        elif tk in fired_of and not any("요인" in ln for ln in mine):
+            nofac.append(f"{tk}({', '.join(fired_of[tk])})")
+    why = []
+    if miss:
+        why.append(f"**[하락 원인] 없는 {len(miss)}건: {', '.join(miss)}** — §6에 `[하락 원인] <종목> — 업종 동반 y/n · 회사 뉴스 "
+                   f"있음/없음 · 원인 … · 논지 동인 해당/비해당 → 집행/무효`를 적어라(동인이면 그것이 무효 조건이다)")
+    if nofac:
+        why.append(f"**꺾인 요인 종목인데 [하락 원인] 줄에 요인 상태가 없다 {len(nofac)}건: {', '.join(nofac)}** — 줄 끝에 "
+                   f"`· 요인 <요인> <상태>(§7 [요인 판정])`를 붙여라(요인이 꺾였으면 요인 판정의 결정이 다스린다)")
+    return [(name, not why, f"{len(rows)}건 전부 판정" if not why else " · ".join(why))]
 
 
 def check_axis_conflicts(market: str, stamp: str, note: str) -> list:
     """**두 시장 전망이 같은 메커니즘에 반대 부호면 그 충돌이 대응표에 있는가**(FB-261012-3).
     대상은 보유 논지·오늘 BUY 종목이 `conflicts_with`가 달린 축의 **전망 수혜 표**에 있을 때다."""
     name = "충돌 축(conflicts_with) → §7 충돌 가지"
-    try:
-        m = json.loads((HERE / "journal" / "market_map.json").read_text(encoding="utf-8"))
-        th = json.loads((HERE / "journal" / "theses.json").read_text(encoding="utf-8")).get("theses") or []
-    except (OSError, json.JSONDecodeError):
-        return [(name, False, "market_map·theses를 못 읽었다")]
+    m = db.market_map_load()
+    th = db.theses_all()
     mine = {str(t.get("ticker")) for t in th if t.get("status") == "held" and str(t.get("market") or "").lower() == market}
     sp = HERE / "signals" / f"signal_{stamp}_{market}.json"
     if sp.exists():
@@ -705,23 +792,87 @@ def check_axis_conflicts(market: str, stamp: str, note: str) -> list:
              f"**§7에 충돌 가지 없음 {len(need)}건: {'; '.join(need)}** — 상대 축 id를 넣은 행으로 '그쪽 전망이 맞으면 → 대응'을 적어라")]
 
 
+FACTOR_DECISION_RX = re.compile(r"저점매수|유지|정리")
+
+
+def _factor_blocks(sec7: str) -> dict:
+    """§7의 `[요인 판정] <요인>` 블록 {요인: 본문} — 다음 `[요인 판정]`·`### `·`## ` 앞까지."""
+    out, cur, buf = {}, None, []
+    for ln in sec7.splitlines():
+        m = re.search(r"\[요인 판정\]\s*`?([A-Za-z0-9_\-]+)`?", ln)
+        if m or ln.startswith("### ") or ln.startswith("## "):
+            if cur:
+                out[cur] = "\n".join(buf)
+            cur, buf = (m.group(1), [ln]) if m else (None, [])
+            continue
+        if cur:
+            buf.append(ln)
+    if cur:
+        out[cur] = "\n".join(buf)
+    return out
+
+
 def check_driver_branch(market: str, stamp: str, note: str) -> list:
-    """**보유가 가장 많이 걸린 요인(driver)이 꺾이는 가지가 대응표에 있는가**(FB-261012-4) — 상한이 아니라 대응."""
+    """① **보유가 가장 많이 걸린 요인(driver)의 '꺾이면' 행이 대응표에 있는가**(FB-261012-4) — 상한이 아니라 대응.
+    ② **꺾인(또는 unknown) 요인마다 §7 `[요인 판정] <요인>` 블록이 있는가**(FB-261017-7 · 방향이 아니라 판정) — 1단 요인 상태
+    (저장소 `mk_factor_state`)가 있어야 하고, 블록에 `원인:` · `상태: intact|broken|unknown` · 바스켓 보유 종목마다 결정(저점매수|유지|정리)."""
     name = "최대 요인(driver) → §7 '꺾이면' 행"
+    name2 = "꺾인 요인 → §7 [요인 판정](원인·상태·보유 종목별 결정)"
     try:
         sys.path.insert(0, str(HERE))
         import market_map as mm
-        res = mm.exposure_by_driver(market.upper(), stamp)
+        res = mm.exposure_by_driver(market.upper(), stamp, no_db=True)
     except Exception as e:                        # noqa: BLE001
         return [(name, False, f"요인 노출을 못 쟀다 — {type(e).__name__}: {e}")]
-    if not res.get("rows"):
-        return [(name, True, "요인에 걸린 보유 0건")]
-    top = res["rows"][0]
     sec7 = section(note, "## §7", "## §8") or ""
-    ok = any(top["driver"] in ln and "꺾이면" in ln for ln in sec7.splitlines())
-    return [(name, ok, f"최대 요인 {top['driver']} {top['total_pct']:.1f}% — §7에 행 있음" if ok else
-             f"**최대 요인 `{top['driver']}` {top['total_pct']:.1f}%(양 시장)인데 §7에 '꺾이면' 행이 없다** — "
-             f"`{top['driver']}가 꺾이면 → <무엇을 줄이나·증액 중단·약한 논지부터>` 한 행을 적어라")]
+    out = []
+    if not res.get("rows"):
+        out.append((name, True, "요인에 걸린 보유 0건"))
+    else:
+        top = res["rows"][0]
+        ok = any(top["driver"] in ln and "꺾이면" in ln for ln in sec7.splitlines())
+        out.append((name, ok, f"최대 요인 {top['driver']} {top['total_pct']:.1f}% — §7에 행 있음" if ok else
+                    f"**최대 요인 `{top['driver']}` {top['total_pct']:.1f}%(양 시장)인데 §7에 '꺾이면' 행이 없다** — "
+                    f"`{top['driver']}가 꺾이면 — <바스켓 20세션 고점 대비 ≥ 일중폭×3 또는 같은 요인 규칙 매도> → [요인 판정]` "
+                    f"한 행을 적어라(대응 방향은 미리 정하지 않는다)"))
+    states = db.factor_state(db.run_id(stamp, market))
+    if not states and res.get("factor_state") and not res.get("rows"):
+        # 쟀는데 잴 바스켓이 없다(보유 0 · 창 안 같은 요인 규칙 매도 0 — 보유가 없는 첫 run 등) — '안 쟀다'와 가른다(2026-10-19)
+        out.append((name2, True, "요인 상태 — 잴 바스켓 0(보유 0 · 창 안 규칙 매도 0)"))
+        return out
+    if not states:
+        out.append((name2, False, f"**요인 상태 없음** — 1단 `python3 market_map.py exposure --by driver --market {market} "
+                                  f"--stamp {stamp}`가 이 run을 재지 않았다(저장소 mk_factor_state)"))
+        return out
+    need = [st for st in states if st.get("state") in ("fired", "unknown")]
+    if not need:
+        out.append((name2, True, f"꺾인·unknown 요인 0 ({len(states)}개 요인 유지)"))
+        return out
+    blocks = _factor_blocks(sec7)
+    nm = {**_names("kr"), **_names("us")}
+    bad = []
+    for st in need:
+        d = st["driver"]
+        b = blocks.get(d)
+        if b is None:
+            bad.append(f"`{d}`({st['state']}) 블록 없음")
+            continue
+        lack = []
+        if "원인:" not in b:
+            lack.append("원인:")
+        if not re.search(r"상태:\s*`?(intact|broken|unknown)", b):
+            lack.append("상태: intact|broken|unknown")
+        for m in st.get("members") or []:
+            tk, n = str(m.get("ticker")), nm.get(str(m.get("ticker")), "")
+            if not any((tk in ln or (len(n) >= 2 and n in ln)) and FACTOR_DECISION_RX.search(ln) for ln in b.splitlines()):
+                lack.append(f"{tk} 결정")
+        if lack:
+            bad.append(f"`{d}` 블록에 {', '.join(lack)} 없음")
+    out.append((name2, not bad, f"꺾인·unknown 요인 {len(need)}개 전부 판정" if not bad else
+                f"**[요인 판정] 미비 {len(bad)}건: {'; '.join(bad)}** — §7 표 아래 `[요인 판정] <요인>` 블록에 발화 근거 · `원인:`(사실 id) · "
+                f"`상태: intact|broken|unknown` · 바스켓 보유 전부와 이 run 후보의 `저점매수|유지|정리`와 사유를 적고 시그널 "
+                f"factor_judgments[]에 같은 값을 넣어라(방향을 미리 정하지 않는다)"))
+    return out
 
 
 # ── 2026-10-12 사용자: "국내장과 미국장은 독립적이지 않다 — 무조건 상호 연관해서 전망과 시나리오를 짜라" ─────────
@@ -842,6 +993,7 @@ def main() -> int:
 
     rows = []
     rows += check_generated_lines(a.market, a.stamp, note)
+    rows += check_board_mentions(a.market, a.stamp)
     rows += check_prev_carried(a.market, a.stamp, note)
     rows += check_outliers(a.market, a.stamp, note)
     rows += check_cycle(note)
@@ -853,6 +1005,7 @@ def main() -> int:
     rows += check_reeval(a.market, a.stamp, note)
     rows += check_support_break(a.market, a.stamp, note)
     rows += check_forecast_beneficiaries(a.market, a.stamp, note)
+    rows += check_dart_read(a.market, a.stamp, note)
     rows += check_queue_one_day(a.market, a.stamp, note)
     rows += check_drop_cause(a.market, a.stamp, note)
     rows += check_axis_conflicts(a.market, a.stamp, note)

@@ -3,7 +3,7 @@
 무인 실행 지휘자 — 사람 없이 하루 한 바퀴를 돌린다.
 
 ★ (2026-10-14 확인) **현재 드라이버가 아니다.** 실제 무인 run은 데스크톱 예약 작업이 여는 보통 세션이 trade-run 스킬을 돈다
-(`journal/run_log.jsonl`에 이 스크립트의 행은 2026-09-08 자체 시험분뿐). 이 파일의 단계 순서·도구 제한은 지금 run에 적용되지 않는다.
+(run 기록 — 저장소 op_run_log, 예전 `journal/run_log.jsonl` — 에 이 스크립트의 행은 2026-09-08 자체 시험분뿐). 이 파일의 단계 순서·도구 제한은 지금 run에 적용되지 않는다.
 
 ★ 이 파일에는 매매 판단이 없다. 판단은 `claude -p`(제안)와 `risk_guard.py`(집행 여부)가
 하고, 여기는 순서·중복·실패를 관리한다. 그리고 **집행은 LLM 세션 밖에서 일어난다** —
@@ -18,7 +18,7 @@
   4 risk_guard → 5 execute          — 결정론. 여기가 유일한 주문 경로
   6 journal (finally)               — 실패해도 반드시. position_peaks가 여기서 갱신된다
   7 dashboard → 8 게시              — 현황 페이지
-  9 run_log·알림·락 해제
+  9 run_log(저장소 op_run_log)·알림·락 해제
 
 사용:
     python3 run_auto.py --self-test              # 주문·LLM 없이 환경만 점검
@@ -39,6 +39,8 @@ try:
 except ImportError:                                   # 3.9 미만 방어
     ZoneInfo = None
 
+import db
+
 HERE = Path(__file__).parent
 # 게이트 엔진 — 저장소 루트의 .claude/skills/_stepgate/ (프로젝트 폴더의 형제).
 STEPGATE_PY = (HERE.resolve().parent / ".claude" / "skills" / "_stepgate" / "stepgate.py")
@@ -51,7 +53,7 @@ LOGS_DIR = HERE / "logs"
 
 KILL_PATH = CONFIG_DIR / "KILL"
 LOCK_PATH = CONFIG_DIR / ".run_auto.lock"
-RUN_LOG = JOURNAL_DIR / "run_log.jsonl"
+RUN_LOG = "run_log"                    # 저장소 로그 이름(op_run_log) — 예전 journal/run_log.jsonl
 DASHBOARD_META = CONFIG_DIR / ".dashboard.json"
 
 KST = timezone(timedelta(hours=9))
@@ -111,23 +113,13 @@ def log(msg: str) -> None:
     print(f"[{datetime.now(KST):%H:%M:%S}] {msg}", flush=True)
 
 
-def read_jsonl(path: Path) -> list:
-    if not path.exists():
-        return []
-    out = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return out
+def read_jsonl(name: str = RUN_LOG) -> list:
+    """저장소 로그 전건(기록 순서). 예전 jsonl 경로 자리 — 지금은 로그 이름(`RUN_LOG` 등 db.LOGS 키)을 받는다."""
+    return db.log_rows(name)
 
 
 def append_run_log(row: dict) -> None:
-    RUN_LOG.parent.mkdir(parents=True, exist_ok=True)
-    with RUN_LOG.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    db.log_append(RUN_LOG, row)                 # 추가만 하는 기록
 
 
 def run_cmd(args: list, timeout: int, cwd: Path = HERE) -> tuple:
@@ -394,7 +386,7 @@ ANALYSIS_TOOLS = " ".join([
     # 4단 종목·노트·검증
     "Bash(python3 universe_review.py *)", "Bash(python3 base_rates.py *)",
     "Bash(python3 price_levels.py *)", "Bash(python3 verify_numbers.py *)",
-    "Bash(python3 extract_ai_claims.py *)",
+    "Bash(python3 facts.py *)",                   # 사실 등록·큐 고정(queue --batch)·클레임 목록(render-claims)·판정 — 옛 extract_ai_claims
     "Bash(python3 ../gmail-newsletter-analyzer/cache_claims.py *)",
     # 5단 결정 — risk_guard와 dry-run은 브로커에 쓰지 않는다. --send는 목록에 없다.
     "Bash(python3 risk_guard.py *)",
@@ -451,7 +443,7 @@ def gate_token(since: datetime, cps: tuple = DISPATCH_CPS) -> dict:
 
 
 def consecutive_no_trade(market: str) -> int:
-    """`run_log.jsonl`에서 이 시장의 연속 no_trade 횟수.
+    """run 기록(저장소 op_run_log)에서 이 시장의 연속 no_trade 횟수.
 
     `limits.no_trade_max_consecutive_below_floor`를 **읽는 코드가 없어서** 그 규칙이
     문서에만 있었다. 원장이 이미 `no_trade`를 기록하므로 여기서 센다.

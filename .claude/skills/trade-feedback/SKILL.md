@@ -75,14 +75,14 @@ python3 feedback.py collect --week <YYMMDD>       # 약 4분 — data/feedback/�
 
 **테스트를 매주 끝까지 돌린다**(2026-10-11 사용자: "테스트가 멈추지 않도록 · 멈추는 걸 모르지 않도록"). 테스트 파일은 케이스마다
 예외·SystemExit를 잡아 FAIL로 적고 다음 케이스로 가고, 그래도 끊기면 `TEST-HALTED`를 남긴다. `run_tests.py`가 완주·건수를
-`journal/test_runs.jsonl`에 쌓는다. ★가 나오면 보고서 §6 한계 첫 줄에 적고, 고칠 수 있으면 3단에서 고친다.
+저장소 `op_test_run`에 쌓는다. ★가 나오면 보고서 §6 한계 첫 줄에 적고, 고칠 수 있으면 3단에서 고친다.
 *실사례: (66)-b가 검사 대상의 sys.exit에 걸려 그 뒤 케이스가 10-03~10-10 한 번도 돌지 않았는데 아무도 몰랐다.*
 
 수집이 재는 것(판정하지 않는다):
 
 | 항목 | 내용 |
 |---|---|
-| 놓친 급등 | 20거래일 창 안 **저점→고점 최대 상승폭** +10% 이상 — 유니버스 + 지도 + 시총 상위(`config/main_names.json`). 종가 대 종가가 아니므로 **올랐다 되돌린 종목도 들어온다**(되돌림 열) |
+| 놓친 급등 | 20거래일 창 안 **저점→고점 최대 상승폭** +10% 이상 — 유니버스 + 지도 + 시총 상위(저장소 `dim_company.main_rank` — `main_names.py --show`). 종가 대 종가가 아니므로 **올랐다 되돌린 종목도 들어온다**(되돌림 열) |
 | 깔때기 | 축 → 전망 → 논지(그 창에 살아 있던 것만) → 포지션(창 안 최대 비중) |
 | 막은 것 | 유형 — 보유·극소 크기·유니버스 밖·후보 대기·규칙/회전/재량 매도·진입가 미도달·미전송·자금·목표 비중·거부·추격 금지·노트 제외·논지 없음 |
 | 평가 이력 | 그 이름이 우리 기록에 **언제 어떻게** 등장했나(날짜·문서·절·줄) — JSON `trail`, 한 종목 전부는 `feedback.py trail --market <m> --ticker <t> --peak <고점일>` |
@@ -93,9 +93,15 @@ python3 feedback.py collect --week <YYMMDD>       # 약 4분 — data/feedback/�
 | 계좌 바닥 | 수집 머리 줄 — 양 시장 원화 합산 30일 수익률과 바닥 10% 대비 차이(`feedback.account_line`) |
 | 손실·약세 후보 | 창 안 **닫힌 논지 전부의 실현 손익**(이익 포함 · FIFO) + 보유 중 고점 대비 되돌림이 그 논지 추적 다리 폭의 절반을 넘은 것 + 추적 다리 없는 보유. 행마다 **울린 시계**(ⓐ무효 ⓑ기한 ⓒ전망 miss ⓓ다리+동인)와 제안 판정 — `loss_review.py`(수집이 부른다 · 단독 `python3 loss_review.py --week <YYMMDD>`) |
 | 기한 도래 전망 | `opened + horizon_weeks`가 지났는데 hit/miss가 안 매겨진 축 — `market_map.py forecast judge`로 매긴다 |
+| 전망 기한 코호트 | 수집·주간의 `[전망 기한] 도래 · 판정 · 미판정 · 기각 · 미성숙` 줄(2026-10-19 · Codex U06) — 위 '기한 도래 전망'은 **미판정만**(판정된 것은 다시 안 뜬다) · `[전망]` 줄의 판정·적중은 **그 기간에 판정된 것**(세운 날이 아니다 — 8주 전 전망이 어제 판정되면 이번 주에 센다) · 판정은 `judged_at·excess_pct`(타입 칸) |
 | 오래 열린 시나리오 | 열린 지 20거래일 이상 또는 조건의 예정일에서 10거래일 지났는데 미실현 — 지연 가지 누락 후보(`scenarios.py list --stale`) |
 | 판정 보정 | 지난주 `data/feedback/손실판정_<week>.json`의 판정이 이번 주에 뒤집혔나(일시적→손실로 닫힘 · 오판→고점 재돌파) |
 | 비용 | `net_cost_drag_30d_pct` — 최근 30일 체결 비용 추정 ÷ 자산(수수료·국내 매도세·환전 · `config/costs.json` · 단독 `python3 costs.py`). 회전이 잦으면 비용이 수익을 먹는다 — 오르면 회전 원인을 §1에 적는다 |
+| 측정 판 | 수집 지표 머리의 `측정 판 2`(2026-10-19~ · Codex R06·R07) — 통합자산은 공유 현금 한 번·그날 환율·입출금 제외(`portfolio.py`), 비용은 분자·분모가 같은 계좌 계열. **판이 다른 주의 `return_30d_*`·`net_cost_drag_30d_pct`를 제안 baseline·검증 비교에 쓰지 않는다** — 판 2가 두 주 쌓인 뒤 크기·회전 규칙을 다룬다. `return_30d_fixed_fx_pct`는 끝 환율 하나로 잰 참고값(환율 효과 제외) |
+| 체결 뒤 마감 시간 | `post_fill_minutes_avg_7d` — 최근 7일 run의 체결 확정 → `stage.py close`까지 평균 분(run 기록 `ex_run`의 `filled_at`·`closed_at` · 체결 없는 run 제외) |
+| 캡처→전송 시간 | `capture_to_send_minutes_avg_7d` — 최근 7일 run의 1단 캡처 → 주문 전송까지 평균 분(`ex_run`의 `capture_at`·`sent_at` · 전송 없는 run 제외) |
+| 뉴스보다 먼저 안 사실 | `before_news_facts_7d` — 최근 7일 리서치가 찾은 사실 중 뉴스레터가 그 대상을 다루기 전에 안 것의 합(`ex_run.before_news_n` · `stage.py close`가 `facts.py before-news`로 센다) |
+| 재료 되풀이 비율 | `material_repeat_pct_7d` — 최근 7일 리서치가 새로 등록한 사실 중 그 run 재료 링크와 같은 URL이었던 비율(`ex_run.facts_repeat` ÷ (`facts_new` + `facts_repeat`)) |
 
 게이트: `SG form trade-feedback collect …` → `SG judge trade-feedback collect <id>=<값> … week=<YYMMDD> deliverable=<수집 md 절대경로> dir=<프로젝트폴더>`
 
@@ -121,7 +127,7 @@ python3 feedback.py collect --week <YYMMDD>       # 약 4분 — data/feedback/�
 **§1 한눈에** — 가장 많이 새는 단 · 막은 유형 분포 · 지표 표(수집값) · 이번 주 가장 비싼 놓침 셋(최대 상승폭 × 우리가
 가질 수 있었던 크기).
 
-**§5-b 실전 준비**(2026-10-15 — 실계좌 전환 주간 · 사용자: "이번 주 모의 run에서 최대한 테스트하고 문제는 토요일 trade-feedback으로 고친다") —
+**§5-b 실전 준비**(2026-10-15 — 실계좌 전환 준비 주간 · 사용자: "이번 주 모의 run에서 최대한 테스트하고 문제는 토요일 trade-feedback으로 고친다") —
 수집의 〈실전 준비〉 표(그 주 `real_check_<st>_<mkt>.md` — run마다 12항목)를 옮기고, **★가 나온 항목마다** 원인과 조치를 적는다:
 고칠 수 있는 결함이면 §3 제안 행(유형 단위 · 반례 점검), 실계좌 전환을 막는 것(①실계좌 매수 0 · ⑦조회 오류 · ⑫전환 예행 섞임)이면
 승인 대기로 보고 첫머리에. 점검표가 없는 주는 '해당 없음 — 점검표 없음'.

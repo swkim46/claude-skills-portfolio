@@ -119,6 +119,14 @@ REASON = re.compile(r"이유|위해|막으려|취지|목적|방지|차단|때문
 LABEL_HINT = re.compile(r"의도|노림|대가로|겨냥|포석|속내")
 # 정체 대신 형용사 — SKILL §3 ⓐ(`널리 참조하는`·`대표적인`·`유명한`·`업계 1위`는 설명이 아니다).
 ADJ_ID = re.compile(r"널리 참조하는|널리 쓰이는|대표적인|유명한|업계 1위")
+# 화살표만 있는 인과 후보 — 처음 설명하는 인과를 `A → B → C`만으로 적은 줄(SKILL §5-1·5-2 · 2026-10-17, 10/13 압축복습 피드백).
+# 숫자로 이어지는 화살표(`17bp → 약 20bp`·`1분기 → 3분기`)는 수치 변화라 세지 않고, 우리말 연결어가 하나라도 있으면 문장으로
+# 이은 것으로 본다. `⇒`는 항목 간 참조 표시(§2-bis·§6)라 세지 않는다. 의미 판단은 못 하므로 후보일 뿐이다 — 앞에서 이미 설명한
+# 관계를 정리한 줄(압축복습 '연결 지도')은 해당 없음.
+ARROW_CAUSAL = re.compile(r"→(?!\s*(?:약\s*)?[\d$])")
+ARROW_MIN = 3
+CONNECTIVE = re.compile(r"때문|면서|따라|인데|는데|은데|라서|어서|아서|므로|니까|수록|려면|거나|지만|더라도|경우"
+                        r"|[가-힣]면(?=[\s,.)]|$)|[가-힣](?:려|며)(?=[\s,]|$)|[가-힣] 때(?![가-힣])")
 # 검증 리포트 교정이 노트에 옮겨졌는가 · 사전 감사 파일이 있는가(2026-10-14 — SKILL §4-bis·§7)
 PREAUDIT_SINCE = "261014"
 FRAG_MIN = 8
@@ -265,6 +273,28 @@ def check_mechanism_candidates(raw_lines):
         # ① 하위 줄 어디에도 인과 표지가 없거나 ② 숫자만 늘어놓은 사실 줄이 둘 이상이고 하위의 절반 이상(2026-10-14)
         if not any(causal) or (sum(facts) >= 2 and sum(facts) * 2 >= len(kids)):
             out.append((i, raw.strip()[:70]))
+    return out
+
+
+def _bare_text(l):
+    """백틱 구간·이탤릭 따옴표 인용(*"…"*)·괄호(중첩 포함)를 벗긴 본문."""
+    s = re.sub(r"`[^`]*`", "", l)
+    s = re.sub(r"\*\"[^\"]*\"\*|\*“[^”]*”\*", "", s)
+    prev = None
+    while prev != s:
+        prev, s = s, re.sub(r"\([^()]*\)", "", s)
+    return s
+
+
+def check_arrow_chain_candidates(raw_lines):
+    """본문 불릿에서 백틱·괄호를 벗긴 뒤, 숫자로 이어지지 않는 `→`가 ARROW_MIN개 이상인데 우리말 연결어(CONNECTIVE)가 하나도
+    없는 줄 — (행 번호, 화살표 수, 줄). 지적이 아니라 후보 목록이다(게이트가 처리 여부를 묻는다)."""
+    out = []
+    for i, l in _bullets_after_header(raw_lines):
+        s = _bare_text(l)
+        n = len(ARROW_CAUSAL.findall(s))
+        if n >= ARROW_MIN and not CONNECTIVE.search(s):
+            out.append((i, n, l.strip()[:70]))
     return out
 
 
@@ -1136,6 +1166,14 @@ def selftest_261014():
     _t("'대가로' 무라벨 → 라벨 후보", check_label_candidates(["# t", "---", "- 대가로 중국은 관세 인하 (노컷뉴스)"]))
     _t("[추정] 있으면 라벨 후보 아님", not check_label_candidates(["# t", "---", "- 압박하려는 의도 `[추정]`"]))
     _t("형용사 정체 후보", check_adjective_identity(["# t", "---", "- MSCI는 대표적인 지수"]))
+    arr = check_arrow_chain_candidates
+    _t("화살표 3개·연결어 없음 → 화살표 인과 후보", arr(["# t", "---", "- 순환 — MBS 급락 → 보유자가 국채 매도 → 금리 상승 → 다시 헤지 매도"]))
+    _t("↑↓ 기호 사슬도 후보", arr(["# t", "---", "- 금리 경로 = 금리↑ → 대출·할부 이자↑ → 소비·투자↓ → 가격 인상 여력↓"]))
+    _t("연결어가 있으면 후보 아님", not arr(["# t", "---", "- 금리가 오르면 대출 부담 증가 → 소비 위축 → 성장 둔화 → 세수 감소"]))
+    _t("숫자 변화 화살표는 안 셈", not arr(["# t", "---", "- 추세 — 주의 계약 비중 22.1%(2024년 하반기) → 18.8%(2025년) → 17.1%(올해 7개월) → 내년 더 감소 전망"]))
+    _t("괄호 안 화살표는 안 셈", not arr(["# t", "---", "- 금리 상승 → 대출 부담 증가(→ 소비 위축 → 성장 둔화)"]))
+    _t("화살표 2개는 후보 아님", not arr(["# t", "---", "- 금리 상승 → 대출 부담 증가 → 소비 위축"]))
+    _t("헤더 문단은 안 봄", not arr(["# t", "> 선별 — A → B → C → D", "---", "- x"]))
     # 교정 반영 대조 — 그대로 옮긴 것·끝말만 바꾼 것은 통과, 단서를 뗀 것은 적발
     with tempfile.TemporaryDirectory() as d:
         rp = os.path.join(d, "r.md")
@@ -1350,6 +1388,14 @@ def main():
         print("· 형용사 정체 후보 %d개 — 무엇을 하는/재는 곳인지로 바꿀 것(§3 ⓐ)" % len(adj))
         for i, w, l in adj[:8]:
             print("    [%d행 · %s] %s" % (i, w, l))
+    arrows = check_arrow_chain_candidates(raw)
+    if arrows:
+        print("· 화살표만 있는 인과 후보 %d개 — `A → B → C`로만 적힌 줄: 처음 설명하는 인과면 A가 왜 B가 되는지를 연결어 문장으로 쓰고, "
+              "앞에서 설명한 관계의 정리면 해당 없음(§5-1 · 게이트가 처리 여부를 묻는다)" % len(arrows))
+        for i, n, l in arrows[:15]:
+            print("    [%d행 · →%d] %s" % (i, n, l))
+    else:
+        print("✓ 화살표만 있는 인과 후보 0개")
     day, _ver = _note_day_ver(path)
     opened = load_opened(day)
     if opened is None:
@@ -1480,7 +1526,7 @@ def main():
         print("✓ 최근 노트와 중복 없음")
 
     print("\n%s" % ("지적 %d종 — 고치고 다시 돌릴 것" % problems if problems
-                    else "통과. 의미 판단(메커니즘·용어 설명)은 사람이 읽거나 감사를 켤 것"))
+                    else "통과 — 형식 검사다. 의미 판단(메커니즘·용어 설명·주어와 인과가 읽히는가)은 사람이 읽거나 감사를 켤 것"))
     return 1 if problems else 0
 
 

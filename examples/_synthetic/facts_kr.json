@@ -1,0 +1,58 @@
+{
+  "_comment": "시연용 가상 사실. 운영에서는 조사 단계가 `facts.py add`로 사실을 한 건씩 등록하고 그 id를 주문 제안의 근거 칸(facts[].id)에 적는다. 여기서는 seed_demo.py가 같은 함수로 등록한 뒤 signal_kr.json의 <ref:…> 자리를 실제 id로 바꾼다. 기업·공시·URL 전부 가상이다.",
+  "facts": [
+    {
+      "ref": "order-900001",
+      "kind": "order",
+      "ticker": "900001",
+      "amount": 120000000000,
+      "currency": "KRW",
+      "counterparty": "서해 해상풍력 2단계 사업단(가상)",
+      "product": "해저 HVDC 케이블",
+      "announced_at": "2026-10-09",
+      "url": "https://example.invalid/dart/900001-20261009",
+      "quote": "당사는 서해 해상풍력 2단계 사업에 해저 HVDC 케이블을 공급하는 계약을 체결하였음 (가상 공시 본문)",
+      "tier": 2,
+      "source": "가상 공시"
+    },
+    {
+      "ref": "policy-grid",
+      "kind": "policy",
+      "body": "산업통상자원부(가상)",
+      "title": "전력망 확충 특별법 시행령 개정안 입법예고",
+      "status": "입법예고",
+      "deadline": "2026-10-24",
+      "as_of": "2026-10-09",
+      "url": "https://example.invalid/moleg/notice-20261009",
+      "quote": "신규 송전선로 자재의 국내 조달 의무 비율을 2027년 40%, 2028년 60%로 한다 (가상 공고 본문)",
+      "tier": 1,
+      "source": "가상 입법예고 공고"
+    },
+    {
+      "ref": "earnings-900002",
+      "kind": "earnings",
+      "ticker": "900002",
+      "period": "2026Q3",
+      "metric": "가공 물량 증가율",
+      "actual": 12.0,
+      "unit": "%",
+      "as_of": "2026-10-09",
+      "url": "https://example.invalid/ir/900002",
+      "quote": "3분기 가공 물량은 전년 동기 대비 12% 증가하였음 (가상 기업설명 자료)",
+      "tier": 2,
+      "source": "가상 IR"
+    },
+    {
+      "ref": "ir-900003",
+      "kind": "disclosure",
+      "ticker": "900003",
+      "type": "기업설명 자료",
+      "filed_at": "2026-10-06",
+      "title": "대양해운 기업설명 자료 — 포설 전용선 2척 운영 (가상)",
+      "url": "https://example.invalid/ir/900003",
+      "quote": "당사는 해저 케이블 포설 전용선 2척을 운영하고 있음 (가상 기업설명 자료)",
+      "tier": 2,
+      "source": "가상 IR"
+    }
+  ]
+}

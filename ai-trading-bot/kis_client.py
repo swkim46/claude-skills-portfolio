@@ -124,6 +124,13 @@ RATE_LIMIT_BACKOFF_SEC = 1.0
 TRANSIENT_CODES = (RATE_LIMIT_CODE, "EGW00300")
 TRANSIENT_RETRIES = 4
 TRANSIENT_BACKOFF_SEC = 2.0
+# ★ 토큰 만료·무효(2026-10-19) — 캐시 토큰이 run 도중 24시간을 넘기면 증권사는 HTTP 500 + 이 코드를 준다. 예전엔 이것을 일시 장애로 보고
+#   **같은 낡은 토큰으로** 네 번 다시 물었다(조회는 끝내 실패 · 주문은 접수 불명으로 남음). 인증 단계에서 막힌 요청이라 주문이어도 접수된 것이
+#   없으므로, 토큰을 새로 받아 **한 번** 다시 보낸다.
+TOKEN_EXPIRED_CODES = ("EGW00123", "EGW00121")
+# 미국 시세 거래소 코드 — 정규장(NAS·NYS·AMS)과 주간거래(BAQ·BAY·BAA). 틀린 코드로 물으면 오류가 아니라 빈 값이 온다(`quote_excd` 주석).
+US_QUOTE_EXCDS = ("NAS", "NYS", "AMS")
+US_DAY_QUOTE_EXCDS = ("BAQ", "BAY", "BAA")
 
 # ------------------------------------------------------------ KRX 호가가격단위
 #
@@ -269,6 +276,36 @@ def is_holiday(market: str, d) -> bool:
     return d.isoformat() in days
 
 
+def prev_trading_day(market: str, d):
+    """d **이전** 거래일(주말·휴장 제외)."""
+    while True:
+        d = d - timedelta(days=1)
+        if d.weekday() < 5 and not is_holiday(market, d):
+            return d
+
+
+def session_close(market: str, d) -> datetime:
+    """그 세션일의 정규장 마감 시각(KST) — 미국은 그 날짜의 서머타임으로(11월 첫 일요일 뒤 06:00 KST)."""
+    m = "US" if (market or "KR").upper() == "US" else "KR"
+    if m == "KR":
+        return datetime(d.year, d.month, d.day, 15, 30, tzinfo=KST)
+    off = -4 if _us_dst(d) else -5
+    return datetime(d.year, d.month, d.day, 16, 0, tzinfo=timezone(timedelta(hours=off))).astimezone(KST)
+
+
+def last_session_date(market: str, now: datetime = None):
+    """★ 마지막으로 **닫힌** 세션일(2026-10-19 · Codex U04) — 확정 종가가 있는 가장 최근 거래일. 지금 세션이 열려 있거나 아직
+    안 열렸거나 휴장·주말이면 그 전 거래일. 미국은 동부 날짜로 잰다(한국 자정을 넘긴 run에서도 같은 답 — 옛 _today_ymd의 시계 불일치 해소).
+    일봉의 확정 여부(db._is_final)와 확정 읽기(need_final)가 이것 하나를 기준으로 쓴다."""
+    now = now or datetime.now(KST)
+    m = "US" if (market or "KR").upper() == "US" else "KR"
+    ms = market_session(m, now)
+    d = ms["session_date"]
+    if d.weekday() < 5 and not is_holiday(m, d) and now > ms["close"]:
+        return d
+    return prev_trading_day(m, d)
+
+
 def next_trading_day(market: str, d):
     """d **다음** 거래일(주말·휴장 제외)."""
     while True:
@@ -345,19 +382,31 @@ def account_mode(cfg: dict = None) -> str:
 
 
 def acct_family(mode: str = None) -> str:
-    """계좌 계열 'paper' 또는 'real'(real · real_readonly). `mode`를 안 주면 지금 설정의 계좌 모드(2026-10-15 실계좌 전환)."""
+    """계좌 계열 'paper' 또는 'real'(real · real_readonly). `mode`를 안 주면 지금 설정의 계좌 모드(2026-10-15 실계좌 전환 준비)."""
     m = account_mode() if mode is None else mode
     return "paper" if str(m or "paper") == "paper" else "real"
 
 
 def same_account(row: dict, family: str = None) -> bool:
     """기록 행(자산 곡선·스냅샷)이 지금 계좌 계열의 것인가 — 표시 없는 옛 행은 모의다.
-    실계좌 전환 뒤 모의 기록이 실계좌 숫자(전일 대비·누적·비용·반대편 자산)에 섞이지 않게 읽는 쪽이 이것으로 거른다."""
+    계좌 전환에 대비해 모의 기록이 실계좌 숫자(전일 대비·누적·비용·반대편 자산)에 섞이지 않게 읽는 쪽이 이것으로 거른다."""
     return acct_family(str((row or {}).get("account_mode") or "paper")) == (family or acct_family())
 
 
 class KisError(RuntimeError):
-    """API가 성공(rt_cd=0) 이외를 돌려줬거나 HTTP가 실패한 경우."""
+    """API가 성공(rt_cd=0) 이외를 돌려줬거나 HTTP가 실패한 경우.
+
+    ★ `kind` — 주문(POST)이 **접수됐을 수 있는가**(2026-10-19 · Codex R01). 집행기가 이것으로 하루 기록의 상태를 정한다.
+      - `rejected` — 증권사가 분명히 거절했다(rt_cd≠0 응답 · HTTP 4xx · 게이트웨이 EGW 코드). 접수 0 → 다시 보내도 중복이 아니다.
+      - `unsent`   — 요청이 증권사에 닿지 않았다(조회 전용 차단 · 연결 거부 · 주소 해석 실패). 접수 0.
+      - `unknown`  — 보낸 뒤 응답을 잃었다(읽기 타임아웃 · 끊김 · 이유 없는 5xx · 깨진 본문). **접수됐을 수 있다** →
+                     같은 주문을 다시 보내지 않고 당일 주문 목록으로 확인한다(`domestic_orders`·`overseas_orders`).
+    조회(GET)의 kind는 쓰는 곳이 없다(기본 unknown)."""
+
+    def __init__(self, msg: str = "", kind: str = "unknown", code: str = None):
+        super().__init__(msg)
+        self.kind = kind if kind in ("rejected", "unsent", "unknown") else "unknown"
+        self.code = code
 
 
 def _real_trading_enabled() -> bool:
@@ -394,7 +443,7 @@ class KisClient:
     def __init__(self, svr: str = "paper", allow_real: bool = False, read_only: bool = False):
         if svr not in BASE_URL:
             raise ValueError(f"svr must be 'paper' or 'real', got {svr!r}")
-        # ★ 조회 전용(2026-10-12 실계좌 전환): 실계좌를 **읽기만** 하는 클라이언트는 래치 없이 연다 — 주문·정정·취소
+        # ★ 조회 전용(2026-10-12 실계좌 전환 계획): 실계좌를 **읽기만** 하는 클라이언트는 래치 없이 연다 — 주문·정정·취소
         #   메서드가 전부 KisError로 거부하므로 돈이 나갈 경로가 없다. 조회 전용 주간(account_mode real_readonly)과
         #   실전 중의 수집·잔고 조회(주문 안 하는 스크립트)가 이 길로 간다.
         self.read_only = bool(read_only)
@@ -470,7 +519,7 @@ class KisClient:
 
     def _guard_orders(self, what: str) -> None:
         if self.read_only:
-            raise KisError(f"조회 전용 모드 — 주문 차단({what}). account_mode={account_mode()!r}")
+            raise KisError(f"조회 전용 모드 — 주문 차단({what}). account_mode={account_mode()!r}", kind="unsent")
 
     # ------------------------------------------------------------- transport
 
@@ -503,13 +552,19 @@ class KisClient:
             return not (isinstance(out, dict) and str(out.get("ODNO") or "").strip())
 
         last_err = None
-        max_tries = max(RATE_LIMIT_RETRIES, TRANSIENT_RETRIES) + 1
+        tok_renewed = False
+        max_tries = max(RATE_LIMIT_RETRIES, TRANSIENT_RETRIES) + 2
         for attempt in range(max_tries):
             req = urllib.request.Request(url, data=data, headers=headers, method=method)
             self._throttle()
             try:
                 with urllib.request.urlopen(req, timeout=timeout, context=self._ctx) as r:
                     res = json.loads(r.read().decode("utf-8"))
+                if res.get("msg_cd") in TOKEN_EXPIRED_CODES and not tok_renewed and "authorization" in headers:
+                    headers = self._renewed_headers(headers)        # 토큰 만료 — 새 토큰으로 한 번 다시(인증 전 거부라 접수 0)
+                    tok_renewed = True
+                    last_err = KisError(f"{res.get('msg_cd')} 토큰 만료 on {method} {path} — 새 토큰으로 다시")
+                    continue
                 if (is_post and res.get("msg_cd") == RATE_LIMIT_CODE and _no_order_no(res)
                         and post_rl < RATE_LIMIT_RETRIES):
                     post_rl += 1
@@ -527,6 +582,11 @@ class KisClient:
                 # KIS는 레이트리밋·게이트웨이 오류를 HTTP 500 + 본문 코드로 돌려준다. 코드가 없는
                 # 5xx도 조회면 일시 장애로 보고 물러선다 — 4xx(인증·파라미터)는 다시 불러도 같다.
                 transient = any(c in detail for c in TRANSIENT_CODES) or 500 <= e.code < 600
+                if any(c in detail for c in TOKEN_EXPIRED_CODES) and not tok_renewed and "authorization" in headers:
+                    headers = self._renewed_headers(headers)        # 토큰 만료 — 새 토큰으로 한 번 다시(인증 전 거부라 접수 0)
+                    tok_renewed = True
+                    last_err = KisError(f"HTTP {e.code} 토큰 만료 on {method} {path} — 새 토큰으로 다시")
+                    continue
                 if is_post and RATE_LIMIT_CODE in detail and post_rl < RATE_LIMIT_RETRIES:
                     post_rl += 1                  # HTTP 오류 응답 = 접수되지 않았다 → 재전송해도 중복이 아니다
                     time.sleep(RATE_LIMIT_BACKOFF_SEC * post_rl)
@@ -536,14 +596,18 @@ class KisClient:
                     time.sleep(TRANSIENT_BACKOFF_SEC * (attempt + 1))
                     last_err = KisError(f"HTTP {e.code} on {method} {path}: {detail}")
                     continue
-                raise KisError(f"HTTP {e.code} on {method} {path}: {detail}") from e
+                # 주문(POST) — 4xx·게이트웨이 코드(EGW)는 주문 시스템 앞에서 막힌 것(접수 0), 코드 없는 5xx는 접수 여부를 모른다.
+                kind = "rejected" if (400 <= e.code < 500 or any(c in detail for c in TRANSIENT_CODES)) else "unknown"
+                raise KisError(f"HTTP {e.code} on {method} {path}: {detail}", kind=kind) from e
             except urllib.error.URLError as e:
                 # 연결 자체가 안 된 것 — 조회면 한두 번 더 시도한다.
                 if allow_retry and attempt < TRANSIENT_RETRIES:
                     time.sleep(TRANSIENT_BACKOFF_SEC * (attempt + 1))
                     last_err = KisError(f"network error on {method} {path}: {e.reason}")
                     continue
-                raise KisError(f"network error on {method} {path}: {e.reason}") from e
+                # 연결 거부·주소 해석 실패는 요청이 증권사에 닿지 않은 것이다. 그 밖(연결 중 타임아웃 등)은 모른다.
+                kind = "unsent" if isinstance(e.reason, (ConnectionRefusedError, socket.gaierror)) else "unknown"
+                raise KisError(f"network error on {method} {path}: {e.reason}", kind=kind) from e
             except (socket.timeout, TimeoutError, http.client.HTTPException, ConnectionError, OSError,
                     json.JSONDecodeError) as e:
                 # ★ 읽기 타임아웃(`socket.timeout`)·끊긴 연결·깨진 본문은 URLError가 **아니라** 그대로 튀어 올라
@@ -553,7 +617,8 @@ class KisClient:
                     time.sleep(TRANSIENT_BACKOFF_SEC * (attempt + 1))
                     last_err = KisError(f"network error on {method} {path}: {type(e).__name__}: {e}")
                     continue
-                raise KisError(f"network error on {method} {path}: {type(e).__name__}: {e}") from e
+                # 요청을 보낸 뒤의 타임아웃·끊김·깨진 본문 — 주문이면 **접수됐을 수 있다**(unknown).
+                raise KisError(f"network error on {method} {path}: {type(e).__name__}: {e}", kind="unknown") from e
 
         raise KisError(f"재시도 {TRANSIENT_RETRIES}회 소진: {method} {path} — 마지막: {last_err}")
 
@@ -563,7 +628,7 @@ class KisClient:
     def _read_token_file() -> dict:
         """토큰 캐시 파일 → {svr: entry}. 옛 형식(한 칸짜리 {svr, access_token, …})도 읽는다.
 
-        ★ 서버별로 칸을 나눈 이유(2026-10-12 실계좌 전환): 실전 중에도 시세 전용 스크립트는 모의 키로 돌고
+        ★ 서버별로 칸을 나눈 이유(2026-10-12 실계좌 전환 계획): 실전 중에도 시세 전용 스크립트는 모의 키로 돌고
         잔고·주문은 실전 키로 돈다. 한 칸이면 둘이 번갈아 서로의 토큰을 지워 매번 재발급한다 — 발급은 빈도 제한이 있다.
         """
         if not TOKEN_CACHE.exists():
@@ -592,6 +657,18 @@ class KisClient:
         if expires - timedelta(minutes=10) <= datetime.now(KST):
             return None
         return cache.get("access_token")
+
+    def _renewed_headers(self, headers: dict) -> dict:
+        """만료된 토큰을 버리고(메모리·캐시 파일의 이 서버 칸) 새로 받아 authorization만 바꾼 헤더."""
+        self._token = None
+        try:
+            cache = self._read_token_file()
+            if self.svr in cache:
+                cache.pop(self.svr)
+                TOKEN_CACHE.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+        return {**headers, "authorization": f"Bearer {self.token()}"}
 
     def token(self) -> str:
         """접근토큰. 24h 유효이고 재발급 빈도 제한이 있어 파일에 캐시한다."""
@@ -643,7 +720,9 @@ class KisClient:
     @staticmethod
     def _check(res: dict, what: str) -> dict:
         if str(res.get("rt_cd", "")) != "0":
-            raise KisError(f"{what} 실패 [{res.get('msg_cd')}] {res.get('msg1')}")
+            # 증권사가 응답으로 거절했다 — 주문이면 접수 0(rejected).
+            raise KisError(f"{what} 실패 [{res.get('msg_cd')}] {res.get('msg1')}", kind="rejected",
+                           code=str(res.get("msg_cd") or ""))
         return res
 
     # ------------------------------------------------------------- 국내주식
@@ -894,6 +973,85 @@ class KisClient:
         return {"order_no": o.get("ODNO", ""), "order_time": o.get("ORD_TMD", ""),
                 "orgno": o.get("KRX_FWDG_ORD_ORGNO", ""), "excg": excg or self.kr_excg, "raw": res}
 
+    def _domestic_ccld(self, ticker: str = "", date: str = "") -> dict:
+        """국내 주문체결조회(inquire-daily-ccld) 원응답 — 주문번호를 비워 묻는다(그날·그 종목 주문 전부가 온다)."""
+        day = date or datetime.now(KST).strftime("%Y%m%d")
+        params = {
+            "CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd,
+            "INQR_STRT_DT": day, "INQR_END_DT": day,
+            "SLL_BUY_DVSN_CD": "00", "INQR_DVSN": "00", "PDNO": ticker or "",
+            "CCLD_DVSN": "00", "ORD_GNO_BRNO": "", "ODNO": "",
+            "INQR_DVSN_3": "00", "INQR_DVSN_1": "",
+            "CTX_AREA_FK100": "", "CTX_AREA_NK100": "",
+        }
+        if self.svr == "real":
+            params["EXCG_ID_DVSN_CD"] = "ALL"        # SOR 주문은 KRX·NXT로 갈라질 수 있다 — 전체로 묻는다
+        return self._request(
+            "GET", "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
+            headers=self._headers(self.tr["dom_ccld"]), params=params,
+        )
+
+    def domestic_orders(self, ticker: str = "", date: str = "") -> dict:
+        """국내 **당일 주문 목록** — 접수 불명(UNKNOWN) 주문을 증권사 기록으로 확인할 때 쓴다(2026-10-19 · Codex R01).
+
+        반환 {ok, complete, authoritative_empty, rows: [행], msg_cd}. 행은 `_ccld_row` 모양(방향·원주문 번호·KST 접수 시각 포함).
+        - `authoritative_empty` — 실계좌가 `KIOK0560`(조회할 내용이 없습니다)으로 **빈 목록**을 답했다 = 그날 그 종목 주문이 없다
+          (2026-10-12·19 실계좌 응답 확인). 모의서버의 빈 답(70070000)은 들쭉날쭉해서 확정으로 쓰지 않는다.
+        - `complete` — 다음 쪽 키(`ctx_area_nk100`)가 비었다. 다음 쪽이 있으면 '없다'로 결론 내지 않는다.
+        """
+        res = self._domestic_ccld(ticker, date)
+        self._check(res, f"국내 당일 주문 목록({ticker or '전체'})")
+        raw_rows = res.get("output1") or []
+        rows = [self._ccld_row(r, "KR") for r in raw_rows]
+        return {"ok": True, "complete": not str(res.get("ctx_area_nk100") or "").strip(),
+                "authoritative_empty": (self.svr == "real" and str(res.get("msg_cd") or "") == "KIOK0560"
+                                        and not raw_rows),
+                "rows": rows, "msg_cd": str(res.get("msg_cd") or "")}
+
+    @staticmethod
+    def _ccld_row(r: dict, market: str) -> dict:
+        """주문체결조회 한 행 → 공통 모양. 칸 이름이 없으면 비운다(방향을 모르면 집행기가 채택하지 않는다 — 안전 쪽)."""
+        def _i(*keys):
+            for k in keys:
+                if r.get(k) not in (None, ""):
+                    try:
+                        return int(float(r.get(k)))
+                    except (TypeError, ValueError):
+                        return 0
+            return 0
+
+        def _f(*keys):
+            for k in keys:
+                if r.get(k) not in (None, ""):
+                    try:
+                        return float(r.get(k))
+                    except (TypeError, ValueError):
+                        return 0.0
+            return 0.0
+        orgn = str(r.get("orgn_odno") or "").strip()
+        side = {"01": "SELL", "02": "BUY"}.get(str(r.get("sll_buy_dvsn_cd") or "").strip())
+        # 접수 시각(KST) — 국내는 ord_dt+ord_tmd, 해외는 국내 기준 주문일(dmst_ord_dt)+ord_tmd(KST · 2026-10-12 모의 응답 확인).
+        d = str(r.get("dmst_ord_dt") or r.get("ord_dt") or "").strip() if market != "KR" else str(r.get("ord_dt") or "").strip()
+        tm = str(r.get("ord_tmd") or "").strip()
+        ord_at = None
+        if len(d) == 8 and len(tm) >= 6 and (d + tm[:6]).isdigit():
+            ord_at = f"{d[:4]}-{d[4:6]}-{d[6:8]}T{tm[:2]}:{tm[2:4]}:{tm[4:6]}+09:00"
+        filled = _i("tot_ccld_qty", "ft_ccld_qty")
+        rjct = str(r.get("rjct_rson") or "").strip()
+        return {
+            "order_no": str(r.get("odno") or "").strip(), "orgn_order_no": orgn,
+            "ticker": str(r.get("pdno") or "").strip(), "side": side,
+            "ord_qty": _i("ord_qty", "ft_ord_qty"), "filled_qty": filled,
+            "remain_qty": _i("rmn_qty", "nccs_qty"), "avg_price": _f("avg_prvs", "ft_ccld_unpr3"),
+            "price": _f("ord_unpr", "ft_ord_unpr3"), "ord_at": ord_at,
+            "is_original": orgn.strip("0") == "",          # 정정·취소 행은 원주문 번호를 단다
+            "cancelled": (str(r.get("cncl_yn", "")).upper() == "Y" or str(r.get("rvse_cncl_dvsn") or "").strip() == CNCL),
+            "rejected": ((_i("rjct_qty") > 0 or bool(rjct and rjct not in ("0", "00"))) and filled == 0),
+            "orgno": r.get("ord_gno_brno", ""),
+            "excg": str(r.get("excg_dvsn_cd") or r.get("ovrs_excg_cd") or "").strip(),
+            "raw": r,
+        }
+
     def domestic_order_status(self, order_no: str, ticker: str = "", date: str = "") -> dict:
         """국내 주문 1건의 체결 상태. 반환 {order_no, ord_qty, filled_qty, remain_qty, avg_price,
         cancelled, rejected, found, raw}.
@@ -906,21 +1064,7 @@ class KisClient:
         # ★ 모의서버는 이 TR로 **당일 주문만** 돌려준다(2026-09-16 실측: 9/8~9/14 주문 전부
         #   "조회할 내역이 없습니다"). 체결 확정은 그날 안에 하므로 문제는 없지만, 지난 주문을
         #   여기로 다시 확인할 수는 없다 — found=False가 '없었다'는 뜻이 아니다.
-        day = date or datetime.now(KST).strftime("%Y%m%d")
-        params = {
-            "CANO": self.cano, "ACNT_PRDT_CD": self.acnt_prdt_cd,
-            "INQR_STRT_DT": day, "INQR_END_DT": day,
-            "SLL_BUY_DVSN_CD": "00", "INQR_DVSN": "00", "PDNO": ticker or "",
-            "CCLD_DVSN": "00", "ORD_GNO_BRNO": "", "ODNO": "",
-            "INQR_DVSN_3": "00", "INQR_DVSN_1": "",
-            "CTX_AREA_FK100": "", "CTX_AREA_NK100": "",
-        }
-        if self.svr == "real":
-            params["EXCG_ID_DVSN_CD"] = "ALL"        # SOR 주문은 KRX·NXT로 갈라질 수 있다 — 전체로 묻는다
-        res = self._request(
-            "GET", "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
-            headers=self._headers(self.tr["dom_ccld"]), params=params,
-        )
+        res = self._domestic_ccld(ticker, date)
         self._check(res, f"국내 주문체결조회({order_no})")
         rows = res.get("output1") or []
         want = str(order_no).lstrip("0") or "0"
@@ -978,20 +1122,31 @@ class KisClient:
     # ------------------------------------------------------------- 해외주식
 
     def overseas_price(self, ticker: str, excd: str = "NAS") -> dict:
-        """해외 현재가. excd는 시세용 코드(NAS/NYS/AMS)로 주문용(NASD/NYSE/AMEX)과 다르다."""
-        res = self._request(
-            "GET", "/uapi/overseas-price/v1/quotations/price",
-            headers=self._headers(self.tr["ov_price"]),
-            params={"AUTH": "", "EXCD": excd, "SYMB": ticker},
-        )
-        self._check(res, f"해외 현재가({ticker})")
-        o = res.get("output", {}) or {}
+        """해외 현재가. excd는 시세용 코드(NAS/NYS/AMS)로 주문용(NASD/NYSE/AMEX)과 다르다.
+        ★ 거래소가 틀리면 증권사는 오류 없이 **빈 값**을 준다(2026-10-19) — 가격 칸이 비었으면 같은 계열(정규장·주간거래)의 다른 거래소로
+        다시 묻고, 값을 준 거래소를 `excd`로 돌려준다(거래소 코드 없이 온 주문이 뉴욕거래소 종목이면 '현재가 0'으로 갱신·전제 검사가 빠졌다)."""
+        first = quote_excd(excd)
+        fam = US_DAY_QUOTE_EXCDS if first in US_DAY_QUOTE_EXCDS else US_QUOTE_EXCDS
+        tried, o = [], {}
+        for ex_ in [first] + [e for e in fam if e != first]:
+            res = self._request(
+                "GET", "/uapi/overseas-price/v1/quotations/price",
+                headers=self._headers(self.tr["ov_price"]),
+                params={"AUTH": "", "EXCD": ex_, "SYMB": ticker},
+            )
+            self._check(res, f"해외 현재가({ticker})")
+            o = res.get("output", {}) or {}
+            tried.append(ex_)
+            if str(o.get("last") or "").strip():         # 값이 왔다(빈 값 = 그 거래소에 없는 종목)
+                break
         return {
             "ticker": ticker,
             "price": float(o.get("last") or 0),
             "change_pct": float(o.get("rate") or 0),
             "currency": o.get("curr", "USD"),
             "prev_close": float(o.get("base") or 0) or None,     # 전일 종가(base = last − diff · 2026-10-14 실응답 확인)
+            "excd": tried[-1] if str(o.get("last") or "").strip() else first,
+            "excd_tried": tried,
         }
 
     def overseas_balance(self, excd: str = "NASD", currency: str = "USD") -> dict:
@@ -1137,13 +1292,8 @@ class KisClient:
         return {"order_no": o.get("ODNO", ""), "order_time": o.get("ORD_TMD", ""),
                 "orgno": o.get("KRX_FWDG_ORD_ORGNO", ""), "raw": res}
 
-    def overseas_order_status(self, order_no: str, ticker: str = "", excd: str = "",
-                              date: str = "") -> dict:
-        """해외 주문 1건의 체결 상태 — `domestic_order_status`와 같은 모양으로 돌려준다.
-
-        2026-09-16 00:39 실측(VTTS3035R): `ft_ord_qty 30 · ft_ccld_qty 30 · nccs_qty 0 ·
-        ft_ccld_unpr3 141.66`. 거부는 `rjct_rson`(코드)·`rjct_rson_name`으로 온다.
-        """
+    def _overseas_ccnl(self, ticker: str = "", excd: str = "", date: str = "") -> dict:
+        """해외 주문체결내역(inquire-ccnl) 원응답 — 주문번호를 비워 묻는다(세션일 ±1일 · 그 종목 주문 전부)."""
         # `ord_dt`는 **미국 현지 거래일**이다(2026-09-16 00:23 KST 주문이 20260915로 온다).
         # 날짜 하나를 찍으면 자정을 넘긴 run에서 못 찾으므로 세션일 ±1일로 묶어 조회한다.
         if date:
@@ -1152,7 +1302,7 @@ class KisClient:
             sd = market_session("US")["session_date"]
             start = (sd - timedelta(days=1)).strftime("%Y%m%d")
             end = (sd + timedelta(days=1)).strftime("%Y%m%d")
-        res = self._request(
+        return self._request(
             "GET", "/uapi/overseas-stock/v1/trading/inquire-ccnl",
             headers=self._headers(self.tr["ov_ccld"]),
             params={
@@ -1164,6 +1314,28 @@ class KisClient:
                 "CTX_AREA_NK200": "", "CTX_AREA_FK200": "",
             },
         )
+
+    def overseas_orders(self, ticker: str = "", excd: str = "", date: str = "") -> dict:
+        """해외 **당일(세션일 ±1일) 주문 목록** — `domestic_orders`와 같은 모양(2026-10-19 · Codex R01)."""
+        res = self._overseas_ccnl(ticker, excd, date)
+        self._check(res, f"해외 당일 주문 목록({ticker or '전체'})")
+        raw_rows = res.get("output") or []
+        if isinstance(raw_rows, dict):
+            raw_rows = [raw_rows]
+        rows = [self._ccld_row(r, "US") for r in raw_rows]
+        return {"ok": True, "complete": not str(res.get("ctx_area_nk200") or "").strip(),
+                "authoritative_empty": (self.svr == "real" and str(res.get("msg_cd") or "") == "KIOK0560"
+                                        and not raw_rows),
+                "rows": rows, "msg_cd": str(res.get("msg_cd") or "")}
+
+    def overseas_order_status(self, order_no: str, ticker: str = "", excd: str = "",
+                              date: str = "") -> dict:
+        """해외 주문 1건의 체결 상태 — `domestic_order_status`와 같은 모양으로 돌려준다.
+
+        2026-09-16 00:39 실측(VTTS3035R): `ft_ord_qty 30 · ft_ccld_qty 30 · nccs_qty 0 ·
+        ft_ccld_unpr3 141.66`. 거부는 `rjct_rson`(코드)·`rjct_rson_name`으로 온다.
+        """
+        res = self._overseas_ccnl(ticker, excd, date)
         self._check(res, f"해외 주문체결내역({order_no})")
         rows = res.get("output") or []
         if isinstance(rows, dict):
@@ -1229,7 +1401,7 @@ class KisClient:
         if side != "SELL":
             raise ValueError("주간거래는 매도 전용이다(2026-10-12 사용자 결정 — 신규 매수는 정규장에서만)")
         if self.svr != "real" or not self.tr.get("ov_daytime_sell_us"):
-            raise KisError("주간거래 주문은 실계좌 전용이다(모의 TR 없음)")
+            raise KisError("주간거래 주문은 실계좌 전용이다(모의 TR 없음)", kind="unsent")
         excd = order_excd(excd)
         if excd not in US_EXCHANGES:
             raise ValueError(f"지원 거래소는 {US_EXCHANGES}, got {excd!r}")
@@ -1258,7 +1430,7 @@ class KisClient:
         """주간거래 정정·취소 — 공식 daytime_order_rvsecncl.py(TTTS6038U). **재시도 없음**(POST)."""
         self._guard_orders(f"주간거래 {'취소' if cancel else '정정'} {order_no}")
         if self.svr != "real" or not self.tr.get("ov_daytime_rvsecncl_us"):
-            raise KisError("주간거래 정정·취소는 실계좌 전용이다(모의 TR 없음)")
+            raise KisError("주간거래 정정·취소는 실계좌 전용이다(모의 TR 없음)", kind="unsent")
         if qty <= 0:
             raise ValueError(f"qty must be positive, got {qty}")
         if not cancel and (not price or price <= 0):
@@ -1339,24 +1511,8 @@ def kr_cash_from_margin(m: dict):
     return None
 
 
-def drop_incomplete_session(rows: list, min_ratio: float = 0.2) -> tuple:
-    """가장 최근 행이 **미완성 세션**이면 떼어낸다. 반환 (쓸 행들, 떼어낸 행 or None).
-
-    장중이거나 프리마켓이면 그날 행이 이미 존재하지만 종가·고저가 확정되지 않았다.
-    그걸 기준 계산에 넣으면 지지·저항이 엉뚱한 값으로 나온다.
-    판별은 **거래량**으로 한다 — 미완성 세션은 거래량이 확연히 적다.
-    (2026-09-08 18:00 KST 실측: MU의 그날 행 거래량 242,504 vs 직전일 35,249,519 = 0.7%.)
-    """
-    if len(rows) < 5:
-        return rows, None
-    vols = sorted(r.get("volume", 0) for r in rows[1:21] if r.get("volume"))
-    if not vols:
-        return rows, None
-    median = vols[len(vols) // 2]
-    top = rows[0]
-    if median and top.get("volume", 0) < median * min_ratio:
-        return rows[1:], top
-    return rows, None
+# ★ drop_incomplete_session(거래량으로 미완성 세션을 짐작)은 2026-10-19 지웠다(Codex U04) — 세션이 끝났는지는 거래량이 아니라
+#   "관측 시각 > 그 세션의 마감"으로 정한다(db._is_final · last_session_date). 확정 종가가 필요한 쪽은 db 일봉을 need_final=True로 부른다.
 
 
 def kr_cash_from_summary(summary: dict) -> tuple:

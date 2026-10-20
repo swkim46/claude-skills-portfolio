@@ -36,6 +36,7 @@
  "fc_track1_max_rounds": 5,
  "_note_note_sources": "노트 필수 요소의 출처 칸(제안 basis_refs · 배분 regime_refs · 시나리오·거부 후보·보유 sources · [AI] 문장 끝 [S번호] + 노트 끝 출처 표 — 2026-10-13 사용자: \"요소들에 대해 출처도 제대로 남아야 한다\"). false = note_lint.py가 경고만 · true = 위반(note·dispatch 게이트가 막는다) · 'YYYY-MM-DD' = 그날(KST)부터 위반. \"2026-10-14\" = 10-13 밤 run은 형식 첫날이라 경고만, 10-14 국내 run부터 자동으로 위반(사람이 바꾸는 단계 없음).",
  "note_sources_required": "2026-10-14",
+ "scenario_cond_required": "2026-10-21",
  "signal_max_age_minutes": 180,
  "approved_max_age_minutes": 30,
  "_note_fill": "★ 접수는 체결이 아니다 — run은 주문이 체결·부분체결·취소·만료·거부 중 하나로 확정될 때까지 닫히지 않는다(2026-09-16 사용자 지시 · 9/15 VST가 접수·미체결 상태로 게이트를 통과했던 것이 계기). fill.py: 접수 뒤 fill_chase_after_sec가 지나도 안 닿으면 승인가 ±fill_chase_max_pct 안에서 현재가 쪽으로 정정(매수는 올리고 매도는 내린다 · 수량은 승인 금액을 넘지 않게 내린다 · 최대 fill_chase_max회), 접수 후 fill_wait_minutes가 지나면 잔량 취소. 재전송은 절대 없다 — 살아 있는 주문을 다시 보내면 두 번 산다. null이면 기본값(20분·20초·90초·3회·0.5%).",
@@ -57,12 +58,14 @@
    "KR": 10.3,
    "US": 11.5
   },
-  "_note_min_target_gap_by_market": "2026-10-12 실계좌 전환 — 바닥 10%를 **세후 순수익**으로 맞춘 시장별 값(analysis/세제_실계좌_261012_v1_0.md: 국내 왕복 0.228% → 10.25% · 미국 왕복 1.295% → 11.44%). account_mode가 paper가 아니면 이 값을 쓰고, paper면 min_target_gap_pct(10.0)를 쓴다. 위로는 상한이 없다.",
+  "_note_min_target_gap_by_market": "2026-10-12 실계좌 전환 계획 — 바닥 10%를 **세후 순수익**으로 맞춘 시장별 값(analysis/세제_실계좌_261012_v1_0.md: 국내 왕복 0.228% → 10.25% · 미국 왕복 1.295% → 11.44%). account_mode가 paper가 아니면 이 값을 쓰고, paper면 min_target_gap_pct(10.0)를 쓴다. 위로는 상한이 없다.",
   "min_profit_target_pct": 10.0,
   "_note_min_profit_target": "2026-10-03 사용자 — 수익 쪽 고정 목표 다리(price >= N)는 기준가(진입 기준가·보유 중이면 평균가)×(1+이 %) 이상이고 basis에 저항 근거가 있으며 보유의 1/3 이하일 때만 허용한다(theses.py가 검증). 고정 목표는 기본이 아니다 — 오르는 종목은 추적 다리(trail_band)로 들고 간다. 바닥이지 목표가 아니다.",
   "small_entry_needs_plan_pct": 2.0,
   "new_entry_vs_avg_holding": true,
   "_note_new_entry_vs_avg": "FB-261010-5(2026-10-11 사용자 승인) — 새 종목(미보유)의 첫 증분이 이 시장 보유 종목의 평균 크기(보유 평가금액 합 ÷ 종목 수, 포트폴리오 분모)보다 작으면 small_why{kind: stop_close|binary_event|one_share|liquidity, why}가 있어야 통과. 아니면 평균 이상으로 키우거나(현금 부족분은 회전 매도) 사지 않는다. 숫자 상수가 아니라 지금 보유에서 나오는 기준이다. 계기: 261010 적용 뒤 새 진입 13건 평균 1.22% · 미국 22종목 중 12종목 2% 미만. false면 끔.",
+  "confirmed_axis_min_vs_avg_ratio": 0.5,
+  "_note_confirmed_axis_min": "FB-261017-8(2026-10-17 사용자 승인) — '축이 확인된 보유'(열린 + 전망 축의 논지가 있고 현재가 > 평균가 — 회전 매도가 자금원에서 빼는 것과 같은 정의)의 비중이 이 시장 보유 평균 × 이 값보다 작으면 둘 중 하나가 있어야 한다: ① 이 run의 증액 BUY(증분 뒤 그 선 이상 또는 increase_when.to_pct ≥ 그 선) ② 시그널 holds[]의 small_why{kind, why, expected_upside_pct} — kind는 stop_close|binary_event|one_share|liquidity|order_cap|etf_expression(ETF 소액으로 축을 표현 중), 계좌 기여 = 비중 × 기대 상승폭을 approved에 남긴다. 둘 다 없으면 approved undersized_short=true로 dispatch·no_trade 게이트가 막는다. 자동 크기가 아니라 판정을 요구하는 선이다. 계기: 261017 피드백 — 확인된 축의 보유가 1% 안팎에 머물러 축이 맞아도 계좌 기여가 거의 없었다. 0이면 끔.",
   "_note_small_entry": "FB-261003-4(2026-10-03 승인) — BUY 증분이 이 %보다 작으면 increase_when{when, to_pct}(무엇이 확인되면 얼마로 늘리나)가 있어야 통과. 첫 피드백: 1~2% 시험 매수로 +31% 종목을 탔는데 계좌 기여가 거의 없었다. 크기 자체는 여전히 size_why가 정한다.",
   "fixed_target_max_size_pct": 33.4,
   "_note_fixed_target_max_size": "2026-10-03 — 수익 쪽 고정 목표 다리가 팔 수 있는 보유 비중의 상한(약 1/3). 나머지는 추적 다리로 들고 간다(10%는 하한·상한 없음). theses.py가 읽는다."

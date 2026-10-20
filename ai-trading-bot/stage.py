@@ -6,9 +6,15 @@
 
   stage.py capture --market kr --days 2   # 재료 + 섹터 보드 → 캡처 파일 + 노트 뼈대
   stage.py carry   --market kr            # 트리거·회고·대응매핑·순환 → carry 파일
+  stage.py render-note --stamp 261019 --market kr   # 노트 자리표 {{F-id}}·§3 섹터 보드·§12 출처 원장을 저장소에서 채운다(다시 돌려도 같다)
 
 판단은 하지 않는다. 여기서 하는 일은 **모으고 재고 옮겨 적는 것**뿐이고,
 무엇이 유망한지 고르는 것은 3·4단(사람이 아니라 그 단계의 문맥)이 한다.
+
+원장(논지·지도·일정·감시 목록·재투자 대기·run 기록)은 저장소(`db.py`)에서 읽고 쓴다(2026-10-17).
+run 시각은 `ex_run`에 남는다 — capture가 `db.run_start`·사전 백업·`stage_mark`, close가 집행 기록 이관·감사 복사·`run_close`.
+사실은 저장소 사실 층(`facts.py`)에 있고 노트는 그것을 가리킨다 — 값 자리 `{{F-000731}}`·`{{F-000731.as_of}}`·`{{F-000731.line}}`을
+`render-note`가 `<!--F:F-000731-->값<!--/F-->`로 채운다(교정 뒤 다시 돌리면 그 자리 값만 바뀐다). §3·§12는 렌더 자리표 사이를 통째로 채운다.
 """
 from __future__ import annotations
 
@@ -21,6 +27,8 @@ import sys
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import db
 
 PROJ = Path(__file__).resolve().parent
 KST = timezone(timedelta(hours=9))
@@ -93,9 +101,18 @@ SECTIONS = [
      "(2026-09-16 사용자 지시). 이번 run의 배수는 머리말 자본 줄에서 가져온다"),
     ("§11 집행 결과", "§11", "5단이 규율 판정을, 6단이 체결을 적는다 — 4단에서는 비워둔다"),
     ("§12 출처 원장 — 세 시점", "§12",
-     "`python3 srcledger.py render --stamp <YYMMDD> --market <mkt>`의 출력을 붙인다. "
+     "`python3 stage.py render-note --stamp <YYMMDD> --market <mkt>`가 이 렌더 자리를 채운다(손으로 붙이지 않는다 · 저장소 사실 층). "
      "사실마다 as-of(그 사실이 사실인 시점) · retrieved(가져온 시점) · written(쓴 시점)"),
 ]
+
+# 렌더 자리표 — 이 둘 사이는 `render-note`가 통째로 다시 쓴다(손으로 고치지 않는다 · 다시 돌리면 같은 글자).
+S3_OPEN, S3_CLOSE = "<!-- §3 render -->", "<!-- /§3 render -->"
+S12_OPEN, S12_CLOSE = "<!-- §12 render -->", "<!-- /§12 render -->"
+# 노트의 사실 값 자리 — 쓰는 자리 `{{F-000731}}`(값) · `{{F-000731.as_of}}` · `{{F-000731.line}}` → 렌더된 자리 `<!--F:…-->값<!--/F-->`
+FACT_ID = r"(?:F-\d{6}|SRC-\d+)"
+FACT_REF = re.compile(r"\{\{(" + FACT_ID + r")(?:\.(\w+))?\}\}")
+FACT_MARK = re.compile(r"<!--F:(" + FACT_ID + r")(?:\.(\w+))?-->(.*?)<!--/F-->")
+S_CITE = re.compile(r"\[(S\d+(?:\s*[,·/]\s*S\d+)*)\]")      # 문장 끝 출처 번호 `[S3]`·`[S3, S5]` — 이번 run S 번호
 
 
 def stamp_today(market: str = "") -> str:
@@ -124,8 +141,36 @@ TRANSIENT = ("tokenP", "Read timed out", "ReadTimeout", "timed out", "OPSQ0003",
              "RemoteDisconnected", "Temporary failure")
 
 
-def run(cmd: list[str], title: str) -> str:
-    """서브프로세스 출력을 그대로 돌려준다 — 캡처 파일에는 **가공 없이** 담는다.
+class StepResult(str):
+    """명령 한 번의 결과(2026-10-19 · Codex U02) — 캡처 파일에 그대로 넣는 Markdown 문자열이면서 종료코드·상태·필수 여부를 단다.
+    문자열이라 `blocks.append(run(...))`·`"\n".join(blocks)`는 그대로 돌고, 단계 결과(ex_stage_step)는 `.step()`으로 남긴다.
+    상태: 종료코드가 ok_rc 안이면 ok · 아니면 필수는 failed, 선택은 reduced(그 자료에 기대는 판단만 제한된다)."""
+    def __new__(cls, md, *, name="", cmd=None, rc=0, required=False, status=None, note=""):
+        o = super().__new__(cls, md)
+        o.name, o.cmd, o.rc, o.required = name, cmd, rc, required
+        o.status = status or ("ok" if rc == 0 else ("failed" if required else "reduced"))
+        o.observed_at = datetime.now(KST).isoformat(timespec="seconds")
+        o.note = note or ("" if o.status == "ok" else (f"종료코드 {rc}" if rc not in (None, 0) else ""))
+        return o
+
+    def step(self) -> dict:
+        return {"name": self.name, "cmd": self.cmd, "required": self.required, "rc": self.rc, "status": self.status,
+                "observed_at": self.observed_at, "note": self.note}
+
+
+def _block(fn, name: str, required: bool = False) -> StepResult:
+    """도구 블록(문자열을 돌려주는 함수) 하나 → StepResult. 예외면 그 사실을 블록에 남기고 failed(필수)/reduced(선택)."""
+    try:
+        return StepResult(fn(), name=name, required=required)
+    except db.TestGuard:
+        raise
+    except Exception as e:                          # noqa: BLE001
+        return StepResult(f"### {name}\n\n★ 실패 — {type(e).__name__}: {e}\n", name=name, rc=1, required=required,
+                          note=f"{type(e).__name__}: {str(e)[:160]}")
+
+
+def run(cmd: list[str], title: str, *, required: bool = False, ok_rc=(0,)) -> StepResult:
+    """서브프로세스 출력을 그대로 돌려준다 — 캡처 파일에는 **가공 없이** 담는다(StepResult — 종료코드·필수 여부를 단 문자열).
 
     ★ 2026-10-01: KIS 일시 오류(토큰 발급 읽기 타임아웃 · OPSQ0003 라우팅)로 1차 호출이 죽으면 run이 손으로
     다시 돌렸다(260929 US capture·carry 두 번). 일시 오류 문구가 보이면 짧게 두 번까지 다시 부른다 — 결과는 같은
@@ -145,9 +190,12 @@ def run(cmd: list[str], title: str) -> str:
     body = (p.stdout or "") + (("\n[stderr]\n" + p.stderr) if p.stderr.strip() else "")
     if tries:
         body = "\n".join(tries) + "\n" + body
+    ok = p.returncode in ok_rc
     if p.returncode != 0:
-        body += f"\n[종료코드 {p.returncode} — 실패한 명령이다. '결과 없음'으로 읽지 말 것.]"
-    return f"### {title}\n\n```\n{body.rstrip()}\n```\n"
+        body += (f"\n[종료코드 {p.returncode} — 검사가 찾은 것이 있다(명령 실패 아님 · 위 줄을 읽는다).]" if ok else
+                 f"\n[종료코드 {p.returncode} — 실패한 명령이다. '결과 없음'으로 읽지 말 것.]")
+    return StepResult(f"### {title}\n\n```\n{body.rstrip()}\n```\n", name=title, cmd=cmd, rc=p.returncode, required=required,
+                      status="ok" if ok else ("failed" if required else "reduced"))
 
 
 # ─────────────────────────────────────────────────────────── capture
@@ -167,7 +215,7 @@ def build_board(market: str, quick: bool, record: bool = False) -> tuple[str, st
 
     c = KisClient.for_mode()
     rows, bench_name, bench = mm._fetch_board(c, market, quick)
-    state = mm._sector_state(mm._read(mm.MAP, {"axes": []}))
+    state = mm._sector_state(db.market_map_load())
     import sessions as _ss
     today = _ss.run_date(market).isoformat()          # 세션 날짜(현지 거래일 · 2026-10-14) — 섹터 이력 date
 
@@ -225,11 +273,9 @@ def build_universe(market: str, st: str) -> tuple[str, int]:
     snap = json.loads((PROJ / "data" / f"snapshot_{st}_{market}.json").read_text(encoding="utf-8"))
     prices = snap.get("prices") or {}
     dp = 0 if market == "kr" else 2          # 미국은 센트까지 — 트리거가 소수점에 걸린다
-    wl = json.loads((PROJ / "config" / "watchlist.json").read_text(encoding="utf-8"))
     axis = {i["ticker"]: (i.get("axis") or i.get("sector") or "")
-            for i in (wl.get(market.upper()) or [])}
-    th = json.loads((JOURNAL / "theses.json").read_text(encoding="utf-8")) if (JOURNAL / "theses.json").exists() else {}
-    items = th if isinstance(th, list) else (th.get("theses") or [])
+            for i in db.companies(market.upper())}              # 감시 목록 = 저장소 dim_company
+    items = db.theses_all()
     by_tic = {}
     for x in items:
         if x.get("status") in ("closed", "expired"):
@@ -323,7 +369,7 @@ def stamp(key: str) -> str:
     """완료 스탬프 **두 줄** — 완료 표시와 작성 시각을 **분리해서** 찍는다.
 
     세 시점 중 `written`을 자동으로 얻는 자리다(`as-of`는 출처가 말하는 시점이라 수동,
-    `retrieved`는 `srcledger.py`가 찍는다). 노트만 보고는 "삼성생명 305,000"이 언제
+    `retrieved`는 `facts.py add`가 찍는다). 노트만 보고는 "삼성생명 305,000"이 언제
     값인지 알 수 없었다 — 한 노트 안에 캡처 13:30 · 재호출 15:20(값이 달라짐) ·
     종가 15:30이 섞여 있었다.
 
@@ -434,7 +480,10 @@ def note_skeleton(market: str, st: str, evid: Path, board_md: str, uni_md: str =
     for title, key, hint in SECTIONS[1:]:
         out.append(f"\n---\n\n## {title}\n")
         if key == "§3":
-            out.append(f"\n{board_md}\n\n{stamp('§3')}\n")
+            # 렌더 자리 — 1단은 캡처한 보드를 넣고, 4단 `render-note`가 보드 기록 + 섹터 상태 + 재료 언급(mat_mention)으로 다시 채운다
+            out.append(f"\n{S3_OPEN}\n{board_md}\n{S3_CLOSE}\n\n{stamp('§3')}\n")
+        elif key == "§12":
+            out.append(f"\n{S12_OPEN}\n<!-- TODO §12 --> {hint}\n{S12_CLOSE}\n")
         elif key == "§6" and uni_md:
             out.append("\n**표 한 줄 층 — 유니버스 전수.** 심층 5단과 섹터 비교표는 4단이 위에 덧붙인다.\n\n"
                        + uni_md + "\n\n<!-- TODO §6 --> 심층 5단 · 유니버스 밖 비교표\n")
@@ -455,11 +504,7 @@ def regime_inputs(market: str, board_txt: str = "") -> str:
     브로커가 죽어도 캡처를 막지 않는다(그 줄만 '못 쟀다')."""
     import re as _re
     lines = []
-    try:
-        bench = json.loads((PROJ / "config" / "benchmark.json").read_text(encoding="utf-8"))
-        tk = (bench.get(market.upper()) or {}).get("benchmark_ticker")
-    except (OSError, json.JSONDecodeError):
-        tk = None
+    tk = (db.benchmark_get(market.upper()) or {}).get("benchmark_ticker")   # 벤치마크 기준점(저장소 op_benchmark_anchor)
     if tk:
         try:
             from kis_client import KisClient
@@ -468,9 +513,9 @@ def regime_inputs(market: str, board_txt: str = "") -> str:
             if market.lower() == "kr":
                 end = datetime.now(KST).strftime("%Y%m%d")
                 start = (datetime.now(KST) - _td(days=120)).strftime("%Y%m%d")
-                rows = cli.domestic_daily(tk, start, end)
+                rows = db.domestic_daily(cli, tk, start, end)          # 일봉은 저장소를 거친다(같은 run의 재조회는 표에서)
             else:
-                rows = cli.overseas_daily(tk, "AMS" if tk in ("SPY",) else "NAS")
+                rows = db.overseas_daily(cli, tk, "AMS" if tk in ("SPY",) else "NAS")
             closes = [float(r.get("close") or 0) for r in rows if r.get("close")]
             if len(closes) >= 61:
                 c0 = closes[0]
@@ -478,7 +523,7 @@ def regime_inputs(market: str, board_txt: str = "") -> str:
                     return (c0 / closes[n] - 1) * 100 if len(closes) > n and closes[n] else None
                 ma20 = sum(closes[:20]) / 20
                 ma60 = sum(closes[:60]) / 60
-                lines.append(f"벤치마크 {tk} 종가 {c0:,.2f} (기준일 {rows[0].get('date')})")
+                lines.append(f"벤치마크 {tk} 종가(확정) {c0:,.2f} (기준일 {rows[0].get('date')} — 마지막 닫힌 세션)")
                 lines.append(f"  수익률 5일 {chg(5):+.2f}% · 20일 {chg(20):+.2f}% · 60일 {chg(60):+.2f}%")
                 lines.append(f"  20일선 {ma20:,.2f} 대비 {(c0 / ma20 - 1) * 100:+.2f}% · 60일선 {ma60:,.2f} 대비 {(c0 / ma60 - 1) * 100:+.2f}%"
                              f" → {'20·60일선 위' if (c0 > ma20 and c0 > ma60) else '20일선 위·60일선 아래' if c0 > ma20 else '60일선 위·20일선 아래' if c0 > ma60 else '20·60일선 아래'}"
@@ -490,7 +535,7 @@ def regime_inputs(market: str, board_txt: str = "") -> str:
         except Exception as e:                          # noqa: BLE001
             lines.append(f"벤치마크 {tk}: 못 쟀다({type(e).__name__}: {str(e)[:80]})")
     else:
-        lines.append("벤치마크 티커 없음(config/benchmark.json)")
+        lines.append("벤치마크 티커 없음(저장소 op_benchmark_anchor)")
     ups = downs = 0
     for ln in (board_txt or "").splitlines():
         m = _re.search(r"([+-]\d+\.\d+)%", ln)
@@ -527,17 +572,8 @@ def watch_loop_block(market: str) -> str:
     """★ FB-261003-8 — run 사이 장중 감시 루프(stops.py, mode=loop)가 살아 있는가. 마지막 점검 시각과 그 뒤 지난 시간.
 
     세션 전용 예약이 만료되면 루프가 조용히 멈춘다(09-26~10-02 기록 없음). 멈춘 동안 손절·목표는 run 시각에만 판정됐다."""
-    rows = []
-    try:
-        for ln in (JOURNAL / "stops_log.jsonl").read_text(encoding="utf-8").splitlines():
-            try:
-                r = json.loads(ln)
-            except json.JSONDecodeError:
-                continue
-            if r.get("mode") == "loop" and str(r.get("market") or "").upper() == market.upper():
-                rows.append(r)
-    except OSError:
-        pass
+    rows = [r for r in db.log_rows("stops_log")
+            if r.get("mode") == "loop" and str(r.get("market") or "").upper() == market.upper()]
     now = datetime.now(KST)
     if not rows:
         line = (f"감시 루프 마지막 점검 **기록 없음** — run 사이 손절·목표가 run 시각에만 판정된다. "
@@ -567,17 +603,38 @@ def tests_block() -> str:
     return "### 테스트 (run_tests.py --last — 마지막 완주 기록)\n\n- " + line + "\n"
 
 
+def _finalize_block() -> str:
+    db.holidays_sync()
+    from kis_client import KisClient
+    res = db.bars_finalize(lambda: KisClient.for_mode())
+    return (f"### 일봉 확정 (db.bars_finalize — 마감 뒤 재관측)\n\n종목 {res['subjects']} · 확정 {res['finalized']} · "
+            f"브로커가 행을 안 줌 {res['missing']} · 오류 {res['errors']}\n\n{db.holidays_coverage_line()}\n")
+
+
 def cmd_capture(a) -> int:
     import sessions as _ss
     st = a.stamp or _ss.run_stamp(a.market)
     fresh = _ss.session_stamp(a.market)
     if not a.stamp and st != fresh:
-        print(f"※ 끝나지 않은 run(worklog_{st}_{a.market}.md · 포인터 journal/current_run.json)을 이어 간다 — stamp {st}"
+        print(f"※ 끝나지 않은 run(worklog_{st}_{a.market}.md · 포인터 저장소 op_current_run)을 이어 간다 — stamp {st}"
               f"(새 run이면 --stamp {fresh}를 명시)", file=sys.stderr)
     # ★ 현재 run 포인터(2026-10-14) — 기록 안의 날짜(논지·지도·일정·섹터 이력·자산 곡선)가 이 run의 세션 날짜를 쓰게.
     #   ingest보다 먼저 쓴다(ingest가 일정 `added`를 적는다).
-    _cur = _ss.write_current(a.market, st)
-    print(f"스탬프 {st} = {a.market.upper()} 세션 {_cur['session_date']} (현지 거래일)", file=sys.stderr)
+    from kis_client import account_mode as _acct_mode
+    _cur = _ss.write_current(a.market, st, account_mode=_acct_mode())
+    print(f"스탬프 {st} = {a.market.upper()} 세션 {_cur.get('session_date')} (현지 거래일)", file=sys.stderr)
+    # ★ run 기록(2026-10-17) — ex_run 한 행을 열고, 이 run이 무엇을 바꾸기 전에 저장소 전체를 백업한 뒤 capture 단계를 연다.
+    #   계좌 계열은 시작 때 정해진다(v4 · R09 — 같은 날 다른 계열로 다시 시작하면 거부).
+    try:
+        db.run_start(st, a.market, account_mode=_acct_mode(), session_date=_cur.get("session_date"))
+    except db.RunModeConflict as e:
+        print(f"[중단] {e}", file=sys.stderr)
+        return 2
+    _bk = db.backup(f"pre_{st}_{a.market}")
+    sid = db.stage_start(st, a.market, "capture")
+    t0 = datetime.now(KST)
+    print(f"저장소 백업 {_bk.name} · ex_run {db.run_id(st, a.market)} capture(시도 {db.q1('SELECT attempt FROM ex_stage WHERE id=?', (sid,))['attempt']})",
+          file=sys.stderr)
     # ★ 실행 시각 점검(2026-10-15) — 정규 슬롯은 국내 09:30 · 미국 개장 5분 뒤(서머타임 22:35 · 11-02부터 23:35).
     #   개장 20분 전보다 일찍 시작하면 예약 시각이 잘못 잡힌 것이다(주문이 개장 직후 변동 구간에 떨어지고 그날 고가·저가가 없다).
     from kis_client import market_session as _msess
@@ -595,10 +652,28 @@ def cmd_capture(a) -> int:
     ANALYSIS.mkdir(parents=True, exist_ok=True)
 
     blocks = [run(["ingest.py", "--market", a.market, "--with-news",
-                   "--days", str(a.days), "--stamp", st], "재료 수집 (ingest.py)")]
+                   "--days", str(a.days), "--stamp", st], "재료 수집 (ingest.py)", required=True)]
+    # ★ 필수 — 이번 시도가 새 스냅샷을 썼는가(옛 스냅샷 위에서 이후 단계가 돌지 않게 · U02)
+    snap = PROJ / "data" / f"snapshot_{st}_{a.market}.json"
+    try:
+        _gen = datetime.fromisoformat((json.loads(snap.read_text(encoding="utf-8")) or {}).get("generated_at") or "")
+        _fresh = _gen >= t0 - timedelta(seconds=1)
+        _snapj = json.loads(snap.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError, TypeError):
+        _gen, _fresh, _snapj = None, False, {}
+    blocks.append(StepResult("" if _fresh else f"### 스냅샷\n\n★ ingest가 새 스냅샷을 쓰지 않았다({snap.name} · 생성 {_gen})\n",
+                             name="스냅샷 새로 씀", rc=0 if _fresh else 1, required=True,
+                             note="" if _fresh else f"ingest가 새 스냅샷을 쓰지 않았다(생성 {_gen})"))
+    # 스냅샷 안의 선택 수집 실패 — 그 자료에 기대는 판단만 제한된다(노트 §10 [제한·1단])
+    _ns = _snapj.get("news_status") or {}
+    if _ns.get("error"):
+        blocks.append(StepResult("", name="뉴스레터 수집", rc=1, note=f"수집 실패 — {str(_ns['error'])[:120]} · 재료 기반 판단 제한"))
+    _dt = _snapj.get("dart") or {}
+    if _dt and (_dt.get("status") in ("error", "skipped") or (_dt.get("failed") or 0) > 0):
+        blocks.append(StepResult("", name="DART 공시 조회", rc=1,
+                                 note=f"{_dt.get('status')} · 실패 {_dt.get('failed') or 0}/{_dt.get('asked') or '?'} — 공시 축은 '확인 안 됨'"))
     # ★ 실계좌 전환(2026-10-12): 국내 run은 미국 주간거래(KST 10:00~) 시각과 겹친다(09:30 캡처면 창 전 → close에서) — 미국 보유의 손절·추적 다리를 주간 세션 시세로
     #   판정하고, 실계좌(real)면 그 자리에서 판다(조회 전용·모의면 판정만). 정규장 밤 run까지 12시간 들고 있지 않게 한다.
-    from kis_client import account_mode as _acct_mode
     _mode = _acct_mode()
     from kis_client import us_daytime_session as _uds
     if a.market == "kr" and _mode != "paper" and _uds()["is_open"]:
@@ -628,24 +703,52 @@ def cmd_capture(a) -> int:
     blocks.append(run(["sessions.py", "due", "--market", a.market, "--stamp", st],
                       "밀린 일과 (sessions.py — 반쪽·미실행·시각 이탈)"))
     # 집행 가능한 시각인가 · 수집 창이 간극을 덮는가 — 둘 다 캡처에 못 박는다.
-    blocks.append(market_window_block(a.market))
-    blocks.append(watch_loop_block(a.market))
-    blocks.append(tests_block())
-    blocks.append(news_window_block(a.market, a.days, st))
-    board_txt, board_md, roster = build_board(a.market, a.quick, record=not a.no_record)
-    blocks.append("### 섹터 보드 (market_map.board — 전수)\n\n```\n" + board_txt.rstrip() + "\n```\n")
+    blocks.append(_block(lambda: market_window_block(a.market), "집행 가능 시각"))
+    blocks.append(_block(lambda: watch_loop_block(a.market), "장중 감시"))
+    blocks.append(_block(tests_block, "테스트 완주 기록"))
+    blocks.append(_block(lambda: news_window_block(a.market, a.days, st), "수집 창"))
+    try:                                            # ★ 필수 — 섹터 보드(전수 로스터)
+        board_txt, board_md, roster = build_board(a.market, a.quick, record=not a.no_record)
+        blocks.append(StepResult("### 섹터 보드 (market_map.board — 전수)\n\n```\n" + board_txt.rstrip() + "\n```\n",
+                                 name="섹터 보드", required=True))
+    except db.TestGuard:
+        raise
+    except Exception as e:                          # noqa: BLE001
+        board_txt, board_md, roster = "", "", 0
+        blocks.append(StepResult(f"### 섹터 보드\n\n★ 실패 — {type(e).__name__}: {e}\n", name="섹터 보드", rc=1, required=True,
+                                 note=f"{type(e).__name__}: {str(e)[:160]}"))
     # ★ 자본 기준 블록을 캡처에도 박는다 — 노트 머리말의 자본 줄 숫자(합산 자산·1%·환율)는 이 파일이
-    #   출처여야 `verify_numbers`가 통과한다(2026-09-16 KR run이 이것 때문에 34건 미확인으로 4회 반복).
-    blocks.append("### 자본 기준 (risk_guard.portfolio_equity — 노트 머리말 자본 줄의 출처)\n\n"
-                  + capital_line(a.market, st) + "\n")
+    #   출처여야 `verify_numbers`가 통과한다(2026-09-16 KR run이 이것 때문에 34건 미확인으로 4회 반복). 필수 — 못 재면 크기의 근거가 없다.
+    _cap = capital_line(a.market, st)
+    blocks.append(StepResult("### 자본 기준 (risk_guard.portfolio_equity — 노트 머리말 자본 줄의 출처)\n\n" + _cap + "\n",
+                             name="자본 기준", rc=1 if "못 쟀다" in _cap else 0, required=True,
+                             note=_cap[:160] if "못 쟀다" in _cap else ""))
+    # ★ 일봉 확정(v5 · U04) — 장중에 받은 일봉(손절 감시·보드)을 마감 뒤 다시 관측해 확정한다(국내 09:30 run은 미국 마감 뒤 ·
+    #   미국 22:35 run은 국내 마감 뒤). 휴장일 사본도 맞춘다 · 커버리지가 12주 안이면 ★. 선택 — 실패해도 확정 읽기는 미확정 행을 안 쓴다.
+    blocks.append(_block(_finalize_block, "일봉 확정·휴장일 표"))
     # ★ 국면 판단 재료 — 배분 판단(allocation.regime)이 인용할 숫자를 기계로 넣는다(2026-09-22).
     #   벤치마크 5·20·60일 수익률과 20/60일선 대비 위치 · 보드 상승/하락 섹터 수. 모델은 이 숫자를 인용해 국면을 적는다.
-    blocks.append("### 국면 재료 (regime_inputs — allocation.regime이 인용하는 숫자)\n\n```\n"
-                  + regime_inputs(a.market, board_txt) + "\n```\n")
+    blocks.append(_block(lambda: "### 국면 재료 (regime_inputs — allocation.regime이 인용하는 숫자)\n\n```\n"
+                         + regime_inputs(a.market, board_txt) + "\n```\n", "국면 재료"))
     # ★ 요인별 노출(FB-261012-4) — 축을 나눠도 요인은 하나일 수 있다. 최대 요인이 꺾이는 가지를 §7에 두게 한다.
-    blocks.append(run(["market_map.py", "exposure", "--by", "driver", "--market", a.market,
+    blocks.append(run(["market_map.py", "exposure", "--by", "driver", "--market", a.market, "--stamp", st,
                        "--out", str((EVID / f"exposure_{st}_{a.market}.md").relative_to(PROJ))],
-                      "요인별 노출 (market_map.py exposure — 양 시장 합산 · 최대 요인 '꺾이면' 행은 §7)"))
+                      "요인별 노출·요인 상태 (market_map.py exposure — 양 시장 합산 · 최대 요인 '꺾이면' 행은 §7 · "
+                      "꺾인 요인은 §7 [요인 판정])"))
+
+    try:                                            # ★ 필수 — 유니버스 표(§6 전수)
+        uni_md, uni_n = build_universe(a.market, st)
+        blocks.append(StepResult("", name="유니버스 표", required=True))
+    except db.TestGuard:
+        raise
+    except Exception as e:                          # noqa: BLE001
+        uni_md, uni_n = "", 0
+        blocks.append(StepResult(f"### 유니버스 표\n\n★ 실패 — {type(e).__name__}: {e}\n", name="유니버스 표", rc=1,
+                                 required=True, note=f"{type(e).__name__}: {str(e)[:160]}"))
+    steps = [b_.step() for b_ in blocks if isinstance(b_, StepResult) and b_.name]
+    status = db.stage_status(steps)
+    lim = [f"[제한·1단] {x['name']} — {x['note'] or x['status']}" for x in steps if not x["required"] and x["status"] != "ok"]
+    failed = [f"{x['name']} — {x['note'] or '종료코드 ' + str(x['rc'])}" for x in steps if x["required"] and x["status"] == "failed"]
 
     evid = EVID / f"tools_{st}_{a.market}.md"
     write_preserving(
@@ -655,14 +758,20 @@ def cmd_capture(a) -> int:
                                   "real": "실계좌 주문"}.get(_mode, _mode) + "\n>\n"
         f"> **이 run 숫자의 유일한 출처.** 장중에는 부를 때마다 값이 달라져 노트 안에서\n"
         f"> 숫자끼리 어긋난다. 이후 단계는 브로커를 다시 부르지 않고 이 파일을 읽는다.\n"
-        f"> 캡처 시각 {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')} KST\n\n"
+        f"> 캡처 시각 {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')} KST · 단계 {status}\n"
+        + "".join(f"> ★ [1단 실패] {x}\n" for x in failed) + "".join(f"> {x}\n" for x in lim) + "\n"
         + "\n".join(blocks), "도구 출력 캡처")
-
-    try:
-        uni_md, uni_n = build_universe(a.market, st)
-    except (OSError, ValueError, KeyError) as e:
-        uni_md, uni_n = "", 0
-        print(f"[경고] 유니버스 표를 못 만들었다: {e}", file=sys.stderr)
+    if status == "failed":
+        # ★ 필수 단계 실패 — 도구 파일은 사실대로 남기고(실패 블록 포함) 노트 뼈대·산출물 기록은 하지 않는다. 종료 2(U02).
+        wl = JOURNAL / f"worklog_{st}_{a.market}.md"
+        try:
+            with wl.open("a", encoding="utf-8") as fh:
+                fh.write(f"\n- ★ 1단 실패 {datetime.now(KST):%H:%M} — " + " · ".join(failed) + " · capture를 다시 돌린다\n")
+        except OSError:
+            pass
+        db.stage_finish(sid, "failed", 2, steps, None, " · ".join(failed)[:500])
+        print(f"[중단] 1단 필수 단계 실패 — {' · '.join(failed)} · 캡처 {rel(evid)}(실패 기록) · capture를 다시 돌려라", file=sys.stderr)
+        return 2
 
     wl = JOURNAL / f"worklog_{st}_{a.market}.md"
     if not wl.exists():
@@ -681,8 +790,11 @@ def cmd_capture(a) -> int:
     if note.exists() and not a.force:
         print(f"[유지] {note.name} 이미 있음 — 뼈대를 덮어쓰지 않는다(--force로 강제).", file=sys.stderr)
     else:
-        note.write_text(note_skeleton(a.market, st, evid, board_md, uni_md,
-                                      cap_line=capital_line(a.market, st)), encoding="utf-8")
+        sk = note_skeleton(a.market, st, evid, board_md, uni_md, cap_line=_cap)
+        if lim:
+            # 선택 수집 실패 → §10 한계에 [제한·1단] 줄(그 자료에 기대는 판단만 제한된다 · 노트가 이 줄을 지우지 않는다)
+            sk = re.sub(r"(\n## §10[^\n]*\n)", lambda m_: m_.group(1) + "\n" + "\n".join(f"- {x}" for x in lim) + "\n", sk, count=1)
+        note.write_text(sk, encoding="utf-8")
 
     prev_mat = latest_stamped(PROJ / "data", "material", a.market, ".md", exclude_stamp=st)
     cur = PROJ / "data" / f"material_{st}_{a.market}.md"
@@ -692,7 +804,9 @@ def cmd_capture(a) -> int:
                 f"{cur.stat().st_size:,}B로 크게 줄었다 — `--with-news` 누락을 의심하고 "
                 f"원인부터 확인하라. 그대로 진행하면 얇아진 재료 위에서 판단하게 된다.")
 
-    print(f"\n캡처 {rel(evid)}  ·  노트 뼈대 {rel(note)}")
+    db.stage_finish(sid, status, 0, steps, {"snapshot": snap, "material": cur, "tools": evid, "note_skeleton": note, "worklog": wl},
+                    " · ".join(lim)[:500])
+    print(f"\n캡처 {rel(evid)}  ·  노트 뼈대 {rel(note)}  ·  1단 {status}" + (f"(제한 {len(lim)}건 — 노트 §10)" if lim else ""))
     print(f"로스터 {roster}행 · 유니버스 {uni_n}종목 · 작업기록 {rel(wl)}")
     today = session_iso(st, a.market)                 # 게이트 인자 today = 이 run의 세션 날짜(현지 거래일 · 2026-10-14)
     print(f"게이트 인자: roster={roster} universe={uni_n} today={today} "
@@ -754,10 +868,10 @@ def prev_outputs(pv: dict) -> str:
                if res else "- 없음\n"))
 
     # 지도·일정 diff — 그 run이 새로 넣은 축·일정이 오늘 노트에 등장해야 한다.
-    added_ax = [a.get("id") for a in _json(JOURNAL / "market_map.json").get("axes", [])
+    added_ax = [a.get("id") for a in db.market_map_load().get("axes", [])
                 if str(a.get("updated") or "").replace("-", "")[2:] == st]
     added_ev = [f"{e.get('date')} {e.get('event')}"
-                for e in _json(JOURNAL / "calendar.json").get("events", [])
+                for e in db.calendar_all()
                 if str(e.get("added") or "").replace("-", "")[2:] == st]
     out.append(f"**그 run이 지도에 더한 것** — 축 {len(added_ax)}개"
                + (f" ({', '.join(added_ax)})" if added_ax else "")
@@ -778,13 +892,6 @@ def _section(txt: str, header: str) -> str:
     body = txt[i:j if j > 0 else len(txt)]
     body = "\n".join(l for l in body.splitlines()[1:] if not l.strip().startswith("<!--"))
     return body.strip()
-
-
-def _json(p: Path):
-    try:
-        return json.loads(p.read_text(encoding="utf-8")) or {}
-    except (json.JSONDecodeError, OSError):
-        return {}
 
 
 PRICE_REJECT_WORDS = ("목표 여유 없음", "상승 여지 바닥 미달", "추격", "급등", "이미 반영", "목표가 평균 상회", "이미 오른")
@@ -825,10 +932,7 @@ def queue_one_day(market: str, st: str) -> list:
     편입은 서로 다른 이틀 제안이 있어야 한다(냉각 — 뉴스레터 인젝션 방어). 그런데 하루만 제안되고 다시 언급되지 않으면
     그 후보는 대기열에 묻혀 아무도 다시 보지 않았다(09-23 하루 제안된 수혜주 둘이 2주 넘게 멈춘 사이 +21~33%).
     그래서 매 run이 이 목록을 보고 '오늘 재료 근거로 재제안' 또는 '[내림] 이유'를 적는다. 자동 재제안은 하지 않는다."""
-    try:
-        q = json.loads((JOURNAL / "universe_pending.json").read_text(encoding="utf-8")) or {}
-    except (OSError, json.JSONDecodeError):
-        return []
+    q = db.pending_load()                                  # 유니버스 대기열(저장소 op_pending)
     out = []
     today = datetime.strptime("20" + st, "%Y%m%d")
     for key, v in q.items():
@@ -846,8 +950,49 @@ def queue_one_day(market: str, st: str) -> list:
     return sorted(out, key=lambda r: -r[4])
 
 
+def capture_ok(st: str, market: str):
+    """2·3단의 전제(v4 · Codex U02) — 이 run의 capture가 성공(ok·reduced)했고 그때 기록한 스냅샷·도구 파일이 지금 파일과 같은가.
+    파일이 있다는 것만으로는 안 된다(실패한 capture가 남긴 옛 스냅샷 위에서 돌던 결함). 반환 오류 문장 | None."""
+    rid = db.run_id(st, market)
+    if not db.stage_last_ok(rid, "capture"):
+        return "capture 성공 기록이 없다"
+    for role, path in (("snapshot", PROJ / "data" / f"snapshot_{st}_{market}.json"), ("tools", EVID / f"tools_{st}_{market}.md")):
+        if not db.stage_artifact_matches(rid, "capture", role, path):
+            return f"capture 산출물({role} · {path.name})이 바뀌었거나 없다"
+    return None
+
+
+def _staged(st: str, market: str, stage: str, body, artifacts=None, need_capture: bool = True) -> int:
+    """단계 하나를 단계 결과 행으로 감싼다 — 시작 행 → (전제) → 본문(steps에 선택 실패를 적는다) → 끝 행(모든 반환 경로)."""
+    sid = db.stage_start(st, market, stage)
+    if need_capture:
+        err = capture_ok(st, market)
+        if err:
+            db.stage_finish(sid, "failed", 2, [], None, f"전제 미충족 — {err}")
+            print(f"[중단] {err} — capture를 다시 돌려라({STAGE_HINT.get(stage, stage)}은 capture 성공 기록과 그 산출물 위에서만 돈다)",
+                  file=sys.stderr)
+            return 2
+    steps = []
+    try:
+        rc = body(steps)
+    except BaseException as e:
+        db.stage_finish(sid, "failed", 1, steps, None, f"{type(e).__name__}: {str(e)[:200]}")
+        raise
+    status = "failed" if rc else db.stage_status(steps)
+    db.stage_finish(sid, status, rc, steps, (artifacts() if artifacts else None) if status != "failed" else None)
+    return rc
+
+
+STAGE_HINT = {"carry": "이어받기", "map": "지도·리서치"}
+
+
 def cmd_carry(a) -> int:
     st = a.stamp or stamp_today(a.market)
+    return _staged(st, a.market, "carry", lambda steps: _carry(a, st, steps),
+                   artifacts=lambda: {"carry": JOURNAL / f"carry_{st}_{a.market}.md"})
+
+
+def _carry(a, st, steps) -> int:
     _keep_pointer(a.market, st)
     JOURNAL.mkdir(parents=True, exist_ok=True)
     snap = PROJ / "data" / f"snapshot_{st}_{a.market}.json"
@@ -912,14 +1057,16 @@ def cmd_carry(a) -> int:
         # ★ 오래 열린 시나리오(FB-261012-1) — 예정일이 지나도 실현·반증되지 않은 가지 = 지연·무소식 가지가 없었다.
         run(["scenarios.py", "list", "--stale"],
             "오래 열린 시나리오 (scenarios.py list --stale — 지연 가지를 세우거나 `judge --expire`로 닫는다)"),
+        # ★ 가지 완결성(v6 · J02) — 열린 사건마다 지표 공간을 가지들이 다 덮나(미커버·지연 가지·대응 다른 겹침) · 종료 3이면 그 사건에 가지를 더한다
+        run(["scenarios.py", "check", "--open"],
+            "가지 완결성 (scenarios.py check — 사건의 지표 공간을 가지가 다 덮나 · delayed·else 행)", ok_rc=(0, 3)),
         run(["scenarios.py", "audit", "--days", "14"],
             "회피 감사 (scenarios.py audit — 실현됐는데 대응했나)"),
         # ★ 실현됐는데 대응이 안 끝난 것 — "미국 조건 → 국내 대응"의 기계 경로다.
         run(["scenarios.py", "due", "--market", a.market],
             "집행 대기 (scenarios.py due — 실현됐는데 대응이 안 끝난 것)"),
-        # ★ 조사 전에 연다 — 반대편 run이 이미 세운 as-of를 다시 파지 않게.
-        run(["srcledger.py", "reuse", "--stamp", st, "--market", a.market, "--days", "7", "--brief"],
-            "출처 재사용 후보 (srcledger.py reuse — 중복 조사 방지 · 한 줄씩)"),
+        # ★ 조사 전에 연다 — 반대편 run이 이미 세운 as-of를 다시 파지 않게(저장소 사실 층 · facts.reuse).
+        reuse_block(a.market, st),
     ]
     prev_sig_f = latest_stamped(PROJ / "signals", "signal", a.market, ".json", exclude_stamp=st)
     sc = "(직전 시그널 없음 — 첫 run이다)"
@@ -945,24 +1092,28 @@ def cmd_carry(a) -> int:
         "(하루만 제안된 대기 후보 없음)"
     # 감사 소급(2026-10-13) — 직전 run의 주문 뒤 감사가 매수 근거를 뒤집어 아직 못 판 것. 이 run의 risk_guard가 자동으로 판다.
     try:
-        import reversals as _rv
-        rev_md = _rv.carry_block(a.market, JOURNAL)
-        import fc_track1 as _t1                   # 직전 run이 닫힌 뒤 도착한 주문 근거 감사(2026-10-14 · 배경 감사 미수신의 안전망)
-        rev_md += _t1.carry_note(a.market, st)
+        rev_md = reversal_block(a.market)
+        import facts as _f                        # 직전 run이 닫힌 뒤 도착한 주문 근거 감사(2026-10-14 · 배경 감사 미수신의 안전망)
+        rev_md += _f.carry_note(a.market, st)
+    except db.TestGuard:
+        raise
     except Exception as e:                        # noqa: BLE001
         rev_md = f"## 감사 소급\n\n★ 원장을 읽지 못했다 — {type(e).__name__}: {e}\n"
+        steps.append({"name": "감사 소급", "required": False, "status": "reduced", "note": f"원장 읽기 실패 — {type(e).__name__}"})
     # 지지 이탈(2026-10-14 · 차트스쿨 01 B) — 지지 구간 기준 보유의 직전 세션 종가가 구간 아래로 끝났으면 오늘 무효 조건을 재판정한다.
     try:
         import support_break as _sb
         sup_md = _sb.carry_block(a.market, snap)
     except Exception as e:                        # noqa: BLE001
         sup_md = f"## 지지 이탈\n\n★ 판정하지 못했다 — {type(e).__name__}: {e} · 노트 §10 한계에 적는다\n"
+        steps.append({"name": "지지 이탈", "required": False, "status": "reduced", "note": f"판정 실패 — {type(e).__name__}"})
     # 재투자 대기(2026-10-15) — 직전 run의 매도 전용 pass가 판 돈이 재투자되지 않고 남은 것. 이 run의 gap에 자연히 들어가지만
     #   왜 남았는지(미룬 사유)를 §1-A에 적고 이번 run에서 채운다.
     try:
         ref_md = refill_block(a.market, st)
     except Exception as e:                        # noqa: BLE001
         ref_md = f"## 재투자 대기\n\n★ 읽지 못했다 — {type(e).__name__}: {e}\n"
+        steps.append({"name": "재투자 대기", "required": False, "status": "reduced", "note": f"읽기 실패 — {type(e).__name__}"})
     out = JOURNAL / f"carry_{st}_{a.market}.md"
     write_preserving(
         out,
@@ -1051,21 +1202,48 @@ def cmd_map(a) -> int:
     + 요약 생성줄. 3단이 `forecast add`·`priced`로 채운 뒤 `map` 게이트에 이 파일을 낸다.
     """
     st = a.stamp or stamp_today(a.market)
+    return _staged(st, a.market, "map", lambda steps: _map(a, st, steps),
+                   artifacts=lambda: {"forecast": ANALYSIS / f"전망_{st}_{a.market}.md"})
+
+
+def _map(a, st, steps) -> int:
     _keep_pointer(a.market, st)
     ANALYSIS.mkdir(parents=True, exist_ok=True)
     sys.path.insert(0, str(PROJ))
     import market_map as mm
-    m = mm._read(mm.MAP, {"axes": []})
-    axes = m.get("axes") or []
     today = session_iso(st, a.market)                 # 축 updated는 run 포인터의 세션 날짜로 적힌다(market_map)
+    # ★ 미반영은 이번 세션 측정만 센다(2026-10-19 · Codex U05) — 세기 전에 열린 방향 축을 잰다(사람 단계 없음 · 일봉은 저장소 캐시).
+    #   --refresh면 이번 세션에 갱신된 축만 다시 잰다. 측정이 실패한 축은 '실패'로 보이고 미반영에 안 든다.
+    m0 = db.market_map_load()
+    ids = None
+    if a.refresh:
+        ids = [x["id"] for x in m0.get("axes") or [] if x.get("direction") and (x.get("updated") or "") == today
+               and x.get("beneficiaries") and (x.get("status") or "open") == "open"]
+    meas = mm.priced_measure_all(ids)
+    steps.append({"name": "후보 측정(priced_measure_all)", "required": False,
+                  "status": "ok" if not meas.get("failed") else "reduced",
+                  "note": f"축 {meas.get('axes')} · 완전 {meas.get('complete')} · 실패 {meas.get('failed')}"})
+    m = db.market_map_load()
+    axes = m.get("axes") or []
     updated = [x for x in axes if x.get("direction") and (x.get("updated") or "") == today]
     blank = [x for x in axes if not x.get("direction")]
-    unpriced = [(x["id"], b) for x in axes if x.get("direction")
-                for b in (x.get("beneficiaries") or []) if b.get("priced") is False]
+    open_dir = [x for x in axes if x.get("direction") and (x.get("status") or "open") == "open"]
+    unpriced = [(x["id"], b) for x in open_dir for b in (x.get("beneficiaries") or [])
+                if b.get("priced") is False and mm.measure_state(b) == "valid"]
     line = gen_forecast_line(len(updated), len(unpriced), len(blank))
+    ms_n = {"valid": 0, "stale": 0, "unavailable": 0, "none": 0}
+    for x in open_dir:
+        for b in x.get("beneficiaries") or []:
+            ms_n[mm.measure_state(b)] += 1
+    try:
+        from kis_client import last_session_date
+        basis = f"기준 KR {last_session_date('KR').isoformat()} · US {last_session_date('US').isoformat()}"
+    except Exception:                                # noqa: BLE001
+        basis = "기준 세션 미상"
+    ms_line = (f"측정 상태: 유효 {ms_n['valid']} · 오래됨 {ms_n['stale']} · 실패 {ms_n['unavailable']} · 미측정 {ms_n['none']} ({basis})")
 
     out = [f"# 전망 — {st} · {a.market.upper()}", "",
-           GEN_NOTICE, line, "",
+           GEN_NOTICE, line, ms_line, "",
            "> **3단이 답하는 첫 질문**: 이 재료로 볼 때 4~12주 뒤 돈이 어디로 가는가. 그 사슬의",
            "> **2차·3차 수혜** 중 아직 값에 안 들어간 것은 무엇인가. 뉴스는 1차만 말한다 —",
            "> 뉴스가 1차를 말하는 날 2차를 적는 것이 이 시스템이 앞서는 방식이다.", "",
@@ -1080,13 +1258,12 @@ def cmd_map(a) -> int:
         out.append(f"- {x['direction']} · {x.get('horizon_weeks')}주 · conf {x.get('confidence')} · "
                    f"{x.get('expected', '')} · {'선행' if cbn else ('뉴스 후' if cbn is False else '?')} ({why})")
         out.append("")
-        out.append("| 차수 | 종목 | 시장 | 유니버스 | 반영 | 근거 |")
-        out.append("|---|---|---|---|---|---|")
+        out.append("| 차수 | 종목 | 시장 | 유니버스 | 반영 | 측정 | 근거 |")
+        out.append("|---|---|---|---|---|---|---|")
         for b in sorted(x.get("beneficiaries") or [], key=lambda b: b.get("order", 9)):
-            pr = {True: "반영", False: "**미반영**", None: "미측정"}.get(b.get("priced"), "미측정")
             out.append(f"| {b.get('order')}차 | {b.get('ticker')} {b.get('name', '')} | "
-                       f"{b.get('market', '')} | {'안' if b.get('in_universe') else '밖'} | {pr} | "
-                       f"{(b.get('why') or '')[:60]} |")
+                       f"{b.get('market', '')} | {'안' if b.get('in_universe') else '밖'} | {mm.priced_label(b)} | "
+                       f"{mm.measure_label(b)[:90]} | {(b.get('why') or '')[:60]} |")
         out.append("")
     # ★ 같은 요인의 두 시장 전망(2026-10-12) — 세우기 전에 반대 시장이 같은 요인을 어떻게 보는지 먼저 본다.
     xr = mm.xmarket(a.market, st)
@@ -1131,13 +1308,16 @@ def cmd_map(a) -> int:
         else:
             cur = re.sub(r"^전망 갱신 \*\*\d+건\*\* · 미반영 수혜 \*\*\d+건\*\* · 전망 미기입 축 \d+개$",
                          line, cur, count=1, flags=re.M)
+            cur = re.sub(r"^측정 상태: .*$", ms_line, cur, count=1, flags=re.M)
             path.write_text(cur, encoding="utf-8")
             print(f"전망 {rel(path)} (생성줄만 갱신 — 3단 절 표식이 없다)")
         print(f"  {line}")
+        print(f"  {ms_line}")
         return 0
     write_preserving(path, "\n".join(out) + "\n", "전망 파일")
     print(f"전망 {rel(path)}")
     print(f"  {line}")
+    print(f"  {ms_line}")
     print(f"게이트 인자: forecast={path}")
     return 0
 
@@ -1233,30 +1413,224 @@ def cmd_stamp(a) -> int:
             path.write_text("\n".join(lines), encoding="utf-8")
         else:
             path.write_text(txt.rstrip("\n") + "\n" + block + "\n", encoding="utf-8")
+            # 작업기록 단계 스탬프 = 그 단계를 마친 시각 → ex_run(capture·carry·map은 이미 들어선 시각이 있으면 그대로 · note·dispatch는 여기서)
+            # 도구가 따로 없는 단계(리서치·노트·검증·감사·결정)는 여기서 단계 결과 행을 남긴다(v4 · U02 — capture·carry·map·전송·체결은
+            #   그 명령이 남긴다). ex_run.<단계>_at은 성공한 첫 시도의 끝(note_at·dispatch_at).
+            wm = re.match(r"worklog_(\d{6})_(kr|us)\.md$", path.name)
+            if wm and a.stage in ("research", "note", "verify", "audit", "dispatch", "no_trade"):
+                db.stage_record(wm.group(1), wm.group(2), a.stage, "ok", artifacts={"worklog": path})
         print(f"스탬프 {path.name} ← {block.splitlines()[-1]}")
     return 0
 
 
-def refill_block(market: str, st: str) -> str:
-    """이어받기 `## 재투자 대기` 절 — 지난 스탬프의 `journal/refill_<st>_<mkt>.json` 중 `open`·`deferred`(이 run 것 제외).
-    그린 파일은 `carried`로 바꾼다(같은 대기를 두 run이 이어받지 않게)."""
-    rows = []
-    for p in sorted(JOURNAL.glob(f"refill_*_{market}.json")):
-        stp = p.stem.split("_")[1]
-        if stp >= st:
+# ─────────────────────────────────────────────────────────── render-note (4단 · 사실 층)
+
+def latest_note(st: str, market: str):
+    """그 run 노트의 마지막 판 — `분석노트_<st>_<mkt>_v<major>_<minor>.md`를 판 번호(숫자)로 정렬한다(이름 정렬이면 v1_10 < v1_9)."""
+    def ver(f):
+        m = re.search(r"_v(\d+)_(\d+)\.md$", f.name)
+        return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+    c = sorted(ANALYSIS.glob(f"분석노트_{st}_{market}_v*.md"), key=ver)
+    return c[-1] if c else None
+
+
+def _next_minor(p: Path) -> Path:
+    """`…_v1_0.md` → `…_v1_1.md`(판 번호가 없으면 그대로)."""
+    m = re.search(r"_v(\d+)_(\d+)\.md$", p.name)
+    return p.with_name(f"{p.name[:m.start()]}_v{m.group(1)}_{int(m.group(2)) + 1}.md") if m else p
+
+
+def _slot_at(text: str, pos: int) -> str:
+    """그 자리가 속한 절 — 바로 앞 `## ` 머리의 첫 낱말(§2·§6·§1-A), 첫 머리 전이면 '머리말'."""
+    i = text.rfind("\n## ", 0, pos)
+    if i < 0:
+        return "머리말" if not text.startswith("## ") else text[3:].split()[0]
+    head = text[i + 4:text.find("\n", i + 4)].strip()
+    return head.split()[0] if head else "머리말"
+
+
+def _cell_value(text: str, pos: int, v: str) -> str:
+    """값 한 줄 — 줄바꿈은 빈칸으로, 표 행 안이면 '|'를 \|로(표가 깨지지 않게)."""
+    v = str(v or "").replace("\r", " ").replace("\n", " ").replace("<!--", "<! --").strip()
+    line_start = text.rfind("\n", 0, pos) + 1
+    if text[line_start:pos].lstrip().startswith("|"):
+        v = v.replace("\\|", "|").replace("|", "\\|")
+    return v
+
+
+def _s12_region(text: str):
+    """§12 렌더 자리 (시작, 끝, 앞서 렌더한 본문). 렌더 자리표가 없으면 §12 절 본문(옛 뼈대의 TODO·손으로 붙인 표)을 자리로 삼는다 —
+    절이 없으면 (끝, 끝, '') — 노트 끝(NOTE-LINT 줄 앞)에 절을 새로 붙인다."""
+    i = text.find(S12_OPEN)
+    j = text.find(S12_CLOSE, i + 1) if i >= 0 else -1
+    if i >= 0 and j > i:
+        return i, j + len(S12_CLOSE), text[i + len(S12_OPEN):j], True
+    m = re.search(r"^## §12\b.*$", text, re.M)
+    nl = re.search(r"^<!-- NOTE-LINT\b", text, re.M)
+    if not m:
+        at = nl.start() if nl else len(text)
+        return at, at, "", False
+    start = m.end()
+    nxt = re.search(r"^## ", text[start:], re.M)
+    end = start + nxt.start() if nxt else (nl.start() if nl and nl.start() > start else len(text))
+    return start, end, text[start:end], False
+
+
+def render_note(st: str, market: str, note: str = "") -> tuple:
+    """노트를 저장소에서 채운다 — (종료코드, 메시지). 같은 저장소 상태로 다시 돌리면 같은 파일(글자 그대로)이다.
+    ① 값 자리 `{{F-id}}`·`{{F-id.as_of}}`·`{{F-id.line}}`(그 밖 `.칸`은 그 사실의 칸 값) → `<!--F:F-id[.칸]-->값<!--/F-->` —
+       이미 렌더된 자리는 값만 새로(교정 = 행 갱신 1회 → 다시 렌더하면 그 자리 값이 바뀐다 · 전파 없음).
+    ② 가리킨 사실마다 참조(ev_claim_ref: doc_type=note · doc_id=노트 파일 이름 · slot=절) · 이 run S 번호(ev_fact_run)가 없으면 단다 ·
+       노트에서 빠진 자리의 참조는 지운다(검증 큐가 노트에 없는 사실을 보지 않게).
+    ③ §12 = `facts.render_s12`(안 바뀐 행은 written을 지킨다) · §3 = `facts.render_board`(보드 기록이 없으면 그대로).
+    없는 사실 id가 하나라도 있으면 아무것도 쓰지 않고 2."""
+    import facts as _f
+    rid = db.run_id(st, market)
+    p = Path(note) if note else latest_note(st, market)
+    if not p or not p.exists():
+        return 2, f"분석노트가 없다: {p or f'analysis/분석노트_{st}_{market}_v*.md'}"
+    text = p.read_text(encoding="utf-8")
+    refs = [(m.start(), m.group(1), m.group(2)) for rx in (FACT_MARK, FACT_REF) for m in rx.finditer(text)]
+    ids = sorted({fid for _, fid, _ in refs})
+    missing = [fid for fid in ids if not db.q1("SELECT 1 AS o FROM ev_fact WHERE id=?", (fid,))]
+    if missing:
+        return 2, (f"없는 사실 {len(missing)}건 — {', '.join(missing)} · `facts.py add`가 준 id인지 확인하라"
+                   f"(노트는 고치지 않았다: {p.name})")
+    vals, bad = {}, []
+    for _, fid, fld in refs:
+        if (fid, fld) in vals:
             continue
         try:
-            d = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if d.get("status") not in ("open", "deferred"):
+            vals[(fid, fld)] = _f.render_value(fid, fld)
+        except _f.UnknownField as e:
+            bad.append(str(e).strip("'\""))
+    if bad:
+        return 2, f"없는 칸 {len(bad)}건 — {'; '.join(bad[:6])} · 쓸 수 있는 칸: (없음)=값 · as_of · line · 그 종류 상세 칸(노트는 고치지 않았다)"
+
+    def sub(m):
+        fid, fld = m.group(1), m.group(2)
+        tag = fid + (f".{fld}" if fld else "")
+        return f"<!--F:{tag}-->{_cell_value(m.string, m.start(), vals[(fid, fld)])}<!--/F-->"
+    new = FACT_MARK.sub(sub, text)
+    # 이미 렌더된 값이 바뀌었나(교정 뒤 재렌더) — 바뀌었으면 다음 minor 판으로 재발행하고 옛 판은 analysis/이전버전/으로(stage4 5-C 7)
+    value_changed = FACT_MARK.findall(text) != FACT_MARK.findall(new)
+    new = FACT_REF.sub(sub, new)
+    # 참조·S 번호 — 렌더한 노트 기준(자리와 절). 문장 끝 `[S n]`도 그 run S 번호의 사실을 가리킨다(§12 표는 클레임이 아니다)
+    slots = {(fid, _slot_at(new, m.start())) for m in FACT_MARK.finditer(new) for fid in [m.group(1)]}
+    s_refs = [(int(n), _slot_at(new, m.start())) for m in S_CITE.finditer(new) for n in re.findall(r"S(\d+)", m.group(1))]
+    s_refs = [(n, slot) for n, slot in s_refs if slot != "§12"]
+    if s_refs:
+        by_s = {r["s_no"]: r["fact_id"] for r in db.q("SELECT s_no, fact_id FROM ev_fact_run WHERE run_id=?", (rid,))}
+        slots |= {(by_s[n], slot) for n, slot in s_refs if n in by_s}
+    lp = latest_note(st, market)
+    is_latest = bool(lp) and lp.resolve() == p.resolve()
+    out_p = _next_minor(p) if (value_changed and is_latest) else p
+    n_new_s = 0
+    with db.tx() as c:
+        for fid, slot in sorted(slots):
+            _f.add_ref(fid, rid, "note", out_p.name, slot, role="note", c=c)
+        for r in c.execute("SELECT id, fact_id, slot, doc_id FROM ev_claim_ref WHERE run_id=? AND doc_type='note'", (rid,)).fetchall():
+            stale_here = r["doc_id"] == out_p.name and (r["fact_id"], r["slot"]) not in slots
+            other_ver = is_latest and r["doc_id"] != out_p.name and str(r["doc_id"]).startswith(f"분석노트_{st}_{market}_v")
+            if stale_here or other_ver:
+                c.execute("DELETE FROM ev_claim_ref WHERE id=?", (r["id"],))
+        for fid in ids:
+            if not c.execute("SELECT 1 FROM ev_fact_run WHERE fact_id=? AND run_id=?", (fid, rid)).fetchone():
+                _f._attach_run(c, fid, rid, st, market)
+                n_new_s += 1
+        if ids:
+            _f._write_counts(c, rid, st, market)
+        db.run_start(st, market)
+        c.execute("UPDATE ex_run SET rerender=0 WHERE run_id=?", (rid,))
+    # §12
+    a, b, prev, marked = _s12_region(new)
+    body = _f.render_s12(st, market, prev=prev)
+    if body.startswith("## §12"):
+        body = body.split("\n", 1)[1].lstrip("\n")
+    blk = f"{S12_OPEN}\n{body.rstrip()}\n{S12_CLOSE}"
+    if marked:
+        new = new[:a] + blk + new[b:]
+    elif prev or re.search(r"^## §12\b", new, re.M):
+        new = new[:a] + "\n\n" + blk + "\n\n" + new[b:].lstrip("\n")
+    else:
+        new = new[:a].rstrip("\n") + "\n\n---\n\n## §12 출처 원장 — 세 시점\n\n" + blk + "\n" + (("\n" + new[a:]) if new[a:] else "")
+    n12 = len(re.findall(r"^\| S\d+ \|", body, re.M))
+    # §3
+    i, j = new.find(S3_OPEN), new.find(S3_CLOSE)
+    if i >= 0 and j > i:
+        board = _f.render_board(st, market)
+        if board is None:
+            s3 = "보드 기록 없음 — 그대로(1단 capture가 이 세션 보드를 적재하지 않았다)"
+        else:
+            new = new[:i] + f"{S3_OPEN}\n{board}\n{S3_CLOSE}" + new[j + len(S3_CLOSE):]
+            s3 = "렌더"
+    else:
+        s3 = "렌더 자리표 없음 — 그대로"
+    changed = new != text
+    if out_p != p:
+        out_p.write_text(new, encoding="utf-8")
+        old_dir = ANALYSIS / "이전버전"
+        old_dir.mkdir(exist_ok=True)
+        p.replace(old_dir / p.name)
+        return 0, (f"render-note {out_p.name} — 교정으로 값이 바뀌어 새 판으로 재발행(옛 판 {p.name} → analysis/이전버전/) · "
+                   f"값 자리 {len(refs)}개(사실 {len(ids)}개 · 새 S 번호 {n_new_s}) · §12 {n12}행 · §3 {s3}")
+    if changed:
+        p.write_text(new, encoding="utf-8")
+    return 0, (f"render-note {p.name} — 값 자리 {len(refs)}개(사실 {len(ids)}개 · 새 S 번호 {n_new_s}) · §12 {n12}행 · §3 {s3} · "
+               + ("저장" if changed else "바뀐 것 없음"))
+
+
+def cmd_render_note(a) -> int:
+    import sessions as _ss
+    st = a.stamp or _ss.run_stamp(a.market)
+    rc, msg = render_note(st, a.market, a.note)
+    print(msg, file=sys.stderr if rc else sys.stdout)
+    return rc
+
+
+def reversal_block(market: str) -> str:
+    """이어받기 `## 감사 소급` 절 — 대기 행(저장소 ex_reversal_event · risk_guard.reversals_pending)이 있으면 이 run의 risk_guard가
+    자동으로 판다. 도구 출처(buy_ref·fc_rows) 없는 소급 행은 risk_guard.reversals_pending이 void로 닫아 여기 뜨지 않는다(FB-261017-9)."""
+    import risk_guard as _rg
+    rows = _rg.reversals_pending(market)
+    head = "## 감사 소급\n\n"
+    if not rows:
+        return head + "(대기 중인 되돌림 매도 없음)\n"
+    lines = [head + "직전 run의 주문 뒤 감사가 매수 근거를 뒤집었다 — **이 run의 risk_guard가 아래를 규율 매도로 자동 전송한다**"
+             "(사람 확인 없음 · 보유 0이면 void로 닫힌다).\n",
+             "| id | 종목 | 남은 수량 | 사유 | 판정표 행 |", "|---|---|---|---|---|"]
+    for r in rows:
+        lines.append(f"| {r['id']} | {r.get('ticker')} {r.get('name') or ''} | {r.get('qty')} | {str(r.get('why') or '')[:120]} "
+                     f"| {', '.join(r.get('fc_rows') or []) or '—'} |")
+    return "\n".join(lines) + "\n"
+
+
+def reuse_block(market: str, st: str) -> str:
+    """이어받기 — 다른 run이 이미 세운 사실(facts.reuse · 조사 전에 연다 — 반대편 run이 세운 as-of를 다시 파지 않게)."""
+    try:
+        import facts as _f
+        body = _f.reuse(st, market, days=7, brief=True)
+    except db.TestGuard:
+        raise
+    except Exception as e:                        # noqa: BLE001
+        body = f"[실패 — {type(e).__name__}: {e}. '재사용 후보 없음'으로 읽지 말 것]"
+    return f"### 출처 재사용 후보 (facts.py reuse — 중복 조사 방지 · 한 줄씩)\n\n```\n{body.rstrip()}\n```\n"
+
+
+def refill_block(market: str, st: str) -> str:
+    """이어받기 `## 재투자 대기` 절 — 지난 스탬프의 재투자 기록(저장소 ex_refill · 예전 `journal/refill_<st>_<mkt>.json`) 중
+    `open`·`deferred`(이 run 것 제외). 그린 행은 `carried`로 바꾼다(같은 대기를 두 run이 이어받지 않게 · 행 단위 갱신)."""
+    rows = []
+    # 스탬프는 행 키에서 읽는다(with_key) — 본문에 stamp 칸이 없는 행도 있다.
+    for stp, mk, d in sorted(db.refill_open(market, with_key=True), key=lambda x: x[0]):
+        if stp >= st or d.get("status") not in ("open", "deferred"):
             continue
         proceeds = sum(float(e.get("proceeds") or 0) for e in d.get("events") or [])
         sold = ", ".join(f"{x.get('ticker')} {x.get('qty')}주" for e in d.get("events") or [] for x in e.get("sells") or [])
         rows.append((stp, d.get("status"), sold, proceeds, str(d.get("deferred_why") or "—")))
         d["status"] = "carried"
         d["carried_by"] = st
-        p.write_text(json.dumps(d, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        db.refill_put(stp, market, d)
     head = "## 재투자 대기\n\n"
     if not rows:
         return head + "(직전 run들이 판 돈 가운데 재투자되지 않고 남은 것 없음)\n"
@@ -1268,13 +1642,9 @@ def refill_block(market: str, st: str) -> str:
 
 def refill_gate(market: str, st: str) -> tuple:
     """(종료코드, 마크다운) — 이 run의 재투자 기록이 `open`이면 3(재투자 pass를 돌렸거나 미룬 사유를 적어야 닫힌다)."""
-    rp = JOURNAL / f"refill_{st}_{market}.json"
-    if not rp.exists():
+    d = db.refill_get(st, market)
+    if d is None:
         return 0, ""
-    try:
-        d = json.loads(rp.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        d = {"status": "open"}
     if d.get("status") == "open":
         return 3, ("### ★ 재투자 미처리\n\n이 run 안에서 매도가 나간 뒤 판 돈이 재투자되지 않았다 — "
                    "`stage6_execute.md` 〈매도 뒤 재투자〉대로 채우거나, 못 채우면 "
@@ -1283,34 +1653,171 @@ def refill_gate(market: str, st: str) -> tuple:
                + (f" · 사유 {d.get('deferred_why')}" if d.get("deferred_why") else "") + "\n")
 
 
+def _stale_open(st: str, market: str) -> list:
+    """최신 TRACK1 POST(ex_signal.track1.post)의 stale_support 가운데 이 run에서 끝나지 않은 것 [{ticker, facts}] — fact_close ④."""
+    rid = db.run_id(st, market)
+    sig = db.q1("SELECT track1 FROM ex_signal WHERE run_id=?", (rid,))
+    t1 = json.loads(sig["track1"]) if sig and sig.get("track1") else {}
+    items = (t1.get("post") or {}).get("stale_support") or []
+    if not items:
+        return []
+    started = str((db.run_get(st, market) or {}).get("started") or (t1.get("post") or {}).get("at") or "")
+
+    def _after(ts):
+        try:
+            return not started or datetime.fromisoformat(str(ts)) >= datetime.fromisoformat(started)
+        except ValueError:
+            return str(ts) >= started
+    revs = {(r.get("ticker")) for r in db.reversals_all() if str(r.get("stamp")) == st
+            and str(r.get("market", "")).lower() == market.lower() and r.get("status") in ("pending", "filled")}
+    rejudged = {t.get("ticker") for t in db.theses_all() for h in (t.get("history") or [])
+                if "[보유 재판정]" in str(h.get("note") or "") and _after(h.get("ts"))}
+    return [x for x in items if x.get("ticker") not in revs | rejudged]
+
+
+def fact_close(st: str, market: str) -> dict:
+    """사실 층 마감(2026-10-17) — run_close 전에. ① 참조 검사(`REFS OK`/`REFS FAIL` 줄 · 이번 run 노트·제안·보유가 가리킨 사실이
+    전부 있고 url·인용·as-of가 있는가) ② 뉴스 전 사실·재료 지연(facts.before_news) ③ run 표 집계 — 신규·재사용·되풀이 사실 ·
+    판정 행(이번 run ev_verdict) · 감사 회차(facts.audit_rounds — 주문 근거 감사 기록). 실패해도 마감을 막지 않고 크게 알린다.
+    ④ 낡은 근거(2026-10-17 · FB-261017-9) — 최신 `TRACK1 POST`의 stale_support 종목마다 이 run에서 끝났는가: 재확인으로 post에서
+    빠졌다 · 그 종목 논지에 run 시작 뒤 `[보유 재판정]` 노트가 있다 · 이 run의 되돌림 행(pending/filled)이 있다. 하나도 없으면
+    `out["stale_open"]`에 넣고 크게 알린다 — cmd_close가 종료코드 4로 닫지 않는다(근거가 무너진 매수를 하루 더 들지 않는다)."""
+    out = {"stale_open": [], "stale_check_ok": True, "refs_ok": None, "error": None}
+    try:
+        out["stale_open"] = _stale_open(st, market)
+        for x in out["stale_open"]:
+            print(f"★ 낡은 근거 미결 {x['ticker']}({'|'.join(x['facts'])}) — ① 사실을 다시 확인해 facts.py correct → verdict → "
+                  f"decide --mode post, 또는 ② theses.py set-status --id <논지> --status held --note \"[보유 재판정] …\" / facts.py reverse")
+    except db.TestGuard:
+        raise
+    except Exception as e:                        # noqa: BLE001 — 검사가 죽으면 '미결'로 본다(close가 종료 4 · v4 U02)
+        out["stale_check_ok"] = False
+        out["error"] = f"낡은 근거 검사 실패 — {type(e).__name__}: {e}"
+        print(f"★ 낡은 근거 검사를 못 돌렸다({type(e).__name__}: {e}) — `python3 facts.py decide --mode post --stamp {st} --market {market}` 출력의 "
+              f"stale_support를 손으로 확인한다")
+    try:
+        import facts as _f
+        ok, line, probs = _f.check_refs(st, market)
+        for pr in probs[:20]:
+            print("  - " + pr)
+        if len(probs) > 20:
+            print(f"  … 그 밖 {len(probs) - 20}건(`python3 facts.py check-refs --stamp {st} --market {market}`)")
+        print(line)
+        bn = _f.before_news(st, market)
+        rid = db.run_id(st, market)
+        vrows = (db.q1("SELECT COUNT(*) AS n FROM ev_verdict WHERE run_id=?", (rid,)) or {}).get("n") or 0
+        rounds = len(_f.audit_rounds(st, market))
+        db.run_set(st, market, verified_rows=vrows, audit_rounds=rounds)
+        out = {**out, "refs_ok": ok, "verified_rows": vrows, "audit_rounds": rounds, **bn}
+        print(f"[사실] {rid} — 신규 {bn['facts_new']} · 재사용 {bn['facts_reused']} · 되풀이 {bn['facts_repeat']} · "
+              f"뉴스 전 {bn['before_news_n']} · 재료 지연 {bn['material_delay_h'] if bn['material_delay_h'] is not None else '—'}시간 · "
+              f"판정 행 {vrows} · 감사 {rounds}회 → ex_run")
+        if (db.run_get(st, market) or {}).get("rerender"):
+            print(f"★ [사실] 교정 뒤 노트를 다시 렌더하지 않았다 — `python3 stage.py render-note --stamp {st} --market {market}`")
+    except db.TestGuard:
+        raise
+    except Exception as e:                        # noqa: BLE001 — 마감 검사가 죽으면 사실 층 미결(close가 종료 5 · v4 U02)
+        out["refs_ok"] = None
+        out["error"] = (out.get("error") or "") + f" · 사실 층 마감 검사 실패 — {type(e).__name__}: {e}"
+        print(f"REFS FAIL — 사실 층 마감 검사를 못 돌렸다({type(e).__name__}: {e}) · "
+              f"`python3 facts.py check-refs --stamp {st} --market {market}`")
+    return out
+
+
+CLOSE_CODES = {0: "닫음", 3: "재투자 미처리", 4: "낡은 근거 미결", 5: "사실 층 미결(REFS FAIL·마감 검사 실패)",
+               6: "저장 단계 실패", 7: "외부 점검 명령 실패"}
+_CLOSE_WHY = {3: "재투자 미처리라", 4: "낡은 근거 미결이라", 5: "사실 층 미결이라", 6: "저장 단계 실패라", 7: "외부 점검 명령 실패라"}
+
+
 def cmd_close(a) -> int:
     """6단 마지막 고리(2026-10-15) — 계좌 현황 바로 앞에 돈다. ① 캡처가 미룬 미국 주간거래 손절 점검(국내 run · 실계좌 계열)
-    ② 매도 뒤 재투자 대기(`journal/refill_<st>_<mkt>.json`이 `open`이면 닫지 않는다 — 재투자 pass를 돌렸거나 미룬 사유를 적었어야 한다)
-    ③ 실전 점검표(`real_check.py`). 종료코드 3 = 재투자 미처리."""
+    ② 매도 뒤 재투자 대기(저장소 ex_refill의 이 run 행이 `open`이면 닫지 않는다 — 재투자 pass를 돌렸거나 미룬 사유를 적었어야 한다)
+    ③ 실전 점검표(`real_check.py`) ④ 저장소 마감(2026-10-17) — 시그널·승인·체결 파일 → 집행 표(`import_run_artifacts`) ·
+    게이트 감사 판정 복사(`audit_mirror`) · 종료 0일 때만 `run_close` · 렌더본 내보내기(안전망) · 원문 판 정리.
+    ★ 종료코드(v4 · Codex U02 — '닫힘'은 '모름'일 수 없다): 0 닫음 · 3 재투자 미처리 · 4 낡은 근거 미결(검사가 죽어도 4) ·
+    5 사실 층 미결(REFS FAIL·마감 검사 예외) · 6 저장 단계 실패(이관·감사 복사·run_close) · 7 외부 점검 명령 실패(real_check·stops).
+    우선순위 6 > 7 > 3 > 4 > 5. 0이 아니면 run_close를 보류한다(6은 도달 못 함). 3·4·5는 점검표를 치운다(execute·no_trade 게이트가 본다).
+    다시 돌리면 새 시도(멱등 — 이관·감사 복사는 같은 해시·같은 줄 한 번 · closed_at은 처음 값 유지)."""
     import sessions as _ss
     from kis_client import account_mode as _acct_mode, us_daytime_session as _uds
     st = a.stamp or _ss.run_stamp(a.market)
-    blocks, rc = [], 0
+    sid = db.stage_start(st, a.market, "close")
+    steps, blocks, ext_fail = [], [], []
     mode = _acct_mode()
     if a.market == "kr" and mode != "paper":
         if _uds()["is_open"]:
-            blocks.append(run(["stops.py", "--market", "us", "--daytime", "--stamp", st] + (["--send"] if mode == "real" else []),
-                              "미국 주간거래 손절 점검 (stops.py --daytime · close)"))
+            r_ = run(["stops.py", "--market", "us", "--daytime", "--stamp", st] + (["--send"] if mode == "real" else []),
+                     "미국 주간거래 손절 점검 (stops.py --daytime · close)")
+            blocks.append(r_)
+            steps.append(r_.step())
+            if r_.rc:
+                ext_fail.append(f"stops.py --daytime 종료코드 {r_.rc}")
         else:
             blocks.append("### 미국 주간거래 손절 점검\n\n주간거래 창 밖 — 정규장 run이 판정한다\n")
     rc, rblk = refill_gate(a.market, st)
     if rblk:
         blocks.append(rblk)
+    print("\n".join(blocks))
+    blocks = []
+    fc = fact_close(st, a.market)
+    if rc == 0 and (fc.get("stale_open") or not fc.get("stale_check_ok", True)):
+        rc = 4
+    if rc == 0 and fc.get("refs_ok") is not True:
+        rc = 5
+    steps.append({"name": "사실 층 마감", "required": True, "rc": None,
+                  "status": "ok" if fc.get("refs_ok") is True and fc.get("stale_check_ok", True) and not fc.get("stale_open") else "failed",
+                  "note": (fc.get("error") or "")[:300] or (f"낡은 근거 미결 {len(fc.get('stale_open') or [])}건" if fc.get("stale_open")
+                                                             else ("REFS FAIL" if fc.get("refs_ok") is False else ""))})
     rcp = PROJ / "data" / "run_evidence" / f"real_check_{st}_{a.market}.md"
-    if rc == 3:
-        # 재투자 미처리면 점검표를 쓰지 않고 지난 것도 치운다 — execute·no_trade 게이트가 점검표 파일의 존재를 보므로
-        # 판 돈을 그대로 둔 채 run을 닫을 수 없다(2026-10-15).
+    if rc in (3, 4, 5):
+        # 재투자 미처리 · 낡은 근거 미결 · 사실 층 미결이면 점검표를 쓰지 않고 지난 것도 치운다 — execute·no_trade 게이트가 점검표 파일의
+        # 존재를 보므로 판 돈을 그대로 둔 채(2026-10-15) · 근거가 무너진 매수를 든 채(2026-10-17) · 사실이 비거나 검사가 죽은 채 run을 닫을 수 없다.
         if rcp.exists():
             rcp.unlink()
-        blocks.append("### 실전 점검표\n\n재투자 미처리라 쓰지 않았다 — 채우거나 `refill-defer`로 미룬 뒤 `stage.py close`를 다시 돌린다\n")
+        blocks.append("### 실전 점검표\n\n" + {
+            3: "재투자 미처리라 쓰지 않았다 — 채우거나 `refill-defer`로 미룬 뒤 `stage.py close`를 다시 돌린다\n",
+            4: "낡은 근거 미결이라 쓰지 않았다 — 재확인(correct → verdict → decide --mode post) 또는 "
+               "보유 재판정(`[보유 재판정]` 노트 / facts.py reverse) 뒤 `stage.py close`를 다시 돌린다\n",
+            5: "사실 층 미결이라 쓰지 않았다 — `REFS FAIL` 목록의 빠진 칸(as_of·url·quote)을 `facts.py correct`로 채우거나 "
+               "검사 오류를 고친 뒤 `stage.py close`를 다시 돌린다\n"}[rc])
     else:
-        blocks.append(run(["real_check.py", "--stamp", st, "--market", a.market], "실전 점검표 (real_check.py)"))
+        r_ = run(["real_check.py", "--stamp", st, "--market", a.market], "실전 점검표 (real_check.py)")
+        blocks.append(r_)
+        steps.append(r_.step())
+        if r_.rc:
+            ext_fail.append(f"real_check.py 종료코드 {r_.rc}")
+    if ext_fail:
+        rc = 7
     print("\n".join(blocks))
+    # 저장소 마감 — 집행 기록 이관·감사 복사는 멱등(같은 파일 해시·같은 원장 줄은 한 번)이라 close를 다시 돌려도 된다.
+    try:
+        imp = db.import_run_artifacts(st, a.market, here=PROJ)
+        n_audit = db.audit_mirror(st, a.market)
+        if rc == 0:
+            db.run_close(st, a.market, status="closed")
+        db.export_all()
+        print(f"[저장소] {db.run_id(st, a.market)} — 시그널 {imp['signal']} · 제안 {imp['proposals']} · 승인 {imp['approvals']} · "
+              f"주문 {imp['orders']} · 체결 {imp['fills']} 이관 · 감사 판정 {n_audit}행 복사 · "
+              + ("run_close" if rc == 0 else f"{_CLOSE_WHY.get(rc, str(rc))} run_close 보류"), file=sys.stderr)
+        if imp.get("missing_facts"):
+            mf = imp["missing_facts"]
+            print(f"★ [저장소] 제안이 가리킨 사실 id가 사실 표에 없다 {len(mf)}건 — {', '.join(map(str, mf[:8]))}", file=sys.stderr)
+        if imp.get("skipped_rows"):                  # v8 — 장부 제약을 어기는 행은 옮기지 않고 여기 남긴다(한 행이 마감을 막지 않게)
+            sk = imp["skipped_rows"]
+            print(f"★ [저장소] 장부 모양이 아닌 행 {len(sk)}건은 옮기지 않았다 — " + " / ".join(map(str, sk[:5])), file=sys.stderr)
+        # 원문 판 정리(v3 · U01) — 참조 없는 판의 파일만(7일 · 사실·판정·링크가 가리킨 판은 영구). fetch는 더 지우지 않는다.
+        pr = db.raw_purge()
+        print(f"[원문 보관] 정리 {pr['purged']}판(파일 {pr['files_removed']}) · 참조돼 보존 {pr['kept_referenced']} · 최근 {pr['kept_recent']}",
+              file=sys.stderr)
+        steps.append({"name": "저장소 마감", "required": True, "status": "ok"})
+    except db.TestGuard:
+        raise
+    except Exception as e:                        # noqa: BLE001 — 저장 단계 실패는 종료 6(점검표·재투자 판정은 그대로)
+        rc = 6
+        steps.append({"name": "저장소 마감", "required": True, "status": "failed", "note": f"{type(e).__name__}: {str(e)[:200]}"})
+        print(f"★ [저장소] 마감 실패 — {type(e).__name__}: {e} · `python3 stage.py close`를 다시 돌린다", file=sys.stderr)
+    db.stage_finish(sid, "ok" if rc == 0 else "failed", rc, steps, None, CLOSE_CODES.get(rc, ""))
+    print(f"[마감] 종료코드 {rc} — {CLOSE_CODES.get(rc, rc)}" + (" · " + " · ".join(ext_fail) if ext_fail else ""), file=sys.stderr)
     return rc
 
 
@@ -1318,17 +1825,17 @@ def cmd_refill_defer(a) -> int:
     """매도 뒤 재투자를 이 run에서 못 채운 사유를 적는다 → `deferred`(다음 run 이어받기 `## 재투자 대기`가 받는다)."""
     import sessions as _ss
     st = a.stamp or _ss.run_stamp(a.market)
-    rp = JOURNAL / f"refill_{st}_{a.market}.json"
-    if not rp.exists():
-        print(f"재투자 기록이 없다: {rp.name}", file=sys.stderr)
+    rid = db.run_id(st, a.market)
+    d = db.refill_get(st, a.market)
+    if d is None:
+        print(f"재투자 기록이 없다: {rid}(ex_refill)", file=sys.stderr)
         return 2
     if len(a.why.strip()) < 10:
         print("미룬 사유를 10자 이상으로 적어라(시그널 나이·장 마감·후보 없음 등 무엇 때문인지)", file=sys.stderr)
         return 2
-    d = json.loads(rp.read_text(encoding="utf-8"))
     d.update(status="deferred", deferred_why=a.why.strip(), deferred_at=datetime.now(KST).isoformat(timespec="seconds"))
-    rp.write_text(json.dumps(d, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"재투자 미룸 — {rp.name} · {a.why.strip()}")
+    db.refill_put(st, a.market, d)
+    print(f"재투자 미룸 — {rid} · {a.why.strip()}")
     return 0
 
 
@@ -1365,13 +1872,17 @@ def main() -> int:
     cl = sub.add_parser("close", help="6단 마지막 — 미룬 주간거래 손절 점검 · 재투자 대기 확인 · 실전 점검표(계좌 현황 바로 앞)")
     cl.add_argument("--market", choices=["kr", "us"], required=True)
     cl.add_argument("--stamp", default="", metavar="YYMMDD")
+    rn = sub.add_parser("render-note", help="4단 — 노트 값 자리 {{F-id}}·§3 섹터 보드·§12 출처 원장을 저장소에서 채운다(다시 돌려도 같다)")
+    rn.add_argument("--market", choices=["kr", "us"], required=True)
+    rn.add_argument("--stamp", default="", metavar="YYMMDD")
+    rn.add_argument("--note", default="", help="분석노트 경로(기본: 그 run 노트의 마지막 판)")
     rd = sub.add_parser("refill-defer", help="매도 뒤 재투자를 이 run에서 못 채운 사유를 적는다(다음 run이 이어받는다)")
     rd.add_argument("--market", choices=["kr", "us"], required=True)
     rd.add_argument("--stamp", default="", metavar="YYMMDD")
     rd.add_argument("--why", required=True)
     a = ap.parse_args()
     return {"capture": cmd_capture, "carry": cmd_carry, "map": cmd_map, "stamp": cmd_stamp,
-            "market": cmd_market, "close": cmd_close, "refill-defer": cmd_refill_defer}[a.cmd](a)
+            "market": cmd_market, "close": cmd_close, "refill-defer": cmd_refill_defer, "render-note": cmd_render_note}[a.cmd](a)
 
 
 if __name__ == "__main__":

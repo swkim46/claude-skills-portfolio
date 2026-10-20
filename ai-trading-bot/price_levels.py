@@ -27,7 +27,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from kis_client import KisClient, KisError, drop_incomplete_session
+import db
+from kis_client import KisClient, KisError
 
 HERE = Path(__file__).parent
 KST = timezone(timedelta(hours=9))
@@ -210,6 +211,40 @@ def levels(rows: list, per: float = None, eps: float = None,
     return out
 
 
+def fetch_rows(client, market: str, ticker: str, days: int = 90, excd: str = "NAS") -> list:
+    """일별 시세(최신순). 일봉은 저장소(mk_bar)를 거친다 — 같은 run의 기저율·놓친 급등이 받은 일봉을 다시 받지 않는다.
+    국내는 기저율과 같은 150일 창으로 묻고 `days`만큼 잘라 쓴다(`base_rates.kr_daily`)."""
+    end = datetime.now(KST)
+    start = end - timedelta(days=days)
+    if market == "kr":
+        from base_rates import kr_daily
+        return kr_daily(client, ticker, start.strftime("%Y%m%d"), end.strftime("%Y%m%d"))
+    return db.overseas_daily(client, ticker, excd=excd)
+
+
+def record(market: str, ticker: str, computed: dict, cl: list, as_of: str, val: dict = None, stamp: str = None) -> int:
+    """계산한 기준을 저장소(co_level_calc)에 행으로 남긴다 — 기준 이름이 kind, 근거 문구가 method. 반환 쓴 행 수.
+    합류 자리는 `confluence_<순번>`(값 = 평균 가격), 밸류에이션 위치는 `valuation_pct`(값 = 자기 이력 분위 · lo·hi = PER 범위)."""
+    d = str(as_of)
+    as_of = f"{d[:4]}-{d[4:6]}-{d[6:8]}" if len(d) == 8 and d.isdigit() else d
+    n = 0
+    with db.tx():
+        db.level_clear(market, ticker, as_of)            # 같은 날 다시 계산하면 그 날 행을 새로 쓴다(줄어든 합류 자리가 남지 않게)
+        for name, v in computed.items():
+            db.level_put(market, ticker, name, v.get("price"), v.get("lo"), v.get("hi"), as_of=as_of,
+                         method=v.get("basis", ""), stamp=stamp)
+            n += 1
+        for i, z in enumerate(cl or [], 1):
+            db.level_put(market, ticker, f"confluence_{i}", z["price"], as_of=as_of,
+                         method=f"기준 {z['n']}개 겹침: {', '.join(z['members'])}", stamp=stamp)
+            n += 1
+        if val:
+            db.level_put(market, ticker, "valuation_pct", val["percentile"], val["per_low"], val["per_high"], as_of=as_of,
+                         method=val["basis"], stamp=stamp)
+            n += 1
+    return n
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="트리거 가격 기준을 실제 데이터로 계산한다")
     ap.add_argument("ticker")
@@ -222,18 +257,15 @@ def main() -> int:
     args = ap.parse_args()
 
     c = KisClient.for_mode()
-    end = datetime.now(KST)
-    start = end - timedelta(days=args.days)
     try:
+        rows = fetch_rows(c, args.market, args.ticker, args.days, args.excd)
         if args.market == "kr":
-            rows = c.domestic_daily(args.ticker, start.strftime("%Y%m%d"), end.strftime("%Y%m%d"))
             q = c._request("GET", "/uapi/domestic-stock/v1/quotations/inquire-price",
                            headers=c._headers(c.tr["dom_price"]),
                            params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": args.ticker})
             o = q.get("output", {}) or {}
             per_key, eps_key, unit = "per", "eps", "원"
         else:
-            rows = c.overseas_daily(args.ticker, excd=args.excd)
             q = c._request("GET", "/uapi/overseas-price/v1/quotations/price-detail",
                            headers=c._headers("HHDFS76200200"),
                            params={"AUTH": "", "EXCD": args.excd, "SYMB": args.ticker})
@@ -243,11 +275,10 @@ def main() -> int:
         print(f"조회 실패: {e}", file=sys.stderr)
         return 2
 
-    # 장중·프리마켓이면 그날 행이 미완성이다 — 종가가 확정되지 않은 값을 기준으로 쓰면 안 된다.
-    rows, dropped = drop_incomplete_session(rows)
-    if dropped:
-        print(f"  ※ {dropped['date']} 행은 거래량 {dropped['volume']:,}로 미완성 세션 "
-              f"(장중·프리마켓) — 기준 계산에서 제외했다.\n")
+    # 장중·프리마켓 행은 db 일봉이 이미 뺐다 — 기준은 마지막 닫힌 세션까지의 확정 종가(need_final · 2026-10-19 Codex U04 ·
+    #   예전에는 거래량이 적은지로 짐작했다)
+    if rows:
+        print(f"  기준일 {rows[0]['date']} — 확정 종가(마지막 닫힌 세션)\n")
     if len(rows) < 5:
         print(f"일별 시세가 {len(rows)}행뿐 — 기준을 계산할 수 없다.", file=sys.stderr)
         return 2
@@ -267,6 +298,7 @@ def main() -> int:
         mark = "←현재가" if abs(v["price"] - cur) / cur < 0.005 else ""
         print(f"  {name:14} {fmt.format(v['price']):>11} {(v['price']/cur-1)*100:>+8.1f}%  {v['basis']} {mark}")
     cl = confluence(computed, cur)
+    record(args.market, args.ticker, computed, cl, rows[0]["date"], val)
     if cl:
         print("\n  ★ 합류 — 여러 기준이 한 자리에 모인 곳 (기준 선택의 임의성이 낮다)")
         for z in cl:

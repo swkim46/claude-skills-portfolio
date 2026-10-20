@@ -6,6 +6,7 @@
 ★ 2026-10-11 사용자: "테스트가 멈추지 않도록 · 멈추는 걸 모르지 않도록." 구간(R1~R11)마다 함수로 격리해
   한 구간이 예외·SystemExit로 죽어도 FAIL로 적고 다음 구간으로 간다. 요약 전에 프로세스가 끝나면 atexit이
   '멈춤'을 크게 찍고 TEST-HALTED 줄을 남긴다. 요약에는 TEST-SUMMARY 줄 — `run_tests.py`가 센다.
+원장(논지·유니버스·아쉬움 기록·일봉 캐시)은 저장소다 — 전 구간이 임시 저장소(`testkit.db_case`) 안에서 돈다.
 """
 import atexit
 import sys
@@ -13,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import regret as rg  # noqa: E402
+from testkit import db_case  # noqa: E402
 
 FAILS = []
 CHECKS = [0]
@@ -198,6 +200,11 @@ def r9():
     check("b 'Eaton'이 있으면 센다", rg._mentions("ETN Eaton +6.5%", "ETN", "Eaton"))
     check("b2 티커 나열 속 ETN은 센다(이름 없어도)", rg._mentions("GEV · ETN · CMI · GNRC · ai_power", "ETN", "Eaton"))
     check("c 보통 티커는 경계로 센다(MU ≠ MUST)", rg._mentions("MU +4%", "MU", "Micron") and not rg._mentions("MUST win", "MU", "Micron"))
+    check("d 여섯 자리 코드 — 가격 숫자는 세지 않는다(FB-261017-1)",
+          rg._mentions("322000 HD현대에너지솔루션 +3%", "322000", "")
+          and not rg._mentions("x3 `price >= 322000` 이익실현", "322000", "")
+          and not rg._mentions("목표 1,322,000원", "322000", "")
+          and not rg._mentions("3220001 주", "322000", ""))
 
 
 def r8():
@@ -215,8 +222,9 @@ def r8():
     check("b 큰 움직임 행의 유형을 센다(논지 없음)", "| 논지 없음 | 1 |" in w, w)
 
 
-for _fn in (r1, r2, r3, r4, r5, r6, r7, r10, r11, r9, r8):
-    _safe(_fn)
+with db_case():                                   # 실제 journal/trading.db를 열지 않는다
+    for _fn in (r1, r2, r3, r4, r5, r6, r7, r10, r11, r9, r8):
+        _safe(_fn)
 
 _STATE["done"] = True
 print()

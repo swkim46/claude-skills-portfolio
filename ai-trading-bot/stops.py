@@ -23,9 +23,13 @@ run 사이 손절·목표 감시 — 보유 논지의 **가격 매도 조건**�
 신규 매수는 주간거래로 내지 않는다 — 정규장 run의 몫이다. 안 채워진 매도는 fill이 창 마감 전에 취소하고, 다리는 소진되지 않아
 그날 밤 정규장 run이 다시 판정한다.
 현재가가 아니라 **오늘 저가·고가**로 판정한다 — 감시 루프가 멈췄거나 20분 사이에 닿았다 돌아온 터치를 잡는다.
+
+원장(논지·감시 목록·감사 소급·재투자 대기)과 감시 기록(stops_log)은 저장소(`db.py`)에서 읽고 쓴다(2026-10-17).
+스냅샷·승인서는 파일로 남는다(risk_guard의 입력이고 run 증거다). 일봉은 `db.domestic_daily`·`db.overseas_daily`로만 받는다.
 """
 import argparse
 import json
+import sqlite3
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -34,32 +38,36 @@ from pathlib import Path
 from kis_client import (KisClient, KisError, market_session, us_daytime_session, order_excd, EXCD_ORDER,
                         DAYTIME_QUOTE_EXCD, balance_for)
 import risk_guard as rg
+import db
 
 HERE = Path(__file__).parent
 EVID = HERE / "data" / "run_evidence"
 SIGNALS = HERE / "signals"
-LOG = HERE / "journal" / "stops_log.jsonl"
 KST = timezone(timedelta(hours=9))
 PY = sys.executable
 
 
 def held_theses(market: str) -> list:
-    store = HERE / "journal" / "theses.json"
-    if not store.exists():
-        return []
-    try:
-        rows = json.loads(store.read_text(encoding="utf-8")).get("theses") or []
-    except (OSError, json.JSONDecodeError):
-        return []
-    return [t for t in rows if t.get("status") == "held"
+    """이 시장의 held 논지(저장소 논지 원장)."""
+    return [t for t in db.theses_all() if t.get("status") == "held"
             and str(t.get("market", "")).upper() == market.upper()]
 
 
 def _watchlist() -> dict:
+    """감시 목록 — 저장소 `dim_company`(config/watchlist.json과 같은 모양 · 그 파일은 렌더본)."""
+    return db.watchlist_doc() or {}
+
+
+def _record_snapshot(st: str, market: str, phase: str, bal: dict) -> None:
+    """이 pass가 읽은 잔고·보유를 저장소에도 남긴다(`ex_balance`·`ex_position` · phase 'stops'). 스냅샷 파일은 그대로 쓴다.
+    기록 실패가 판정·매도를 막지 않는다 — 판정의 입력은 스냅샷 파일이다."""
     try:
-        return json.loads((HERE / "config" / "watchlist.json").read_text(encoding="utf-8")) or {}
-    except (OSError, json.JSONDecodeError):
-        return {}
+        db.balance_put(st, market, phase, bal)
+        db.positions_put(st, market, phase, bal.get("positions") or [])
+    except db.TestGuard:                             # 테스트가 임시 저장소 없이 왔다 — 삼키지 않는다
+        raise
+    except Exception as e:                           # noqa: BLE001
+        print(f"  ★ 잔고 스냅샷 저장소 기록 실패({type(e).__name__}: {str(e)[:120]}) — 판정은 그대로 간다", file=sys.stderr)
 
 
 FILLED_VERDICTS = ("FILLED", "PARTIAL")
@@ -79,15 +87,17 @@ def filled_of(t: dict) -> tuple:
 
 
 def record_refill(market: str, st: str, approved_name: str, approved: dict, now: datetime = None) -> dict:
-    """매도 전용 pass가 판 뒤 **재투자 대기 기록** `journal/refill_<st>_<mkt>.json` — 체결된 매도만 센다. 기록한 사건(dict) 또는 {}.
+    """매도 전용 pass가 판 뒤 **재투자 대기 기록**(저장소 `ex_refill` 키 `<st>_<mkt>` · 옛 `journal/refill_<st>_<mkt>.json`)
+    — 체결된 매도만 센다. 기록한 사건(dict) 또는 {}.
 
     ★ 2026-10-15 사용자: "손절 매도 이후에 매수가 없어서 의도치 않은 현금 비중 증가가 있었다 — 매도 이후 필요 시 매수를 더 할 수 있게."
     10-14 미국은 매수 단계 뒤 01:42 VST 추적 매도(약 $17,400)가 현금으로 남았다. 이 파일이 '판 돈이 아직 일하지 않는다'를 남기고,
     본 세션이 `refill.py`(→ `risk_guard --refill`)로 채우거나(`consumed`) 못 채운 사유를 적는다(`deferred` → 다음 run 이어받기 `## 재투자 대기`).
-    `stage.py close`는 `open`이 남으면 run을 닫지 않는다. 건조 실행·주문 0 pass는 부르지 않는다(승인서를 지운다)."""
+    `stage.py close`는 `open`이 남으면 run을 닫지 않는다. 건조 실행·주문 0 pass는 부르지 않는다(승인서를 지운다).
+    ★ 저장소(2026-10-17): 읽고-고치고-쓰기를 한 트랜잭션으로 묶는다 — `stage.py refill-defer`·`refill.py`가 같은 기록을 고친다."""
     now = now or datetime.now(KST)
     need = approved.get("refill_need") or {}
-    tp = HERE / "journal" / f"trades_{st}_{market.lower()}.json"
+    tp = HERE / "journal" / f"trades_{st}_{market.lower()}.json"      # 그날 거래 기록(파일 산출물)
     try:
         rows = json.loads(tp.read_text(encoding="utf-8")).get("trades") or []
     except (OSError, json.JSONDecodeError):
@@ -102,24 +112,20 @@ def record_refill(market: str, st: str, approved_name: str, approved: dict, now:
     if not fills:
         return {}
     proceeds = sum(x["qty"] * x["avg_price"] for x in fills if x.get("source") != "funding")
-    path = HERE / "journal" / f"refill_{st}_{market.lower()}.json"
-    try:
-        d = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        d = {"stamp": st, "market": market.lower(), "status": "none", "events": []}
     ev = {"at": now.isoformat(timespec="seconds"), "approved_ref": approved_name, "sells": fills,
           "proceeds": round(proceeds, 2), "target_invested_pct": need.get("target_invested_pct"),
           "based_on": need.get("based_on"), "invested_pct_after": need.get("invested_pct_after"),
           "gap_amt_after": need.get("gap_amt"), "short": need.get("short"), "why": need.get("why")}
-    d["events"] = [e for e in d.get("events") or [] if e.get("approved_ref") != approved_name] + [ev]
-    if need.get("short") is not False:                 # 모자라거나(True) 잴 수 없으면(None) 본 세션이 판정해야 한다
-        d["status"] = "open"
-    d["updated_at"] = ev["at"]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(d, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with db.tx():
+        d = db.refill_get(st, market) or {"stamp": st, "market": market.lower(), "status": "none", "events": []}
+        d["events"] = [e for e in d.get("events") or [] if e.get("approved_ref") != approved_name] + [ev]
+        if need.get("short") is not False:             # 모자라거나(True) 잴 수 없으면(None) 본 세션이 판정해야 한다
+            d["status"] = "open"
+        d["updated_at"] = ev["at"]
+        db.refill_put(st, market, d)
     print(("★ 재투자 필요 — " if d["status"] == "open" else "  · 재투자 판정 — ")
           + f"{', '.join(x['ticker'] for x in fills)} 매도 대금 {proceeds:,.2f} · {need.get('why') or '목표 미확인'} "
-          + f"→ {path.relative_to(HERE)}")
+          + f"→ 저장소 ex_refill {db.run_id(st, market)}")
     return ev
 
 
@@ -149,17 +155,20 @@ def build_snapshot(client: KisClient, market: str, now: datetime) -> dict:
 
 
 def _hilo_snapshots(client: KisClient, market: str, now: datetime, day: str) -> tuple:
-    """보유 종목의 오늘 저가·고가로 만든 스냅샷 둘 + 일봉 원자료. 일봉이 오늘 것이 아니면 그 행을 쓰고 표시한다."""
+    """보유 종목의 오늘 저가·고가로 만든 스냅샷 둘 + 일봉 원자료. 일봉이 오늘 것이 아니면 그 행을 쓰고 표시한다.
+    일봉은 `db.domestic_daily`·`db.overseas_daily`로 받는다(반환 모양은 브로커와 같다 · 같은 구간 재조회는 저장소에서)."""
     bal = client.domestic_balance() if market == "KR" else client.overseas_balance()
     bars = {}
     for p in bal.get("positions", []):
         tic = p.get("ticker")
         try:
             if market == "KR":
-                rows = client.domestic_daily(tic, day, day) or client.domestic_daily(tic, "", day)
+                # 장중 고가·저가는 지금 값이어야 한다 — 저장소의 10분 캐시를 건너뛴다(ttl_min=0 · 받은 값은 저장)
+                rows = db.domestic_daily(client, tic, day, day, ttl_min=0, need_final=False) or \
+                    db.domestic_daily(client, tic, "", day, ttl_min=0, need_final=False)   # 장중 값(미확정으로 저장 · 마감 뒤 확정)
             else:
                 quote = {v: k for k, v in EXCD_ORDER.items()}.get((p.get("excd") or "NASD").upper(), "NAS")
-                rows = client.overseas_daily(tic, excd=quote)
+                rows = db.overseas_daily(client, tic, excd=quote, ttl_min=0, need_final=False)
             bars[tic] = rows[0] if rows else None
         except (KisError, KeyError, TypeError, ValueError) as e:
             bars[tic] = {"error": f"{type(e).__name__}: {str(e)[:80]}"}
@@ -182,13 +191,9 @@ def _hilo_snapshots(client: KisClient, market: str, now: datetime, day: str) -> 
 
 
 def _entry_touches(market: str, bars: dict, client: KisClient, day: str) -> list:
-    """armed·held 논지의 아직 발화하지 않은 가격 진입 조건(`price <= N`·`price >= N`)이 오늘 닿았는가 — 보고만."""
+    """armed·held 논지(저장소 논지 원장)의 아직 발화하지 않은 가격 진입 조건(`price <= N`·`price >= N`)이 오늘 닿았는가 — 보고만."""
     import re as _re
-    store = HERE / "journal" / "theses.json"
-    try:
-        rows = json.loads(store.read_text(encoding="utf-8")).get("theses") or []
-    except (OSError, json.JSONDecodeError):
-        return []
+    rows = db.theses_all()
     out = []
     for t in rows:
         if t.get("status") not in ("armed", "held") or str(t.get("market", "")).upper() != market:
@@ -201,7 +206,7 @@ def _entry_touches(market: str, bars: dict, client: KisClient, day: str) -> list
             bar = bars.get(tic)
             if bar is None and market == "KR":
                 try:
-                    rows2 = client.domestic_daily(tic, day, day)
+                    rows2 = db.domestic_daily(client, tic, day, day, ttl_min=0, need_final=False)
                     bar = bars[tic] = rows2[0] if rows2 else {}
                 except (KisError, KeyError, TypeError, ValueError):
                     bar = bars[tic] = {}
@@ -298,8 +303,9 @@ def watch(market: str, send: bool, stamp: str = "") -> dict:
         return row
     theses = held_theses(market)
     try:                                         # 감사 소급 대기 행(2026-10-13) — 논지가 없어도 장중이면 같은 run에 판다
-        import reversals as rv
-        n_rev = len(rv.pending(market, HERE / "journal"))
+        n_rev = len(rg.reversals_pending(market))
+    except db.TestGuard:                         # 테스트가 임시 저장소 없이 왔다 — 삼키지 않는다
+        raise
     except Exception:                            # noqa: BLE001
         n_rev = 0
     if not theses and not n_rev:
@@ -312,6 +318,7 @@ def watch(market: str, send: bool, stamp: str = "") -> dict:
     EVID.mkdir(parents=True, exist_ok=True)
     snap_path = EVID / f"stops_{st}_{market.lower()}_{tag}.json"
     snap_path.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
+    _record_snapshot(st, market, "stops", snap.get("balance") or {})
     out = SIGNALS / f"approved_{st}_{market.lower()}_stops_{tag}.json"
     rg.run(None, snap_path, out, discipline_only=True)
     approved = json.loads(out.read_text(encoding="utf-8")) if out.exists() else {}
@@ -383,6 +390,7 @@ def daytime(send: bool, stamp: str = "") -> dict:
             "balance": bal, "prices": prices, "day_pnl_pct": None}
     snap_path = EVID / f"stops_daytime_{st}_us_{tag}.json"
     snap_path.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
+    _record_snapshot(st, "US", "stops", bal)
     out = SIGNALS / f"approved_{st}_us_daytime_{tag}.json"
     rg.run(None, snap_path, out, discipline_only=True)
     approved = json.loads(out.read_text(encoding="utf-8")) if out.exists() else {}
@@ -439,12 +447,14 @@ def main() -> int:
         try:
             row = (daytime(a.send, a.stamp) if a.daytime else
                    intraday(m, a.send, a.stamp) if a.intraday else watch(m, a.send, a.stamp))
-        except (KisError, OSError, json.JSONDecodeError) as e:
+        except (KisError, OSError, json.JSONDecodeError, sqlite3.Error) as e:   # 한 시장의 오류가 다른 시장 감시를 막지 않는다
             row = {"ts": datetime.now(KST).isoformat(), "market": m, "error": f"{type(e).__name__}: {str(e)[:120]}"}
             worst = max(worst, 2)
-        LOG.parent.mkdir(parents=True, exist_ok=True)
-        with LOG.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        try:
+            db.log_append("stops_log", row)          # 감시 기록(하트비트 포함) — 저장소 op_stops(추가만)
+        except sqlite3.Error as e:                   # 기록 실패가 다음 시장 감시·출력을 막지 않는다
+            print(f"[{m}] ★ 감시 기록을 저장소에 못 남겼다({type(e).__name__}: {e})", file=sys.stderr)
+            worst = max(worst, 2)
         fired = row.get("fired") or []
         print(f"[{m}] " + (row.get("error") or row.get("why") or
                             f"손절·목표 {len(fired)}건 → 전송 {row.get('sent', 0)} (rc={row.get('rc')})"))

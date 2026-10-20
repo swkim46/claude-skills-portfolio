@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""시그널의 편입·제외 제안을 **규칙으로 검증해** watchlist.json에 반영한다.
+"""시그널의 편입·제외 제안을 **규칙으로 검증해** 유니버스(저장소 dim_company · 렌더본 config/watchlist.json)에 반영한다.
 
 이 파일이 존재하는 이유 — 무인 운영과 인젝션 방어를 동시에 만족시키기 위해서다.
 
@@ -30,17 +30,13 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import db
 from kis_client import KisClient, KisError, quote_excd
 
 HERE = Path(__file__).parent
 CONFIG = HERE / "config"
-WATCHLIST = CONFIG / "watchlist.json"
 RULES = CONFIG / "universe_rules.json"
 KILL = CONFIG / "KILL"
-JOURNAL = HERE / "journal"
-PENDING = JOURNAL / "universe_pending.json"
-COVERAGE = JOURNAL / "universe_coverage.json"
-CHANGELOG = JOURNAL / "universe_log.jsonl"
 KST = timezone(timedelta(hours=9))
 
 
@@ -51,30 +47,6 @@ def _read(path: Path, default=None):
         return json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return default
-
-
-def _read_required(path: Path) -> tuple:
-    """반드시 읽혀야 하는 상태 파일 — **(데이터, 읽었는가)**. 못 읽으면 옆으로 보존한다.
-
-    `_read`는 실패를 기본값으로 갈음한다. 그래도 되는 파일(커버리지·대기열)과
-    그러면 **이력이 통째로 사라지는** 파일(유니버스)이 있어서 후자만 이 함수를 쓴다.
-    """
-    if not path.exists():
-        return {}, True
-    try:
-        d = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(d, dict):
-            raise ValueError("최상위가 dict가 아니다")
-        return d, True
-    except (json.JSONDecodeError, OSError, ValueError) as e:
-        aside = path.with_name(f"{path.stem}.corrupt_{datetime.now(KST):%y%m%d_%H%M%S}.json")
-        try:
-            path.rename(aside)
-            where = aside.name
-        except OSError:
-            where = "(보존 실패)"
-        print(f"\n★ {path.name}을 읽을 수 없어 {where}로 옮겨 보존했다 ({e}).", file=sys.stderr)
-        return {}, False
 
 
 def _write_watchlist_guarded(wl: dict, before: dict, n_removed: int) -> bool:
@@ -94,8 +66,20 @@ def _write_watchlist_guarded(wl: dict, before: dict, n_removed: int) -> bool:
         if key in before and key not in wl:
             print(f"★ 유니버스에서 `{key}`가 사라졌다 — 쓰지 않는다.", file=sys.stderr)
             return False
-    WATCHLIST.write_text(json.dumps(wl, ensure_ascii=False, indent=2), encoding="utf-8")
+    db.watchlist_save(wl)                   # dim_company(in_watchlist)에 맞춘다 — 렌더본은 db가 커밋 뒤 내보낸다
     return True
+
+
+def _save_pending(before: dict, after: dict) -> None:
+    """대기열은 **바뀐 후보만** 쓴다(빠진 것은 지우고, 새로 생기거나 바뀐 것만 넣는다) — 통째 다시 쓰지 않는다.
+    예전 `journal/universe_pending.json` 통째 쓰기 자리 — 저장소 op_pending 행 단위.
+    """
+    for k in before:
+        if k not in after:
+            db.kv_delete("op_pending", k)
+    for k, v in after.items():
+        if before.get(k) != v:
+            db.kv_put("op_pending", k, v)
 
 
 class Unknown(Exception):
@@ -168,7 +152,11 @@ def check_us(client: KisClient, ticker: str, excd: str, rules: dict) -> dict:
     floor = r.get("min_market_cap_usd_etf", r["min_market_cap_usd"]) if is_etf else r["min_market_cap_usd"]
     if mcap < floor:
         raise Reject(f"{'AUM' if is_etf else '시가총액'} ${mcap / 1e9:,.1f}B < ${floor / 1e9:,.0f}B")
-    turnover = float(o.get("tamt") or 0)
+    # ★ 하루 거래대금은 **완결된 세션** 값으로 잰다 — `tamt`는 run 시각까지의 장중 누적이라 미국 run(개장 30분~3시간 뒤)에는
+    #   하루 값의 일부만 잡혀 큰 수혜주도 거부됐다(2026-10-17 피드백 FB-261017-2: 10:10 ET $15M 거부 → 13:02 ET $121M 통과).
+    #   직전 세션 거래대금(`pamt` · 없으면 전일 거래량×전일 종가)과 오늘 누적 중 큰 값.
+    prev = float(o.get("pamt") or 0) or float(o.get("pvol") or 0) * float(o.get("base") or 0)
+    turnover = max(float(o.get("tamt") or 0), prev)
     if turnover < r["min_daily_turnover_usd"]:
         raise Reject(f"거래대금 ${turnover / 1e6:,.0f}M < ${r['min_daily_turnover_usd'] / 1e6:,.0f}M")
     price = float(o.get("last") or 0)
@@ -204,17 +192,14 @@ def run(signal_path: Path, apply: bool) -> int:
     if not sig:
         print(f"시그널을 읽을 수 없다: {signal_path}", file=sys.stderr)
         return 2
-    # ★ 유니버스는 **인젝션 방어 경계**다. 못 읽는 파일을 `{}`로 갈음하면
+    # ★ 유니버스는 **인젝션 방어 경계**다. 못 읽는 원장을 `{}`로 갈음하면
     #   아래 `wl.setdefault(mkt, []).append(...)`가 **41종목·벤치마크·schema_version을
-    #   1종목 파일로 덮어쓴다** — 그리고 이 스크립트는 무인으로 `--apply`와 함께 돈다.
-    #   '아직 없음'과 '읽지 못함'을 구분하고, 읽지 못했으면 **쓰지 않고 중단한다.**
-    wl, wl_ok = _read_required(WATCHLIST)
-    if not wl_ok:
-        print("★ 유니버스를 읽지 못했다 — 반영을 중단한다(덮어쓰면 전 종목이 사라진다). "
-              "옆으로 보존한 파일을 복구한 뒤 다시 돌려라.", file=sys.stderr)
-        return 2
-    pending = _read(PENDING, {}) or {}
-    coverage = _read(COVERAGE, {}) or {}
+    #   1종목 목록으로 덮어쓴다** — 그리고 이 스크립트는 무인으로 `--apply`와 함께 돈다.
+    #   그래서 저장소를 못 읽으면 빈 값으로 잇지 않고 여기서 멈춘다(예외가 그대로 올라간다).
+    wl = db.watchlist_doc()
+    pending = db.pending_load()
+    pending_before = json.loads(json.dumps(pending, ensure_ascii=False))   # 바뀐 후보만 쓰려고 읽은 모양을 남긴다
+    coverage = db.coverage_load()
     run_id = sig.get("run_id", signal_path.stem)
     # 냉각은 날짜로 센다 — 같은 날 두 시장을 도는 것으로 끝나면 안 된다.
     session_date = (sig.get("generated_at") or "")[:10] or datetime.now(KST).strftime("%Y-%m-%d")
@@ -283,13 +268,11 @@ def run(signal_path: Path, apply: bool) -> int:
         m_, t_ = k.split(":", 1)
         cands.append({"ticker": t_, "market": m_, "name": v.get("name", ""), "axis": v.get("axis", ""),
                       "excd": v.get("excd", ""), "why": "냉각을 채운 대기 후보 재판정", "_recheck": True})
-    # ★ FB-261003-3 ② 시총 상위(config/main_names.json)는 **감시 대상으로 자동 편입**한다 — 냉각·run당 상한·유니버스 상한에서
+    # ★ FB-261003-3 ② 시총 상위(저장소 dim_company.main_rank · 옛 main_names.json)는 **감시 대상으로 자동 편입**한다 — 냉각·run당 상한·유니버스 상한에서
     #   빠지고 관문(시총·거래대금·플래그)은 그대로. 매수는 여전히 논지가 있어야 한다. "삼성전자 같은 메인 종목을 못 잡는 게
     #   말이 안 된다"(사용자 10-02) — 감시 밖이면 논지조차 못 선다.
-    try:
-        mn = json.loads((HERE / "config" / "main_names.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        mn = {}
+    mn = {m_: [{"ticker": r["ticker"], "name": r["name"] or "", "excd": r["excd"] or ""} for r in db.main_names(m_)]
+          for m_ in ("KR", "US")}
     for m_ in ("KR", "US"):
         for r in mn.get(m_) or []:
             k = f"{m_}:{r.get('ticker')}"
@@ -456,28 +439,30 @@ def run(signal_path: Path, apply: bool) -> int:
         return 0
 
     import copy
-    wl_before = copy.deepcopy(wl)
-    for a in added:
-        wl.setdefault(a["market"], []).append(a["entry"])
-    for r_ in removed:
-        wl[r_["market"]] = [e for e in wl[r_["market"]] if e["ticker"] != r_["ticker"]]
-    if not _write_watchlist_guarded(wl, wl_before, len(removed)):
-        return 2
-    PENDING.parent.mkdir(parents=True, exist_ok=True)
-    PENDING.write_text(json.dumps(pending, ensure_ascii=False, indent=2), encoding="utf-8")
-    with CHANGELOG.open("a", encoding="utf-8") as f:
-        f.write(json.dumps({"ts": datetime.now(KST).isoformat(), "run_id": run_id,
-                            "signal": str(signal_path), "added": added,
-                            "removed": removed, "rejected": rejected},
-                           ensure_ascii=False) + "\n")
-    print(f"\n반영 완료 — {WATCHLIST.name} · 이력 {CHANGELOG.name}")
+    # 유니버스·대기열·변경 이력을 한 트랜잭션으로 쓴다. 판정은 앞에서 읽은 유니버스로 했지만, 더하고 빼는 것은
+    # 지금 다시 읽은 유니버스에 한다 — 그 사이 다른 쓰기가 있었어도 덮지 않는다.
+    with db.tx():
+        wl = db.watchlist_doc()
+        wl_before = copy.deepcopy(wl)
+        for a in added:
+            if not any(e.get("ticker") == a["entry"]["ticker"] for e in wl.get(a["market"]) or []):
+                wl.setdefault(a["market"], []).append(a["entry"])
+        for r_ in removed:
+            wl[r_["market"]] = [e for e in wl[r_["market"]] if e["ticker"] != r_["ticker"]]
+        if not _write_watchlist_guarded(wl, wl_before, len(removed)):
+            return 2
+        _save_pending(pending_before, pending)
+        db.log_append("universe_log", {"ts": datetime.now(KST).isoformat(), "run_id": run_id,
+                                       "signal": str(signal_path), "added": added,
+                                       "removed": removed, "rejected": rejected})
+    print("\n반영 완료 — 유니버스(dim_company · 렌더본 config/watchlist.json) · 이력 universe_log")
     return 0
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="시그널의 유니버스 제안을 규칙으로 검증해 반영한다")
     ap.add_argument("--signal", required=True)
-    ap.add_argument("--apply", action="store_true", help="실제로 watchlist.json을 고친다")
+    ap.add_argument("--apply", action="store_true", help="실제로 유니버스(watchlist)를 고친다")
     args = ap.parse_args()
     p = Path(args.signal)
     if not p.is_absolute():

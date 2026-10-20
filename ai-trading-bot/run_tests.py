@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """테스트를 끝까지 돌리고 **완주했는지**를 기록한다 — 멈춘 테스트를 모르고 지나가지 않게.
 
-    python3 run_tests.py            # 전부 돌린다 → journal/test_runs.jsonl 한 줄씩 · logs/tests_<시각>.txt · 한 줄 요약
+    python3 run_tests.py            # 전부 돌린다 → 저장소 op_test_run 한 행씩(db.log_append('test_runs')) · logs/tests_<시각>.txt · 한 줄 요약
     python3 run_tests.py --last     # 돌리지 않고 마지막 기록만 보여 준다(1단 캡처·토요일 피드백이 읽는다)
 
 왜 있는가 (2026-10-11 사용자: "테스트가 멈추지 않도록 세팅해 · 테스트 멈추는 걸 모르지 않도록"):
@@ -18,24 +18,34 @@
   해시가 지금과 다르다 — 고친 뒤 테스트를 안 돌렸다는 뜻이다. `--last`가 ★로 알리고 1단 캡처의 `### 테스트` 줄에 그대로 실린다.
   (10-12 20:56 편집이 전송 줄을 지운 사고의 재발 방지 — 그때는 편집 뒤 테스트가 돌았지만 전송 경로를 덮는 테스트가 없었다:
   그 구멍은 `test_execute_path.py`가 막고, 이 해시는 '고치고 안 돌린 채 run이 시작되는' 구멍을 막는다.)
+- **테스트마다 빈 임시 저장소**(2026-10-17) = 자식 프로세스에 `AITB_DB`(새 임시 경로)·`AITB_TESTING=1`을 준다 — 테스트는 실제
+  `journal/trading.db`를 열 수 없다(`db._guard`). 완주 기록은 이 부모 프로세스(AITB_DB 없음)가 실제 저장소에 쓴다.
 """
 import argparse
 import hashlib
-import json
+import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# 다른 폴더에서 이 모듈을 불러와도(코드 편집 감사가 완주 기록을 `_rows()`로 읽는다) 같은 폴더의 저장소 모듈을 찾게 한다
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import db  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
-LEDGER = HERE / "journal" / "test_runs.jsonl"
+LEDGER = "test_runs"                     # 저장소 로그 이름(op_test_run) — 예전 journal/test_runs.jsonl
 LOGS = HERE / "logs"
 KST = timezone(timedelta(hours=9))
-TESTS = ["test_risk_guard.py", "test_regret.py", "test_execute_path.py", "test_track1.py", "test_levels.py", "test_sessions.py", "test_realweek.py", "test_switch.py"]   # test_track1 = 주문 근거 검증·노트 필수 요소(2026-10-13)
+TESTS = ["test_risk_guard.py", "test_regret.py", "test_execute_path.py", "test_track1.py", "test_levels.py", "test_sessions.py", "test_realweek.py", "test_switch.py",
+         "test_db.py", "test_facts.py", "test_migrate.py", "test_judgment.py", "test_reports.py", "test_notes.py"]   # 저장소·사실 층·이전·판단·보고(2026-10-17)   # test_track1 = 주문 근거 검증·노트 필수 요소(2026-10-13)
 # 주문이 실제로 나가는 경로 — 이 파일들이 마지막 완주 뒤 바뀌었으면 `--last`가 ★로 알린다.
-EXEC_FILES = ["execute.py", "fill.py", "stops.py", "risk_guard.py", "kis_client.py"]
+EXEC_FILES = ["execute.py", "fill.py", "stops.py", "risk_guard.py", "kis_client.py",
+              "portfolio.py"]    # 2026-10-19 Codex R06 — risk_guard의 통합자산 분모가 여기서 나온다
 TIMEOUT_S = 900          # 정상은 1분 안팎 — 이 시간을 넘기면 멈춘 것으로 보고 끊는다
 STALE_DAYS = 7           # 마지막 완주 기록이 이보다 오래되면 '안 돌았다'로 알린다
 
@@ -44,15 +54,8 @@ RX_HALT = re.compile(r"^TEST-HALTED file=(\S+) ran=(\d+) failed=(\d+) last=(.*)$
 
 
 def _rows() -> list:
-    if not LEDGER.exists():
-        return []
-    out = []
-    for ln in LEDGER.read_text(encoding="utf-8").splitlines():
-        try:
-            out.append(json.loads(ln))
-        except json.JSONDecodeError:
-            pass
-    return out
+    """완주 기록 전건(기록 순서)."""
+    return db.log_rows(LEDGER)
 
 
 def _src_hashes() -> dict:
@@ -72,18 +75,19 @@ def run_one(name: str, prev_max: int, src: dict = None) -> dict:
     row = {"ts": datetime.now(KST).isoformat(timespec="seconds"), "file": name}
     if src:
         row["src"] = src
+    # 테스트 파일마다 빈 임시 저장소 — 실제 저장소(원장·현재 run 포인터)를 쓰거나 읽지 않게(2026-10-14 포인터 사고 · 2026-10-17 저장소)
+    tmp_db = Path(tempfile.mkdtemp(prefix="aitb_test_db_")) / "trading.db"
+    env = {k: v for k, v in os.environ.items() if k not in ("AITB_CURRENT_RUN", "AITB_EXPORT_REAL")}
+    env.update({"AITB_DB": str(tmp_db), "AITB_TESTING": "1"})
     try:
-        # 현재 run 포인터는 임시 파일로 — 테스트가 실제 journal/current_run.json을 쓰거나 읽지 않게(2026-10-14)
-        import os as _os, tempfile as _tf
-        _ptr = Path(_tf.mkdtemp(prefix="aitb_ptr_")) / "current_run.json"
-        p = subprocess.run([sys.executable, name], cwd=HERE, capture_output=True, text=True, timeout=TIMEOUT_S,
-                           env={**_os.environ, "AITB_CURRENT_RUN": str(_ptr)})
+        p = subprocess.run([sys.executable, name], cwd=HERE, capture_output=True, text=True, timeout=TIMEOUT_S, env=env)
         out, code = (p.stdout or "") + "\n" + (p.stderr or ""), p.returncode
         timed_out = False
     except subprocess.TimeoutExpired as e:
         out = ((e.stdout or b"").decode("utf-8", "ignore") if isinstance(e.stdout, bytes) else (e.stdout or "")) + \
               ((e.stderr or b"").decode("utf-8", "ignore") if isinstance(e.stderr, bytes) else (e.stderr or ""))
         code, timed_out = None, True
+    shutil.rmtree(tmp_db.parent, ignore_errors=True)
     row["seconds"] = round(time.time() - t0, 1)
     row["exit"] = code
     s, h = RX_SUM.search(out), RX_HALT.search(out)
@@ -133,9 +137,7 @@ def cmd_run() -> int:
     for name in TESTS:
         prev = max([r.get("total") or 0 for r in rows if r.get("file") == name and r.get("completed")] or [0])
         r = run_one(name, prev, src)
-        LEDGER.parent.mkdir(exist_ok=True)
-        with LEDGER.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        db.log_append(LEDGER, r)
         out.append(line_for(r))
         bad += not r["ok"]
     print(("[테스트] " if not bad else "★★ [테스트 이상] ") + " · ".join(out))

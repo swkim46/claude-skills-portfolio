@@ -2,7 +2,7 @@
 """
 실전 점검표 — 모의 run 하나가 **실계좌였다면 문제없이 돌았을까**를 파일에서 기계로 센다(12항목).
 
-왜(2026-10-15 사용자): "다음 주부터 실전으로 돌릴 거야. 이번 주 모의 투자에서 최대한 테스트하고 문제는 토요일 trade-feedback으로 고치고
+왜(2026-10-15 사용자): "실전으로 돌리기 전에 모의 투자에서 최대한 테스트하고 문제는 토요일 trade-feedback으로 고치고
 다음 주 월요일 run부터 실전으로." → run마다 이 표를 `data/run_evidence/real_check_<st>_<mkt>.md`에 남기고 보고의 〈계좌 현황〉 바로 앞에
 그대로 붙인다(기억으로 쓰지 않는다). 토요일 피드백이 그 주의 표를 모아 실전 준비를 판정한다. 목표에 못 미친 줄은 ★로 맨 앞에 온다.
 
@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -27,8 +28,9 @@ EVID = HERE / "data" / "run_evidence"
 JOURNAL = HERE / "journal"
 SIGNALS = HERE / "signals"
 ANALYSIS = HERE / "analysis"
-LEDGER = HERE.parent.parent / ".claude" / "skills" / "_stepgate" / "promotion_ledger.jsonl"
+LEDGER = HERE.parent / ".claude" / "skills" / "_stepgate" / "promotion_ledger.jsonl"
 sys.path.insert(0, str(HERE))
+import db  # noqa: E402 — 재투자 대기·논지·포인터·자산 곡선·테스트·푸시 기록은 저장소에서 읽는다
 
 
 def _read(p: Path, default=None):
@@ -79,8 +81,7 @@ def _filled(t) -> int:
 
 
 def c2_refill(st, mk):
-    rp = JOURNAL / f"refill_{st}_{mk}.json"
-    d = _read(rp, None)
+    d = db.refill_get(st, mk)                            # 재투자 대기(ex_refill)
     refills = sorted(SIGNALS.glob(f"approved_{st}_{mk}_refill_*.json"))
     # 매수 단계 뒤 매도 전용 pass가 체결한 매도가 있었나(재투자 기록이 생기기 전 run도 잡는다)
     tr = _read(JOURNAL / f"trades_{st}_{mk}.json", {}) or {}
@@ -141,16 +142,18 @@ def _series(name: str) -> str:
 
 
 def c4_audit(st, mk):
+    # 감사 기록은 저장소에서 읽는다(v4 · Codex U03) — 원장을 먼저 복사하고(멱등) db.audit_rows 하나로 센다(다른 폴더 예행 감사 제외).
+    try:
+        db.audit_mirror(st, mk)
+    except Exception as e:                       # noqa: BLE001 — 복사 실패면 이미 복사된 행으로 센다
+        print(f"(감사 원장 복사 실패: {type(e).__name__}: {e})", file=sys.stderr)
     rows = []
-    for ln in _text(LEDGER).splitlines():
-        try:
-            r = json.loads(ln)
-        except json.JSONDecodeError:
-            continue
+    for row in db.audit_rows(db.run_id(st, mk), "fact-check"):
+        r = row.get("body_obj") or {}
         run = str(r.get("run") or "").lower()
         if r.get("type") == "finding" and r.get("skill") == "fact-check" and f"ai클레임_{st}_{mk}" in run \
                 and not r.get("superseded"):
-            rows.append(r)
+            rows.append({**r, "_current_ok": bool(row.get("current_ok"))})     # 지금 판정표 판을 본 감사인가(W06)
     if not rows:
         return "—", "이 run의 감사 기록 없음(아직 안 왔거나 [AI] 0건)"
     by = {}
@@ -160,12 +163,16 @@ def c4_audit(st, mk):
     for ser, rs in by.items():
         order = "주문근거" in ser
         n, last = len(rs), rs[-1].get("status")
+        cur = [r for r in rs if r.get("_current_ok")]
+        last_cur = cur[-1].get("status") if cur else None              # 지금 판정표 판의 감사 결과(W06) — 이력의 마지막 줄과 다를 수 있다
         first_fail = [r for r in rs if r.get("status") == "FAIL"][:1]
         lenses = ",".join((first_fail[0].get("lenses") or [])[:6]) if first_fail else ""
         tag = "①" if order else ("②-" + ser.split("_")[-2].upper() if re.search(r"_[ab]_판정", ser) else "②")
-        parts.append(f"{tag} {n}회 · 마지막 {last}" + (f" · 1차 FAIL lens {lenses}" if lenses else ""))
-        if order and (last != "PASS" or n > 2):
-            bad.append(f"{tag} 2회 안 PASS 못 함")
+        parts.append(f"{tag} {n}회 · 마지막 {last}" + ("" if last_cur == last and cur and cur[-1] is rs[-1]
+                                                         else f" · 지금 판 {last_cur or '감사 없음(다른 판을 본 감사)'}")
+                     + (f" · 1차 FAIL lens {lenses}" if lenses else ""))
+        if order and (last_cur != "PASS" or n > 2):
+            bad.append(f"{tag} 2회 안 PASS 못 함" if last_cur == last else f"{tag} 지금 판정표 판의 PASS 없음")
         if not order and rs[0].get("status") != "PASS":
             bad.append(f"{tag} 1차 FAIL")
     pre = sorted(EVID.glob(f"preaudit_AI클레임_{st}_{mk}*"))
@@ -189,7 +196,7 @@ def c5_fills(st, mk):
 
 def c6_slip(st, mk):
     tr = _read(JOURNAL / f"trades_{st}_{mk}.json", {}) or {}
-    th = {t.get("id"): t for t in (_read(JOURNAL / "theses.json", {}) or {}).get("theses") or []}
+    th = {t.get("id"): t for t in db.theses_all()}
     slips = []
     for t in tr.get("trades") or []:
         if t.get("action") != "SELL" or t.get("source") not in ("discipline",):
@@ -223,9 +230,9 @@ def c7_probe(st, mk):
 
 def c8_dates(st, mk):
     import sessions as ss
-    cur = _read(ss.CURRENT_RUN, {}) or {}
+    cur = db.current_run_read() or {}                     # 현재 run 포인터(op_current_run)
     sess = ss.session_iso(st, mk)
-    rows = [json.loads(l) for l in _text(JOURNAL / "equity_curve.jsonl").splitlines() if l.strip().startswith("{")]
+    rows = db.equity_rows()
     mine = [r for r in rows if str(r.get("market", "")).upper() == mk.upper() and r.get("date") == sess]
     bad = []
     if cur.get("stamp") not in (st, None) and cur.get("market") == mk:
@@ -236,7 +243,7 @@ def c8_dates(st, mk):
 
 
 def c9_tests(st, mk):
-    rows = [json.loads(l) for l in _text(JOURNAL / "test_runs.jsonl").splitlines() if l.strip().startswith("{")]
+    rows = db.log_rows("test_runs")
     if not rows:
         return "★", "테스트 기록 없음"
     last = {}
@@ -250,7 +257,7 @@ def c9_tests(st, mk):
 
 
 def c10_push(st, mk):
-    rows = [json.loads(l) for l in _text(JOURNAL / "push_log.jsonl").splitlines() if l.strip().startswith("{")]
+    rows = db.log_rows("push_log")
     mine = [r for r in rows if r.get("stamp") == st and r.get("market") == mk]
     if mine:
         sent = [r for r in mine if r.get("sent", True)]
@@ -289,7 +296,8 @@ ITEMS = [("① 실계좌라면 샀을까", c1_shadow), ("② 매도 뒤 재투�
          ("⑫ 전환 예행", c12_switch)]
 
 
-def build(st: str, mk: str) -> tuple:
+def results(st: str, mk: str) -> list:
+    """12항목 판정 — [(항목, ✓|★|—, 결과 문장)] · ITEMS 순서."""
     res = []
     for name, fn in ITEMS:
         try:
@@ -297,10 +305,26 @@ def build(st: str, mk: str) -> tuple:
         except Exception as e:                       # noqa: BLE001 — 한 항목이 죽어도 표는 낸다(그 항목은 ★)
             v, why = "★", f"점검 실패 — {type(e).__name__}: {str(e)[:120]}"
         res.append((name, v, why))
+    return res
+
+
+def head_line(st: str, mk: str, res: list) -> str:
+    """머리줄 — 판정 행만으로 다시 만들 수 있다(토요일 피드백이 저장소 행에서 같은 줄을 만든다)."""
     stars = [r for r in res if r[1] == "★"]
     ok = sum(1 for r in res if r[1] == "✓")
-    head = (f"[실전점검] {st} {mk.upper()} · 통과 {ok}/{len(res)} · 해당 없음 {sum(1 for r in res if r[1] == '—')}"
+    return (f"[실전점검] {st} {mk.upper()} · 통과 {ok}/{len(res)} · 해당 없음 {sum(1 for r in res if r[1] == '—')}"
             + (f" · ★ {', '.join(r[0] for r in stars)}" if stars else " · ★ 0"))
+
+
+def record(st: str, mk: str, res: list) -> None:
+    """판정 행을 저장소(op_real_check)에 — 토요일 `feedback.py collect`가 이 표를 읽는다. 마크다운 표는 그대로 run 증거다."""
+    db.real_check_put(st, mk, [{"item": n, "status": v, "note": w} for n, v, w in res])
+
+
+def build(st: str, mk: str, res: list = None) -> tuple:
+    res = res if res is not None else results(st, mk)
+    stars = [r for r in res if r[1] == "★"]
+    head = head_line(st, mk, res)
     ordered = stars + [r for r in res if r[1] != "★"]
     L = [f"# 실전 점검표 — {st} · {mk.upper()} ({datetime.now(KST):%Y-%m-%d %H:%M} KST · 파일에서 기계로)", "", head, "",
          "| 항목 | 판정 | 결과 |", "|---|---|---|"]
@@ -314,10 +338,16 @@ def main() -> int:
     ap.add_argument("--market", choices=["kr", "us"], required=True)
     ap.add_argument("--out", default="")
     a = ap.parse_args()
-    head, md = build(a.stamp, a.market)
+    res = results(a.stamp, a.market)
+    head, md = build(a.stamp, a.market, res)
     out = Path(a.out) if a.out else EVID / f"real_check_{a.stamp}_{a.market}.md"
     out.parent.mkdir(parents=True, exist_ok=True)
+    # close 게이트가 보는 증거 파일을 먼저 남긴다(저장소 기록은 그 뒤)
     out.write_text(md, encoding="utf-8")
+    try:
+        record(a.stamp, a.market, res)
+    except sqlite3.Error as e:                    # 저장소 기록 실패가 점검표 파일을 막지 않는다(토요일 집계만 빠진다)
+        print(f"★ 실전 점검표를 저장소에 못 남겼다({type(e).__name__}: {e}) — 파일은 남았다", file=sys.stderr)
     print(md)
     return 0
 

@@ -15,7 +15,7 @@
 **★ 2026-10-14부터 스탬프 = 거래소 기준일(현지 날짜).** 사용자: "날짜 기록은 무조건 현지 날짜(국장이면 한국, 미장이면 미국)
 기준". 국내는 한국 날짜, 미국은 미국 동부 날짜, 장 마감 뒤(또는 주말·휴장)에 시작한 run은 **다음 거래일**(그 세션을 준비하는 run).
 계산은 `session_date()` 한 곳 — 모든 드라이버가 이것을 쓴다. 기록 안의 날짜(논지·지도·일정·자산 곡선)는 1단이 쓰는
-`journal/current_run.json` 포인터에서 온다(`run_date()`). 전환일(`LOCAL_STAMP_FROM`) 앞 스탬프는 아래 옛 규칙으로 읽는다
+저장소의 현재 run 포인터(`db.current_run_read` — 예전 `journal/current_run.json`)에서 온다(`run_date()`). 전환일(`LOCAL_STAMP_FROM`) 앞 스탬프는 아래 옛 규칙으로 읽는다
 (`stamp_to_session()`) — 과거 파일은 이름을 바꾸지 않았다(10-12·10-13 미국 두 run만 제 이름으로 옮김 · `rename_run.py`).
 
 **(전환일 전) 스탬프 ≠ 거래소 기준일.** 산출물 파일명의 스탬프는 run이 시작된 KST 날짜다. 미국 run은 ET 금요일
@@ -30,7 +30,7 @@ KR 09-18로 잘못 잡혔다(2026-09-21). 휴장은 `config/holidays.json`(`kis_
 이유가 그것이다 — 소급으로 만들면 이 한계가 영구히 섞인다).
 
 사용:
-    python3 sessions.py scan                    # 원장 재생성(journal/sessions.jsonl)
+    python3 sessions.py scan                    # 원장 재생성(저장소 op_session — db.log_replace('sessions'))
     python3 sessions.py due                     # 밀린 것·이탈만 (1단 캡처에 넣는다)
     python3 sessions.py due --days 10
 """
@@ -39,11 +39,11 @@ from __future__ import annotations
 import argparse
 import io
 import json
-import os
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+import db
 from kis_client import is_holiday, market_session, next_trading_day
 
 HERE = Path(__file__).resolve().parent
@@ -51,7 +51,7 @@ JOURNAL = HERE / "journal"
 DATA = HERE / "data"
 ANALYSIS = HERE / "analysis"
 SIGNALS = HERE / "signals"
-LEDGER = JOURNAL / "sessions.jsonl"
+LEDGER = "sessions"                      # 저장소 로그 이름(op_session) — 예전 journal/sessions.jsonl
 KST = timezone(timedelta(hours=9))
 
 # 정규 슬롯(KST) — `SKILL.md` 〈하루 일과〉와 같은 값이어야 한다.
@@ -144,9 +144,9 @@ def slot_verdict(market: str, d: date, started: datetime) -> tuple:
 
 # ── 현지 거래일(2026-10-14) ─────────────────────────────────────────────────────
 LOCAL_STAMP_FROM = date(2026, 10, 14)       # 이 날짜 이상 스탬프는 '그 자체가 세션 날짜'
-# 1단 capture가 쓰는 현재 run 포인터. 테스트는 AITB_CURRENT_RUN으로 임시 경로를 준다(run_tests.py) —
-# 2026-10-14 첫 구현 때 테스트가 옛 스탬프(260916)로 실제 포인터를 덮어 기록 날짜가 9월로 찍힐 뻔했다.
-CURRENT_RUN = Path(os.environ["AITB_CURRENT_RUN"]) if os.environ.get("AITB_CURRENT_RUN") else JOURNAL / "current_run.json"
+# 1단 capture가 쓰는 현재 run 포인터 — 저장소 op_current_run('current') 한 행(db.current_run_read/write).
+# 테스트는 임시 저장소(AITB_DB)를 쓰므로 실제 포인터에 닿지 않는다 — 2026-10-14 첫 구현 때 테스트가 옛 스탬프(260916)로
+# 실제 포인터를 덮어 기록 날짜가 9월로 찍힐 뻔했다(그때는 AITB_CURRENT_RUN 임시 파일로 막았다).
 POINTER_MAX_SKEW_D = 5                       # 지금 세션과 이보다 멀리 떨어진 스탬프로는 포인터를 쓰지 않는다
 CURRENT_MAX_AGE_H = 18                       # 이보다 오래된 포인터는 믿지 않는다(다음 run과 섞이지 않게)
 
@@ -206,10 +206,10 @@ def _worklog_done(st: str, market: str) -> bool:
 
 def read_current(market: str = "", now: datetime = None, max_age_h: float = CURRENT_MAX_AGE_H) -> dict:
     """현재 run 포인터(없거나 오래됐거나 시장이 다르면 {})."""
+    cur = db.current_run_read() or {}
     try:
-        cur = json.loads(CURRENT_RUN.read_text(encoding="utf-8"))
         started = datetime.fromisoformat(cur["started"])
-    except (OSError, ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError):
         return {}
     now = (now or datetime.now(KST)).astimezone(KST)
     if (now - started).total_seconds() > max_age_h * 3600:
@@ -219,7 +219,7 @@ def read_current(market: str = "", now: datetime = None, max_age_h: float = CURR
     return cur
 
 
-def write_current(market: str, st: str, now: datetime = None) -> dict:
+def write_current(market: str, st: str, now: datetime = None, account_mode: str = None) -> dict:
     """현재 run 포인터를 쓴다. 지난 run 재처리·테스트처럼 스탬프가 지금 세션과 며칠 넘게 떨어져 있으면 **쓰지 않는다**
     (그 날짜가 18시간 동안 모든 기록 날짜로 퍼진다)."""
     now = (now or datetime.now(KST)).astimezone(KST)
@@ -233,8 +233,9 @@ def write_current(market: str, st: str, now: datetime = None) -> dict:
         return {}
     cur = {"market": market.lower(), "stamp": st, "session_date": stamp_to_session(st, market, now).isoformat(),
            "started": now.isoformat(timespec="seconds")}
-    CURRENT_RUN.parent.mkdir(parents=True, exist_ok=True)
-    CURRENT_RUN.write_text(json.dumps(cur, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    if account_mode:
+        cur["account_mode"] = account_mode           # 이 run의 계좌 모드(v4 · R09 — 포인터를 읽는 쪽이 계열을 안다)
+    db.current_run_write(cur)
     return cur
 
 
@@ -318,33 +319,14 @@ def scan(days: int, today: date = None) -> list:
 
 
 def _run_log_rows() -> list:
-    """`run_log.jsonl` — 무인 드라이버가 남긴 결과(outcome·reason). 없을 수 있다."""
-    f = JOURNAL / "run_log.jsonl"
-    if not f.exists():
-        return []
-    out = []
-    for line in f.read_text(encoding="utf-8", errors="ignore").splitlines():
-        if line.strip():
-            try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
-    return out
+    """`run_log`(저장소 op_run_log) — 무인 드라이버가 남긴 결과(outcome·reason). 없을 수 있다."""
+    return db.log_rows("run_log")
 
 
 def _reviewed() -> set:
-    """`reviews.jsonl`에 회고 기록이 있는 (시장, 세션일) 집합."""
-    f = JOURNAL / "reviews.jsonl"
-    if not f.exists():
-        return set()
+    """`reviews`(저장소 op_review)에 회고 기록이 있는 (시장, 세션일) 집합."""
     out = set()
-    for line in f.read_text(encoding="utf-8", errors="ignore").splitlines():
-        if not line.strip():
-            continue
-        try:
-            r = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for r in db.log_rows("reviews"):
         if r.get("phantom"):
             continue                        # 허깨비 회고(존재하지 않는 run) — 회고로 치지 않는다
         if r.get("market") and r.get("session"):
@@ -452,11 +434,8 @@ def cmd_prev(a) -> int:
 
 def cmd_scan(a) -> int:
     rows = scan(a.days)
-    LEDGER.parent.mkdir(parents=True, exist_ok=True)
-    with LEDGER.open("w", encoding="utf-8") as fh:
-        for r in rows:
-            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
-    print(f"■ 일과 원장 — 최근 {a.days}일 · {len(rows)}행 → {LEDGER.relative_to(HERE)}\n")
+    db.log_replace(LEDGER, rows)                     # 통째 다시 쓰는 기록(파생 원장) — 저장소 op_session
+    print(f"■ 일과 원장 — 최근 {a.days}일 · {len(rows)}행 → 저장소 op_session\n")
     print(f"{'세션일':12s} {'시장':4s} {'도달':10s} {'슬롯':6s} 비고")
     for r in rows:
         mark = "  " if r["complete"] else "★ "

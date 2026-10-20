@@ -16,8 +16,11 @@
     python3 screen_treasury.py                       # 캐시 갱신 + 스크린 (주 1회)
     python3 screen_treasury.py --min-ratio 5 --top 30
     python3 screen_treasury.py --limit 50            # 시험용 — 앞 50종목만 조회
-출력: analysis/스크린_자사주소각_<YYMMDD>.md · data/treasury_scan.json(캐시) ·
+출력: analysis/스크린_자사주소각_<YYMMDD>.md · 저장소 co_treasury_holding(캐시 — 예전 data/treasury_scan.json) ·
       signals/candidates_treasury_<YYMMDD>.json(watchlist_candidates 형식)
+
+저장(2026-10-17): 조회 결과는 저장소 한 표(`co_treasury_holding` · 키 시장·종목·결산일)에 행 단위로 쌓는다 — `db.treasury_latest`가
+종목별 최근 행을, `db.treasury_put`이 한 행을 쓴다. 조회 실패는 결산일 ''·`error` 칸에 사유로 남고 30일 뒤 다시 조회한다(예전과 같다).
 """
 import argparse
 import json
@@ -27,10 +30,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import dart_feed as d
+import db                            # 저장소를 여는 것은 db.py뿐이다
 
 HERE = Path(__file__).resolve().parent
 KST = timezone(timedelta(hours=9))
-CACHE = HERE / "data" / "treasury_scan.json"
+MARKET = "KR"                        # 상법 341조의4 스크린 — 국내 상장사만
 CACHE_DAYS = 90                      # 정기보고서는 분기마다 바뀐다 — 그보다 자주 부를 이유가 없다
 LAW_EFFECTIVE = "2026-03-06"
 GRACE_START = "2026-09-06"           # 기존 자사주 소각 창 시작(시행일 + 6개월)
@@ -46,17 +50,19 @@ def _int(s) -> int:
 
 
 def load_cache() -> dict:
-    if not CACHE.exists():
-        return {}
-    try:
-        return json.loads(CACHE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
+    """종목별 최근 스냅숏 {종목: 행} — 저장소 `co_treasury_holding`(`db.treasury_latest`). 예전 캐시 파일과 같은 모양으로
+    돌려준다(빈 칸은 뺀다 · 조회 실패 행은 `error` 칸이 있다)."""
+    out = {}
+    for tk, r in db.treasury_latest(MARKET).items():
+        row = {k: v for k, v in dict(r).items() if v not in (None, "") and k != "market"}
+        row["ticker"] = tk
+        out[tk] = row
+    return out
 
 
-def save_cache(c: dict) -> None:
-    CACHE.parent.mkdir(parents=True, exist_ok=True)
-    CACHE.write_text(json.dumps(c, ensure_ascii=False, indent=1), encoding="utf-8")
+def save_row(r: dict) -> None:
+    """한 종목 결과를 저장소에 한 행으로(같은 결산일이면 덮어쓴다) — 조회 실패는 결산일 ''·error 칸."""
+    db.treasury_put({"market": MARKET, **r})
 
 
 def scan_one(key: str, ticker: str, meta: dict) -> dict:
@@ -102,13 +108,12 @@ def scan(key: str, codes: dict, limit: int = 0, sleep: float = 0.06) -> tuple:
         r = scan_one(key, tk, meta)
         r["scanned"] = datetime.now(KST).strftime("%Y-%m-%d")
         cache[tk] = r
+        save_row(r)                      # 행마다 바로 쓴다 — 중간에 끊겨도 받은 만큼은 남는다(예전 200건마다 저장)
         n_call += 1
         n_fail += 1 if r.get("error") else 0
         if n_call % 200 == 0:
-            save_cache(cache)
             print(f"  … {i}/{len(items)} 조회 (호출 {n_call} · 실패 {n_fail})", file=sys.stderr)
         time.sleep(sleep)
-    save_cache(cache)
     return cache, n_call, n_fail
 
 

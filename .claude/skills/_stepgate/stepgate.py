@@ -419,7 +419,78 @@ def write_token(skill, cp, wf=""):
         fh.write(json.dumps(tok, ensure_ascii=False) + "\n")
 
 
+# ── 통과 기록(덮어쓰지 않는 서명 원장 · 2026-10-19 · trade-run Codex 리뷰 R03)
+# 순서 토큰은 (스킬, 워크플로)당 마지막 하나만 남고 산출물 내용과 묶이지 않는다 — 다음 단계를 통과하면 이전 통과가 지워지고,
+# 판정한 뒤 산출물이 바뀌어도 토큰은 그대로다. 집행기(trade-run의 execute.py)는 "지금 보내는 승인 파일 **그 바이트**가
+# dispatch를 통과했다"를 확인해야 하므로, PASS마다 판정 시점 `approved=` 파일의 sha256을 서명해 따로 덧붙인다.
+# 워크플로 키(dir= 경로 해시)로 묶지 않는다 — 같은 폴더도 경로 표기(유니코드 정규화)가 다르면 다른 키가 될 수 있다. 내용 해시가 결합이다.
+
+def pass_record_path(skill, wf=""):
+    return ledger_path(skill, wf)[: -len(".ledger")] + ".passes.jsonl"
+
+
+def _pass_sig(rec):
+    body = json.dumps({k: rec.get(k) for k in ("skill", "wf", "cp", "verdict", "epoch", "approved", "approved_sha256")},
+                      sort_keys=True, ensure_ascii=False)
+    return hmac.new(_form_key(), body.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def append_pass_record(skill, cp, wf, args):
+    """PASS 하나를 통과 기록에 덧붙인다 — `approved=`가 있으면 그 파일 바이트의 sha256을 함께 서명한다."""
+    ap = str(args.get("approved") or "").strip()
+    sha = None
+    if ap:
+        ap = os.path.abspath(os.path.expanduser(ap))
+        try:
+            with open(ap, "rb") as fh:
+                sha = hashlib.sha256(fh.read()).hexdigest()
+        except OSError:
+            sha = None
+    rec = {"skill": skill, "wf": wf, "cp": str(cp), "verdict": "PASS", "epoch": int(time.time()),
+           "ts": time.strftime("%Y-%m-%d %H:%M:%S"), "deliverable": str(args.get("deliverable") or ""),
+           "approved": ap or None, "approved_sha256": sha}
+    rec["sig"] = _pass_sig(rec)
+    with open(pass_record_path(skill, wf), "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return rec
+
+
+def read_pass_records(skill, cp=None, wf=None, max_age=TOKEN_TTL_SEC):
+    """유효한 통과 기록 — 서명이 맞고 `max_age`초 안. `wf`를 주면 그 워크플로만, 아니면 그 스킬의 전 워크플로."""
+    import glob as _glob
+    safe = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in skill)
+    paths = ([pass_record_path(skill, wf)] if wf is not None
+             else sorted(_glob.glob(os.path.join(gate_dir(), safe + "__*.passes.jsonl"))
+                         + _glob.glob(os.path.join(gate_dir(), safe + ".passes.jsonl"))))
+    out, now = [], time.time()
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                lines = fh.read().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(rec, dict) or rec.get("skill") != skill or rec.get("verdict") != "PASS":
+                continue
+            if cp is not None and str(rec.get("cp")) != str(cp):
+                continue
+            if not hmac.compare_digest(str(rec.get("sig") or ""), _pass_sig(rec)):
+                continue
+            if now - float(rec.get("epoch") or 0) > max_age:
+                continue
+            out.append(rec)
+    return out
+
+
 def remove_ledger(skill, wf=""):
+    try:
+        os.remove(pass_record_path(skill, wf))       # 새 워크플로 = 옛 통과 기록 없음(init·clear)
+    except OSError:
+        pass
     try:
         os.remove(ledger_path(skill, wf))
     except OSError:
@@ -1101,7 +1172,11 @@ def cmd_judge(skill, cp, kv_args):
     if after:
         tok = read_token(skill, wf)
         bad = tok.get("_invalid") if tok else None
-        if not tok or bad or str(tok.get("cp")) != str(after) or tok.get("verdict") != "PASS":
+        # ★ 같은 체크포인트를 **다시** 받는 것은 순서 위반이 아니다(2026-10-19) — 산출물이 바뀌어 재판정이 필요할 때(예: trade-run이
+        #   dispatch 뒤 risk_guard를 다시 돌려 승인 파일 해시가 바뀌면 집행기가 그 바이트의 통과 기록을 요구한다) 막히지 않게.
+        #   재판정도 봉인 기준·관찰 항목을 전부 다시 본다 — 단계를 건너뛰는 길이 아니다.
+        again = bool(tok) and not bad and str(tok.get("cp")) == str(cp) and tok.get("verdict") == "PASS"
+        if not again and (not tok or bad or str(tok.get("cp")) != str(after) or tok.get("verdict") != "PASS"):
             have = (f"{tok.get('cp')} — {bad}" if bad else tok.get("cp")) if tok else "(없음)"
             print("GATE FAIL [%s:%s]: 직전 '%s' 통과 토큰 없음(현재=%s) — 순서 건너뜀?"
                   % (skill, cp, after, have))
@@ -1214,6 +1289,7 @@ def cmd_judge(skill, cp, kv_args):
         sys.exit(1)
     if async_mode:
         write_token(skill, cp, wf)
+        append_pass_record(skill, cp, wf, args)
         try:
             os.remove(form_state_path(skill, cp, wf))
         except OSError:
@@ -1248,8 +1324,9 @@ def cmd_judge(skill, cp, kv_args):
                   % (skill, cp))
             sys.exit(1)
 
-    # (5) 통과 — verdict 토큰 기록(순서 강제용) + 이번 회차 form 출제 상태 소비(1회성)
+    # (5) 통과 — verdict 토큰 기록(순서 강제용) + 통과 기록(내용 해시 결합) + 이번 회차 form 출제 상태 소비(1회성)
     write_token(skill, cp, wf)
+    append_pass_record(skill, cp, wf, args)
     try:
         os.remove(form_state_path(skill, cp, wf))
     except OSError:
@@ -1620,7 +1697,12 @@ def cmd_audit_judge(a):
             row = {"type": "finding", "ts": upd["ts_done"], "skill": skill, "cp": cp,
                    "run": _series_stem(deliverable) or entry.get("wfid") or reqid,
                    "reqid": reqid, "status": sv, "lenses": lenses,
-                   "findings": kv.get("findings", "")[:400]}
+                   "findings": kv.get("findings", "")[:400],
+                   # ★ 감사가 본 산출물 판(2026-10-19 · Codex U03·W06) — 과제 폴더 · 산출물 절대경로 · judge 때 큐가 적은 내용 해시(앞 16자).
+                   #   소비자(trade-run db.audit_rows)가 지금 파일과 해시를 대조해 '지금 판의 PASS'만 증거로 쓴다(이력은 그대로 센다).
+                   "dir": entry.get("dir", "") or "",
+                   "deliverable": os.path.abspath(deliverable) if deliverable else "",
+                   "content_sha": entry.get("content_sha", "") or ""}
             if superseded:
                 row["superseded"] = True
             if ffile:

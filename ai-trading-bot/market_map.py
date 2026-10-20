@@ -10,10 +10,10 @@
   **시장 → 축 → 대표 종목 → 핵심 지표를 미리 파악해두고, 그 위에 시나리오를 미리 짜두는 것.**
 그러면 뉴스는 *알려주는* 것이 아니라 *확인해주는* 것이 되고, 지연이 문제가 되지 않는다.
 
-두 파일을 관리한다.
-  `journal/market_map.json`  축 — 각 축의 핵심 지표(무엇이 이 축을 움직이나)와 대표 종목
-                             (그 축에 어느 방향으로 걸리나)
-  `journal/calendar.json`    날짜가 정해진 이벤트 — 지표 발표·정책 회의·실적·행사
+두 원장을 관리한다(저장소 `journal/trading.db` — 이 모듈은 `db.py`를 거쳐서만 읽고 쓴다).
+  지도(dim_axis·dim_sector)  축 — 각 축의 핵심 지표(무엇이 이 축을 움직이나)와 대표 종목
+                             (그 축에 어느 방향으로 걸리나). 렌더본 `journal/market_map.json`
+  일정(cal_event)            날짜가 정해진 이벤트 — 지표 발표·정책 회의·실적·행사
 
 지도는 논지(`theses.py`)의 상류다. 일정표의 이벤트마다 **양쪽 시나리오의 논지가 걸려 있는지**
 점검하는 것이 `gaps` 명령의 일이다 — 다가오는 이벤트에 논지가 없으면 그날 또 즉흥으로
@@ -30,24 +30,21 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+
+import db
 
 HERE = Path(__file__).parent
 JOURNAL = HERE / "journal"
-MAP = JOURNAL / "market_map.json"
-CAL = JOURNAL / "calendar.json"
+# 옛 호출 `_read(MAP, …)`(다른 모듈) 호환 표지 — 경로가 아니다. 지도는 저장소에 있고 `_read`가 db에서 읽어 준다.
+MAP = "market_map"
 
 # 일정 행의 `kind` 어휘 — `add-event`가 검증한다. 이벤트 계수(`limits.position_sizing`)는 지표·정책만 본다.
 EVENT_KINDS = ("지표", "정책", "실적", "제품", "지수", "휴장", "메모", "기타")
 EVENT_KINDS_HELP = ("지표=CPI·PPI·고용 등 공식 통계 발표 / 정책=FOMC·ECB·정부 정책 회의·발표 / 실적=실적 발표 / "
                     "제품=제품·행사 / 지수=편입·리밸런싱 / 휴장=거래소 휴장 / "
                     "메모=뉴스레터 휴간 등 시장 사건이 아닌 안내(계수 없음) / 기타")
-THESES = JOURNAL / "theses.json"
-SECTOR_HISTORY = JOURNAL / "sector_history.jsonl"
-BRIDGE = HERE / "config" / "sector_bridge.json"
-BRIDGE_LOG = JOURNAL / "bridge_log.jsonl"
-SECTOR_WATCH = JOURNAL / "sector_watch.jsonl"
 KST = timezone(timedelta(hours=9))
 
 # 섹터 등급. **"—"(미조사)가 등급인 것이 핵심이다** — 안 본 것을 빈칸이 아니라 등급으로
@@ -71,6 +68,10 @@ BOARD_HISTORY_DAYS = 45
 
 
 def _read(path: Path, default):
+    """입력 파일(add-axis·forecast add의 --file · run 증거 파일)을 읽는다. 원장은 파일이 아니다 —
+    `MAP`을 주면 저장소의 지도를 돌려준다(옛 호출 호환)."""
+    if path == MAP:
+        return db.market_map_load()
     if not path.exists():
         return default
     try:
@@ -79,9 +80,19 @@ def _read(path: Path, default):
         raise SystemExit(f"{path.name}을 읽을 수 없다 ({e})")
 
 
-def _write(path: Path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+def _axis_snap(m: dict) -> dict:
+    """축 id → 읽은 모양(JSON). `_put_changed_axes`가 바뀐 축만 고르는 기준."""
+    return {a.get("id"): json.dumps(a, ensure_ascii=False) for a in m.get("axes") or []}
+
+
+def _put_changed_axes(m: dict, before: dict) -> int:
+    """옛 `_write(MAP, 통째)` 자리 — 읽은 뒤 바뀐 축만 행 단위로 쓴다(부르는 쪽이 `db.tx()`로 읽기부터 묶는다)."""
+    n = 0
+    for a in m.get("axes") or []:
+        if before.get(a.get("id")) != json.dumps(a, ensure_ascii=False):
+            db.axis_put(a)
+            n += 1
+    return n
 
 
 # 고리의 종료 상태. **"미확인"은 종료가 아니다** — 조사를 안 한 것과 구분이 안 되므로
@@ -126,7 +137,7 @@ def show_chain(a: dict) -> None:
 
 
 def show() -> int:
-    m = _read(MAP, {"axes": []})
+    m = db.market_map_load()
     if not m["axes"]:
         print("시장 지도가 비어 있다 — /life-research로 축을 세우는 것이 먼저다.")
         return 0
@@ -156,7 +167,7 @@ def show() -> int:
 
 def chains() -> int:
     """연쇄만 추려 **가장 약한 고리**를 모아 본다 — 리서치 대기열이 여기서 나온다."""
-    m = _read(MAP, {"axes": []})
+    m = db.market_map_load()
     cs = [a for a in m["axes"] if a.get("chain")]
     if not cs:
         print("등록된 연쇄가 없다. 거시 사건 → 파급 → 섹터 → 종목 순으로 세우는 것이 먼저다.")
@@ -202,7 +213,7 @@ def _run_day(market: str = ""):
 
 
 def upcoming(days: int) -> list:
-    cal = _read(CAL, {"events": []})
+    cal = {"events": db.calendar_all()}
     today = _run_day()
     out = []
     for e in cal["events"]:
@@ -240,10 +251,10 @@ def gaps(days: int) -> int:
     연쇄만 있고 논지가 없으면 "파급은 그렸는데 살 것을 안 정한" 상태이고,
     논지만 있고 연쇄가 없으면 "이유 없이 조건만 건" 상태다.
     """
-    th = _read(THESES, {"theses": []})
+    th = {"theses": db.theses_all()}
     live = [t for t in th["theses"] if t.get("status") in ("armed", "held")]
     blob = json.dumps(live, ensure_ascii=False)
-    m = _read(MAP, {"axes": []})
+    m = db.market_map_load()
     chain_keys = {a.get("event_key") for a in m["axes"] if a.get("event_key")}
 
     rows = upcoming(days)
@@ -272,6 +283,17 @@ def gaps(days: int) -> int:
     return 0
 
 
+def _word_in(term: str, text: str) -> bool:
+    """이름·티커가 글에 **낱말로** 있는가 — 영문·숫자 티커는 앞뒤가 영숫자가 아닐 때만(한 글자 티커 V가 GEV·VLO 안에서 걸리지 않게).
+    한글 이름은 그대로 포함 검사(조사가 바로 붙는다)."""
+    t = str(term or "")
+    if not t:
+        return False
+    if re.fullmatch(r"[\x00-\x7f]+", t):
+        return re.search(rf"(?<![A-Za-z0-9]){re.escape(t)}(?![A-Za-z0-9])", text) is not None
+    return t in text
+
+
 def gaps_check(days: int, note_path: str = "", out: str = "") -> int:
     """★ 일정 → 논지 **강제**. D-`days` 안 이벤트 중 유니버스 종목이 걸려 있는데 논지도 없고
     노트 §5에 `[통과] <이벤트> — <이유>` 줄도 없으면 종료코드 3.
@@ -280,11 +302,11 @@ def gaps_check(days: int, note_path: str = "", out: str = "") -> int:
     띄웠지만 아무도 막지 않았고 9/10 미국 노트에는 오라클이 한 줄도 없었다. **알고 있었는데
     안 한 것**은 몰랐던 것보다 나쁘다 — 그래서 경고가 아니라 게이트다. 산출은 생성줄이다.
     """
-    th = _read(THESES, {"theses": []})
+    th = {"theses": db.theses_all()}
     live = [x for x in th["theses"] if x.get("status") in ("armed", "held")]
     live_tk = {x.get("ticker") for x in live}
     blob = json.dumps(live, ensure_ascii=False)
-    wl = _read(HERE / "config" / "watchlist.json", {})
+    wl = db.watchlist_doc()
     uni = {r["ticker"]: r for mk in ("KR", "US") for r in (wl.get(mk) or []) if r.get("ticker")}
     alias = {}
     for tk, r in uni.items():
@@ -297,8 +319,8 @@ def gaps_check(days: int, note_path: str = "", out: str = "") -> int:
     unresolved, passed = [], []
     for delta, d, e in upcoming(days):
         text = f"{e.get('event', '')} {e.get('why', '')} {e.get('key', '')}"
-        tks = {tk for f, tk in alias.items() if f in text} | \
-              {tk for tk in uni if tk in text}
+        tks = {tk for f, tk in alias.items() if _word_in(f, text)} | \
+              {tk for tk in uni if _word_in(tk, text)}
         if not tks:
             continue                                   # 유니버스 종목이 안 걸린 이벤트는 여기 몫이 아니다
         has_thesis = bool(tks & live_tk) or (e.get("key") or "") in blob
@@ -334,19 +356,20 @@ def add(path: Path, kind: str) -> int:
         raise SystemExit(f"파일을 읽을 수 없다: {path}")
     items = items if isinstance(items, list) else [items]
     if kind == "axis":
-        m = _read(MAP, {"schema_version": "1.0", "axes": []})
-        have = {a["id"] for a in m["axes"]}
-        for a in items:
-            for k in ("id", "name", "thesis"):
-                if not a.get(k):
-                    raise SystemExit(f"축에 {k}가 없다: {a.get('id', '?')}")
-            m["axes"] = [x for x in m["axes"] if x["id"] != a["id"]]   # 같은 id는 갱신
-            a["updated"] = _run_day().isoformat()
-            m["axes"].append(a)
-            print(f"{'갱신' if a['id'] in have else '등록'}: 축 {a['id']} {a['name']}")
-        _write(MAP, m)
+        with db.tx():                                   # 읽기부터 쓰기까지 한 트랜잭션 — 그 사이 다른 쓰기를 덮지 않는다
+            m = db.market_map_load()
+            before = _axis_snap(m)
+            have = {a["id"] for a in m["axes"]}
+            for a in items:
+                for k in ("id", "name", "thesis"):
+                    if not a.get(k):
+                        raise SystemExit(f"축에 {k}가 없다: {a.get('id', '?')}")
+                m["axes"] = [x for x in m["axes"] if x["id"] != a["id"]]   # 같은 id는 갱신
+                a["updated"] = _run_day().isoformat()
+                m["axes"].append(a)
+                print(f"{'갱신' if a['id'] in have else '등록'}: 축 {a['id']} {a['name']}")
+            _put_changed_axes(m, before)                # 같은 id는 그 행을 통째로 바꾼다 · 새 축은 끝에 붙는다
     else:
-        c = _read(CAL, {"schema_version": "1.0", "events": []})
         # ★ kind는 어휘 안에서만 — `risk_guard.halve_window`가 `지표`·`정책`에 이벤트 계수를 붙이므로,
         #   메모성 행("뉴스레터 휴간")이 `지표`로 들어오면 목표 비중이 0.75배가 된다(2026-09-21 UPPITY 행).
         #   전건 검증 뒤에 쓴다 — 하나라도 어휘 밖이면 아무것도 기록하지 않는다.
@@ -356,21 +379,22 @@ def add(path: Path, kind: str) -> int:
                 print(f"kind가 어휘 밖이다: {e.get('kind')!r} ({e.get('date')} {e.get('event')})", file=sys.stderr)
             print("허용 kind: " + " · ".join(EVENT_KINDS) + "\n  " + EVENT_KINDS_HELP, file=sys.stderr)
             return 2
-        for e in items:
-            for k in ("date", "event"):
-                if not e.get(k):
-                    raise SystemExit(f"이벤트에 {k}가 없다: {e}")
-            datetime.strptime(e["date"], "%Y-%m-%d")     # 형식 검증
-            dup = [x for x in c["events"]
-                   if x["date"] == e["date"] and x["event"] == e["event"]]
-            if dup:
-                print(f"이미 있음: {e['date']} {e['event']}")
-                continue
-            e["added"] = _run_day().isoformat()
-            c["events"].append(e)
-            print(f"등록: {e['date']} {e['event']}")
-        c["events"].sort(key=lambda x: x["date"])
-        _write(CAL, c)
+        with db.tx():                                   # 새 행만 더한다(일정 전체를 다시 쓰지 않는다) · 한 트랜잭션
+            c = {"events": db.calendar_all()}
+            for e in items:
+                for k in ("date", "event"):
+                    if not e.get(k):
+                        raise SystemExit(f"이벤트에 {k}가 없다: {e}")
+                datetime.strptime(e["date"], "%Y-%m-%d")     # 형식 검증
+                dup = [x for x in c["events"]
+                       if x["date"] == e["date"] and x["event"] == e["event"]]
+                if dup:
+                    print(f"이미 있음: {e['date']} {e['event']}")
+                    continue
+                e["added"] = _run_day().isoformat()
+                db.calendar_put(e)
+                c["events"].append(e)
+                print(f"등록: {e['date']} {e['event']}")
     return 0
 
 
@@ -384,7 +408,7 @@ def axes_index() -> tuple:
     ★ 축이 두 시장을 잇는 **유일한 자연 조인 키**다. `axes[].names[]`는 이미
     양 시장 종목을 한 축에 담고 있다(`us_rates` 축에 국내 보험주가 들어 있다).
     """
-    m = _read(MAP, {"axes": [], "sectors": []})
+    m = db.market_map_load()
     by_tk, by_id = {}, {}
     for a in (m.get("axes") or []):
         aid = a.get("id")
@@ -407,7 +431,7 @@ def axes_index() -> tuple:
 #   일정 지연"을 위험(−)으로 적은 기간에 국내 전망은 같은 경로의 기자재를 기회(+)로 샀다.
 
 def _open_forecast_axes() -> list:
-    m = _read(MAP, {"axes": []})
+    m = db.market_map_load()
     return [a for a in (m.get("axes") or [])
             if a.get("id") and a.get("direction") and (a.get("status") or "open") == "open"]
 
@@ -437,11 +461,111 @@ def _latest_snapshot(market: str):
     return sorted(cands)[-1][1] if cands else None
 
 
-def exposure_by_driver(market: str = "KR", stamp: str = "") -> dict:
+# 요인 상태의 창과 폭(FB-261017-7) — 폭은 추적 다리와 같은 정의(theses_levels.md: price_levels band_1d = 최근 20일 일중폭 중앙값 × 3)라
+# limits 키로 따로 두지 않는다. 창 = 20세션 고점(기준일 포함 21개 종가) · 일봉 5개 미만 멤버는 지수에서 뺀다.
+FACTOR_WINDOW = 21
+FACTOR_BAND_DAYS = 20
+FACTOR_BAND_MULT = 3
+FACTOR_MIN_BARS = 5
+FACTOR_LOOKBACK_DAYS = 50
+
+
+def _exit_leg_kind(thesis_id: str, trigger_id: str) -> str:
+    """매도 다리 종류 — 논지 원장의 그 다리 판정식으로: `price >=` = target · `from_peak` = trail · 그 밖 = stop · 못 찾으면 unknown."""
+    t = db.thesis_get(thesis_id) if thesis_id else None
+    for leg in (t or {}).get("exit_triggers") or []:
+        if leg.get("id") == trigger_id:
+            chk = str(leg.get("check") or "")
+            return "target" if re.match(r"\s*price\s*>=", chk) else ("trail" if "from_peak" in chk else "stop")
+    return "unknown"
+
+
+def _rule_sells(market: str, stamp: str) -> tuple:
+    """지난 세션의 규칙 매도(손절·추적 다리 체결) — 창 = 이 run · 직전 같은 시장 run · 반대 시장의 최신 run(요인은 양 시장 하나 ·
+    2026-10-12 사용자). 반환 (창 run id 목록, [{ticker, market, run_id, trigger_id, kind}]). 목표 다리(`price >=`)는 세지 않는다."""
+    mk = market.lower()
+    other = "us" if mk == "kr" else "kr"
+    rid = db.run_id(stamp, mk)
+    runs = [rid]
+    for sql, a in (("SELECT run_id FROM ex_run WHERE LOWER(market)=? AND stamp<? ORDER BY stamp DESC LIMIT 1", (mk, stamp)),
+                   ("SELECT run_id FROM ex_run WHERE LOWER(market)=? AND stamp<=? ORDER BY stamp DESC LIMIT 1", (other, stamp))):
+        r = db.q1(sql, a)
+        if r and r["run_id"] not in runs:
+            runs.append(r["run_id"])
+    out = []
+    # 주문마다 마지막 체결 관측(v_fill_latest · v7 R11) — 같은 주문의 관측 행이 둘이면 규칙 매도가 두 번 세지던 자리
+    for r in db.q(f"SELECT o.ticker, o.market, o.run_id, o.trigger_id, o.thesis_id, o.body FROM ex_order o JOIN v_fill_latest f ON f.order_id=o.id"
+                  f" WHERE o.run_id IN ({','.join('?' * len(runs))}) AND UPPER(o.side)='SELL' AND f.verdict IN ('FILLED','PARTIAL')",
+                  tuple(runs)):
+        try:
+            b = json.loads(r["body"] or "{}")
+        except ValueError:
+            b = {}
+        if b.get("source") != "discipline":
+            continue
+        kind = b.get("leg_kind") or _exit_leg_kind(r["thesis_id"] or b.get("thesis_id"), r["trigger_id"] or b.get("trigger_id"))
+        if kind == "target":
+            continue
+        out.append({"ticker": str(r["ticker"]), "market": r["market"], "run_id": r["run_id"], "trigger_id": r["trigger_id"], "kind": kind})
+    return runs, out
+
+
+def _basket_state(basket: list, until: str, total: float) -> dict:
+    """요인 바스켓(그 요인에 걸린 보유 · sign +) — 저장소 일봉으로 동일가중 종가 지수(마지막 21세션 · 두 시장 날짜 합집합에 직전 종가를
+    이어 붙임)의 고점 대비 하락과 일중폭 중앙값(멤버마다 최근 20일 (고가−저가)/종가 중앙값의 평균 · price_levels.band_1d와 같은 정의) ×3."""
+    import statistics as _st
+    since = (datetime.strptime(until, "%Y-%m-%d") - timedelta(days=FACTOR_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+    members, series, bands = [], {}, []
+    for m in basket:
+        bs = [b for b in db.bars(m["market"], m["ticker"], since=since, until=until) if b.get("close")]
+        has = len(bs) >= FACTOR_MIN_BARS
+        members.append({"ticker": m["ticker"], "market": m["market"], "held": True, "sign": m["sign"],
+                        "weight_pct": round(m["krw"] / total * 100, 2) if total else None,
+                        "last_close": bs[-1]["close"] if bs else None, "has_bars": has})
+        if has:
+            series[m["ticker"]] = bs
+            rng = [(b["high"] - b["low"]) / b["close"] * 100 for b in bs[-FACTOR_BAND_DAYS:]
+                   if b.get("high") is not None and b.get("low") is not None]
+            if rng:
+                bands.append(_st.median(rng))
+    out = {"n_members": len(basket), "n_with_bars": len(series), "members": members, "index_last": None, "index_peak": None,
+           "peak_date": None, "drawdown_pct": None, "band_med_pct": round(sum(bands) / len(bands), 2) if bands else None,
+           "band3_pct": round(sum(bands) / len(bands) * FACTOR_BAND_MULT, 2) if bands else None, "fired_dd": False}
+    dates = sorted({b["date"] for bs in series.values() for b in bs})[-FACTOR_WINDOW:]
+    if not series or len(dates) < FACTOR_MIN_BARS:
+        return out
+    curves = []
+    for bs in series.values():
+        if bs[0]["date"] > dates[0]:
+            continue                                # 창 시작 전 종가가 없다 — 기준을 못 잡는다
+        k, last, cur = 0, None, []
+        for d in dates:
+            while k < len(bs) and bs[k]["date"] <= d:
+                last = float(bs[k]["close"])
+                k += 1
+            cur.append(last)
+        curves.append([c / cur[0] for c in cur])
+    if not curves:
+        return out
+    idx = [sum(c[i] for c in curves) / len(curves) * 100 for i in range(len(dates))]
+    pk = max(range(len(idx)), key=lambda i: idx[i])
+    out.update({"index_last": round(idx[-1], 2), "index_peak": round(idx[pk], 2), "peak_date": dates[pk],
+                "drawdown_pct": round((idx[-1] / idx[pk] - 1) * 100, 2)})
+    if out["band3_pct"] is not None:
+        out["fired_dd"] = out["drawdown_pct"] <= -out["band3_pct"]
+    return out
+
+
+def exposure_by_driver(market: str = "KR", stamp: str = "", no_db: bool = False) -> dict:
     """보유를 **요인(driver)별**로 묶은 노출 — 양 시장 합산 원화, 분모는 포트폴리오 자산(`risk_guard.portfolio_equity`).
 
     한 종목은 같은 요인 안에서 한 번만 센다(축 둘에 걸려도 요인이 같으면 한 번). 역노출(sign −)은 음수.
-    `driver`가 없는 축은 축 id를 요인으로 쓰고 `untagged`로 표시한다(태그를 달라는 신호)."""
+    `driver`가 없는 축은 축 id를 요인으로 쓰고 `untagged`로 표시한다(태그를 달라는 신호).
+
+    `stamp`가 있으면 같은 호출이 **요인 상태**까지 잰다(FB-261017-7 · 2026-10-17) — 요인마다 보유 바스켓의 20세션 고점 대비 하락 ·
+    일중폭 중앙값×3(추적 다리와 같은 폭) · 지난 세션 같은 요인 규칙 매도(손절·추적 체결). 꺾임 = 하락 ≥ 폭×3 또는 규칙 매도 ≥1 —
+    매도가 아니라 **판정을 요구하는 신호**다(노트 §7 `[요인 판정]`). 지수를 못 만들면(일봉 있는 멤버 0) unknown. 보유가 0이어도 규칙 매도가
+    있었던 요인은 행을 둔다(다 팔린 요인을 판정 없이 다시 사지 않게). `no_db`가 아니면 저장소 `mk_factor_state`에 쓴다."""
     import risk_guard as rg
     market = (market or "KR").upper()
     sp = MATERIAL_DIR / f"snapshot_{stamp}_{market.lower()}.json" if stamp else None
@@ -492,11 +616,49 @@ def exposure_by_driver(market: str = "KR", stamp: str = "") -> dict:
                      "total_pct": (kr + us) / total * 100 if total else 0.0, "tickers": sorted(tks),
                      "axes": row["axes"], "untagged": row["untagged"]})
     rows.sort(key=lambda r: -r["total_pct"])
+    for r in rows:
+        r["members"] = [{"ticker": tk, "market": held[tk]["market"], "sign": sg, "krw": held[tk]["krw"]}
+                        for tk, sg in drivers[r["driver"]]["members"].items() if tk in held]
     unm = sum(h["krw"] for tk, h in held.items() if tk not in mapped)
-    return {"ok": bool(pf.get("ok")), "why": pf.get("why", ""), "total_krw": total, "rows": rows,
-            "unmapped_pct": unm / total * 100 if total else 0.0,
-            "unmapped": sorted(tk for tk in held if tk not in mapped), "snapshot": sp.name,
-            "untagged_axes": sorted(a["id"] for a in _open_forecast_axes() if not a.get("driver"))}
+    res = {"ok": bool(pf.get("ok")), "why": pf.get("why", ""), "total_krw": total, "rows": rows,
+           "unmapped_pct": unm / total * 100 if total else 0.0,
+           "unmapped": sorted(tk for tk in held if tk not in mapped), "snapshot": sp.name,
+           "untagged_axes": sorted(a["id"] for a in _open_forecast_axes() if not a.get("driver"))}
+    if not stamp:
+        return res
+    # ── 요인 상태(FB-261017-7) ──
+    until = datetime.strptime(stamp, "%y%m%d").strftime("%Y-%m-%d")
+    window, sells = _rule_sells(market, stamp)
+    have = {r["driver"] for r in rows}
+    for d, row in drivers.items():
+        if d not in have and any(x["ticker"] in row["members"] and row["members"][x["ticker"]] > 0 for x in sells):
+            rows.append({"driver": d, "kr_pct": 0.0, "us_pct": 0.0, "total_pct": 0.0, "tickers": [], "axes": row["axes"],
+                         "untagged": row["untagged"], "members": []})
+    now = datetime.now(timezone(timedelta(hours=9))).isoformat(timespec="seconds")
+    for r in rows:
+        mem = drivers[r["driver"]]["members"]
+        st = _basket_state([m for m in r["members"] if m["sign"] > 0], until, total)
+        hit = [x for x in sells if mem.get(x["ticker"], 0) > 0]
+        st.update({"computed_at": now, "snapshot": sp.name, "sells_window": window, "sells_n": len(hit),
+                   "sells_tickers": sorted({x["ticker"] for x in hit}), "fired_sell": bool(hit)})
+        st["fired"] = bool(st["fired_dd"] or st["fired_sell"])
+        st["state"] = "fired" if st["fired"] else ("unknown" if st["index_last"] is None else "calm")
+        r["state"] = st
+    res["run_id"] = db.run_id(stamp, market.lower())
+    for k in ("fired", "unknown", "calm"):
+        res[k] = [r["driver"] for r in rows if r["state"]["state"] == k]
+    res["factor_state"] = True
+    if not no_db:
+        # 쟀는데 잴 바스켓이 없다(보유 0 · 창 안 같은 요인 규칙 매도 0 — 보유가 없는 첫 run 등) — 행 0(안 쟀다)과 가르는 표시 행을 둔다(2026-10-19).
+        # fired=False·state='none'이라 꺾인 요인 판정(risk_guard·crosscheck)에는 걸리지 않는다
+        empty = [{"driver": "(바스켓 없음)", "state": {"computed_at": now, "snapshot": sp.name, "n_members": 0, "n_with_bars": 0,
+                                                    "index_last": None, "index_peak": None, "peak_date": None, "drawdown_pct": None,
+                                                    "band_med_pct": None, "band3_pct": None, "fired_dd": False, "sells_window": window,
+                                                    "sells_n": 0, "sells_tickers": [], "fired_sell": False, "fired": False,
+                                                    "state": "none", "members": []}}]
+        db.factor_state_put(res["run_id"], rows if rows else empty)
+        res["stored"] = True
+    return res
 
 
 def render_exposure(res: dict) -> str:
@@ -505,7 +667,7 @@ def render_exposure(res: dict) -> str:
         return "\n".join(L + [f"(계산 불가 — {res.get('why') or '보유 없음'})", ""])
     top = res["rows"][0]
     L.append(f"**최대 요인 `{top['driver']}` {top['total_pct']:.1f}%** (KR {top['kr_pct']:.1f}% · US {top['us_pct']:.1f}%) — "
-             f"이 요인이 꺾이면 무엇을 줄이나를 §7 대응표에 한 행으로 둔다(상한 아님)")
+             f"§7 대응표에 '꺾이면' 행을 두고, 꺾이면 `[요인 판정]`으로 원인과 종목별 결정을 그때 판정한다(방향 미리 없음 · 상한 아님)")
     L += ["", "| 요인 | KR% | US% | 합산% | 종목 | 축 |", "|---|---|---|---|---|---|"]
     for r in res["rows"]:
         L.append(f"| {r['driver']}{' (태그 없음)' if r['untagged'] else ''} | {r['kr_pct']:.1f} | {r['us_pct']:.1f} | "
@@ -514,11 +676,30 @@ def render_exposure(res: dict) -> str:
               f"요인 태그 없는 열린 축 {len(res['untagged_axes'])}개 · 잔고 {res['snapshot']}", ""]
     if not res.get("ok"):
         L.append(f"※ 포트폴리오 자산을 다 못 쟀다 — {res.get('why')}")
+    if res.get("factor_state"):
+        lab = {"fired": "**꺾임**", "unknown": "unknown", "calm": "유지"}
+        L += ["", "## 요인 상태 — 바스켓 가격(20세션 고점 대비) · 같은 요인 규칙 매도 (market_map.py exposure · 매 run 판정)", "",
+              "| 요인 | 바스켓(보유·일봉 있음) | 지수 고점(날짜) | 지수 현재 | 고점 대비 | 일중폭 중앙값×3 | 지난 세션 규칙 매도 | 상태 |",
+              "|---|---|---|---|---|---|---|---|"]
+        f = lambda v, suf="": "—" if v is None else f"{v:.2f}{suf}"  # noqa: E731
+        for r in res["rows"]:
+            st = r.get("state") or {}
+            L.append(f"| {r['driver']} | {st.get('n_members', 0)}·{st.get('n_with_bars', 0)} | "
+                     f"{f(st.get('index_peak'))}({st.get('peak_date') or '—'}) | {f(st.get('index_last'))} | {f(st.get('drawdown_pct'), '%')} | "
+                     f"{f(st.get('band3_pct'), '%')} | {st.get('sells_n', 0)}({' · '.join(st.get('sells_tickers') or []) or '—'}) | "
+                     f"{lab.get(st.get('state'), '—')} |")
+        L += ["", "꺾임 = 바스켓 고점 대비 하락 ≥ 일중폭 중앙값×3(추적 다리와 같은 폭) 또는 지난 세션 같은 요인 손절·추적 체결 ≥1 — "
+                  "매도 신호가 아니라 판정 요구다. 꺾임·unknown 요인마다 노트 §7 표 아래 `[요인 판정] <요인>` 블록(원인 · 상태 · "
+                  "바스켓 보유 전부와 이 run 후보의 저점매수/유지/정리와 사유)을 쓰고 시그널 `factor_judgments[]`에 같은 값을 넣는다 — "
+                  "방향을 미리 정하지 않는다. 판정 전에는 그 요인의 매수가 risk_guard에서 거부된다.",
+              "", f"FACTOR-STATE run={res.get('run_id')} fired={','.join(res.get('fired') or []) or '-'} "
+                  f"unknown={','.join(res.get('unknown') or []) or '-'} calm={','.join(res.get('calm') or []) or '-'}"
+                  + ("" if res.get("stored") else " (저장 안 함 — --no-db)")]
     return "\n".join(L)
 
 
 def cmd_exposure(a) -> int:
-    res = exposure_by_driver(a.market)
+    res = exposure_by_driver(a.market, getattr(a, "stamp", "") or "", no_db=bool(getattr(a, "no_db", False)))
     s = render_exposure(res)
     print(s)
     if a.out:
@@ -550,7 +731,7 @@ def xmarket(market: str, stamp: str, since: str = "") -> dict:
     other = "us" if market == "kr" else "kr"
     since = since or _prev_run_stamp(market, stamp)
     since_d = datetime.strptime(since, "%y%m%d").strftime("%Y-%m-%d")
-    m = _read(MAP, {"axes": []})
+    m = db.market_map_load()
     axes = {a["id"]: a for a in m.get("axes") or [] if a.get("id")}
     # ① 전망 갱신 — 반대 시장 run이 남긴 forecast_update 파일(정확) + 그 시장 종목이 걸린 축의 updated(보조)
     upd = {}
@@ -575,7 +756,7 @@ def xmarket(market: str, stamp: str, since: str = "") -> dict:
     refuted = [{"axis": aid, "step": c.get("step"), "claim": str(c.get("claim") or "")[:120]}
                for aid in upd for c in (axes.get(aid) or {}).get("chain") or [] if c.get("status") == "반증"]
     # ③ 반대 시장이 연 시나리오 중 이쪽 대응이 없는 것
-    sc_rows = (_read(JOURNAL / "scenarios.json", {"scenarios": []}) or {}).get("scenarios") or []
+    sc_rows = db.scenarios_all()
     mark = re.compile(rf"\[{market.upper()}\s*영향\s*없음", re.I)
     missing = []
     for r in sc_rows:
@@ -592,7 +773,7 @@ def xmarket(market: str, stamp: str, since: str = "") -> dict:
         missing.append({"id": r["id"], "opened": r.get("opened"), "condition": str(r.get("condition") or "")[:140],
                         "axis": r.get("axis") or "", "their": " · ".join(str(x.get("what") or "")[:60] for x in acts[:2])})
     # ④ 반대 시장의 손절·추적 발화
-    th = (_read(THESES, {"theses": []}) or {}).get("theses") or []
+    th = db.theses_all()
     fired = []
     for t in th:
         if str(t.get("market") or "").lower() != other:
@@ -669,25 +850,40 @@ def cmd_xmarket(a) -> int:
 
 def cmd_axis_tag(a) -> int:
     """축에 `driver`·`conflicts_with`를 단다. 충돌은 **양방향**으로 기록한다."""
-    m = _read(MAP, {"axes": []})
+    m = db.market_map_load()
     by = {x.get("id"): x for x in m.get("axes") or []}
-    ax = by.get(a.axis)
-    if ax is None:
+    if by.get(a.axis) is None:
         raise SystemExit(f"지도에 없는 축: {a.axis}")
-    if a.driver:
-        ax["driver"] = a.driver.strip()
-    for other in [x.strip() for x in (a.conflicts_with or "").split(",") if x.strip()]:
+    others = [x.strip() for x in (a.conflicts_with or "").split(",") if x.strip()]
+    for other in others:
         if other not in by:
             raise SystemExit(f"충돌 축이 지도에 없다: {other}")
         if other == a.axis:
             raise SystemExit("자기 자신과 충돌할 수 없다")
-        for x, y in ((ax, other), (by[other], a.axis)):
-            lst = x.setdefault("conflicts_with", [])
-            if y not in lst:
-                lst.append(y)
-    # ★ `updated`는 건드리지 않는다 — 전망 갱신 수(3단 생성줄)와 교차 시장 입력이 그 날짜를 '전망을 바꾼 날'로 읽는다.
-    ax["tagged"] = _run_day().isoformat()
-    _write(MAP, m)
+
+    def _link(x, y):
+        lst = x.setdefault("conflicts_with", [])
+        if y not in lst:
+            lst.append(y)
+
+    def link_back(o):
+        _link(o, a.axis)
+        return o
+
+    def tag(ax):
+        if a.driver:
+            ax["driver"] = a.driver.strip()
+        for other in others:
+            _link(ax, other)
+        # ★ `updated`는 건드리지 않는다 — 전망 갱신 수(3단 생성줄)와 교차 시장 입력이 그 날짜를 '전망을 바꾼 날'로 읽는다.
+        ax["tagged"] = _run_day().isoformat()
+        return ax
+
+    # 이 축과 상대 축만 행 단위로 고친다(한 트랜잭션) — 다른 축을 고치는 같은 시각의 쓰기를 덮지 않는다.
+    with db.tx():
+        ax = db.axis_update(a.axis, tag)
+        for other in others:
+            db.axis_update(other, link_back)
     print(f"{a.axis}: driver={ax.get('driver')} · conflicts_with={ax.get('conflicts_with') or []}")
     return 0
 
@@ -900,7 +1096,15 @@ def forecast_validate(ax: dict, axes: list = None) -> list:
 
 
 def cmd_forecast(a) -> int:
-    m = _read(MAP, {"axes": []})
+    if a.sub == "add":
+        # 여러 축(그 축 + 충돌 상대)을 같이 고친다 — 지도를 읽는 데서부터 쓰기까지 한 트랜잭션으로 묶는다.
+        with db.tx():
+            return _cmd_forecast(a)
+    return _cmd_forecast(a)
+
+
+def _cmd_forecast(a) -> int:
+    m = db.market_map_load()
     if a.sub == "list":
         rows = m["axes"]
         if a.open:
@@ -923,9 +1127,9 @@ def cmd_forecast(a) -> int:
                   f"[{mark}] 수혜 {len(bens)} · 미반영 {len(unp)}")
             print(f"     {ax.get('name', '')[:60]} — {ax.get('expected', '')[:50]}")
             for b in bens:
-                pr = {True: "반영", False: "**미반영**", None: "미측정"}.get(b.get("priced"), "미측정")
+                pr = priced_label(b)
                 print(f"       {b.get('order')}차 [{_market_of(b.get('ticker'))}] {b.get('ticker'):8} "
-                      f"{(b.get('name') or '')[:12]:12} {pr:8} {(b.get('why') or '')[:40]}")
+                      f"{(b.get('name') or '')[:12]:12} {pr:8} {measure_state(b):11} {(b.get('why') or '')[:40]}")
         if n_blank:
             print(f"\n  ★ 전망 미기입 축 {n_blank}개 — 지도에는 있지만 앞을 보는 그림은 없다. "
                   f"다음 3단이 `forecast add`로 채운다.")
@@ -936,6 +1140,7 @@ def cmd_forecast(a) -> int:
         if items is None:
             raise SystemExit(f"파일을 읽을 수 없다: {a.file}")
         items = items if isinstance(items, list) else [items]
+        before = _axis_snap(m)
         by_id = {x["id"]: x for x in m["axes"]}
         for it in items:
             base = dict(by_id.get(it.get("id"), {}))
@@ -950,7 +1155,9 @@ def cmd_forecast(a) -> int:
                     tk = b.get("ticker")
                     if tk in old_bens:
                         keep = {k: v for k, v in old_bens[tk].items()
-                                if k in ("priced", "priced_basis", "priced_at", "in_universe") and k not in b}
+                                if k in ("priced", "priced_basis", "priced_at", "in_universe", "priced_bars_asof", "priced_ret20",
+                                         "priced_vs_bench", "priced_vs_lead", "measure_status", "measured_at", "measure_error",
+                                         "measure_run_id", "judge_ret_pct") and k not in b}
                         b = {**old_bens[tk], **b, **keep}
                     merged.append(b); seen.add(tk)
                 merged += [v for k, v in old_bens.items() if k not in seen]
@@ -989,23 +1196,37 @@ def cmd_forecast(a) -> int:
             print(f"{'갱신' if it.get('id') in by_id else '등록'}: 전망 {base['id']} "
                   f"{base['direction']} {base['horizon_weeks']}주 · "
                   f"{'선행' if cbn else ('뉴스 후' if cbn is False else '?')} ({why})")
-        _write(MAP, m)
+        _put_changed_axes(m, before)
         return 0
 
     if a.sub == "judge":
         hit = [x for x in m["axes"] if x["id"] == a.axis]
         if not hit:
             raise SystemExit(f"그런 축이 없다: {a.axis}")
-        ax = hit[0]
         if a.status not in FORECAST_STATUSES:
             raise SystemExit(f"status는 {FORECAST_STATUSES}")
-        ax["status"] = a.status
-        sc = ax.setdefault("score", {})
-        sc["judged"] = _run_day().isoformat()
-        if a.excess is not None:
-            sc["excess_pct"] = a.excess
-        sc["note"] = a.note or sc.get("note", "")
-        _write(MAP, m)
+
+        def judge(ax):
+            # 판정은 타입 칸으로(2026-10-19 · Codex U06 — 예전엔 extra.score JSON이라 주간 집계가 판정일을 못 봤다)
+            ax["status"] = a.status
+            ax.pop("score", None)
+            ax["judged_at"] = _run_day().isoformat()
+            try:
+                cur_ = db.current_run_read() or {}
+                ax["judged_run_id"] = db.run_id(cur_["stamp"], cur_["market"]) if cur_.get("stamp") else None
+            except Exception:                        # noqa: BLE001
+                ax["judged_run_id"] = None
+            if a.excess is not None:
+                ax["excess_pct"] = float(a.excess)
+                try:
+                    from kis_client import last_session_date
+                    mks = sorted(_forecast_markets(ax)) or ["KR"]
+                    ax["judge_asof"] = max(last_session_date(mk).isoformat() for mk in mks)
+                except Exception:                    # noqa: BLE001
+                    ax["judge_asof"] = None
+            ax["judge_note"] = a.note or ax.get("judge_note") or ""
+            return ax
+        db.axis_update(a.axis, judge)                    # 그 축 한 행만
         print(f"{a.axis}: {a.status} · 초과 {a.excess if a.excess is not None else '미측정'} — {a.note}")
         return 0
 
@@ -1014,55 +1235,91 @@ def cmd_forecast(a) -> int:
     raise SystemExit("forecast list|add|judge|score")
 
 
+def _fc_due(x: dict):
+    """전망 기한일(YYYY-MM-DD) = 세운 날 + horizon_weeks주 · 못 정하면 None."""
+    try:
+        return (date.fromisoformat(str(x.get("opened"))[:10]) + timedelta(weeks=int(x.get("horizon_weeks")))).isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
+def forecast_cohorts(m: dict, start: str, end: str) -> dict:
+    """★ 전망 코호트 셋(2026-10-19 · Codex U06) — 세움(start ≤ opened ≤ end) · 판정(hit/miss이고 start ≤ judged_at ≤ end) ·
+    기한 도래(기한 ≤ end → 판정·미판정(열림)·기각(expired)) · 미성숙(열림이고 기한 > end). 예전엔 '최근 n일에 세운 것'만 세어 4~12주 시계의
+    전망이 판정돼도 주간 채점에 안 잡혔다. 날짜는 세션 날짜다."""
+    fc = [x for x in m.get("axes") or [] if x.get("direction")]
+    st = lambda x: x.get("status") or "open"
+    due = [x for x in fc if _fc_due(x) and _fc_due(x) <= end]
+    return {"opened": [x for x in fc if start <= str(x.get("opened") or "")[:10] <= end],
+            "judged": [x for x in fc if st(x) in ("hit", "miss") and start <= str(x.get("judged_at") or "")[:10] <= end],
+            "due": due,
+            "due_judged": [x for x in due if st(x) in ("hit", "miss")],
+            "due_unjudged": [x for x in due if st(x) == "open"],
+            "due_expired": [x for x in due if st(x) == "expired"],
+            "immature": [x for x in fc if st(x) == "open" and _fc_due(x) and _fc_due(x) > end]}
+
+
 def forecast_score(m: dict, days: int, out: str = "") -> int:
-    """★ 성공 지표 ④ — 전망 선행률·적중률·초과수익·차수별.
+    """★ 성공 지표 ④ — 전망 선행률·적중률·초과수익·차수별 + 기한 코호트.
 
     이것이 없으면 "앞을 본다"가 검증 불가능한 주장으로 남는다. 설계 근거 조사
     (비용 차감 후 초과수익 근거 없음)와 사용자의 목표(예측 성능) 중 어느 쪽이 맞는지는
     이 숫자가 가른다. 초과수익이 ≤0이면 첫 줄에 그렇게 쓴다 — 감추지 않는다.
+    기계 줄 둘: `[전망] 세움 · 선행 · 판정(이 기간에 판정됨) · 적중` + `[전망 기한] 도래 · 판정 · 미판정 · 기각 · 미성숙`.
     """
     import io as _io
-    since = (datetime.now(KST) - timedelta(days=days)).strftime("%Y-%m-%d")
-    fc = [x for x in m["axes"] if x.get("direction") and (x.get("opened") or "") >= since]
+    end = _run_day().isoformat()
+    since = (date.fromisoformat(end) - timedelta(days=days)).isoformat()
+    co = forecast_cohorts(m, since, end)
+    fc, judged = co["opened"], co["judged"]
+    due_line = (f"[전망 기한] 도래 {len(co['due'])} · 판정 {len(co['due_judged'])} · 미판정 {len(co['due_unjudged'])} · "
+                f"기각 {len(co['due_expired'])} · 미성숙 {len(co['immature'])}")
     buf = _io.StringIO()
-    print(f"## 전망 채점 — 최근 {days}일 세운 전망 {len(fc)}건\n", file=buf)
-    if not fc:
+    print(f"## 전망 채점 — 최근 {days}일(세움 {len(fc)} · 이 기간 판정 {len(judged)})\n", file=buf)
+    if not fc and not judged and not co["due"] and not co["immature"]:
         print("*(채점할 전망이 없다 — 3단이 `forecast add`로 세우기 전이다)*\n", file=buf)
         print("[전망] 세움 0 · 선행 0 · 판정 0 · 적중 0", file=buf)
+        print(due_line, file=buf)
         s = buf.getvalue(); print(s)
         if out:
             Path(out).write_text(s, encoding="utf-8")
         return 0
     ahead = [x for x in fc if created_before_news(x)[0] is True]
-    judged = [x for x in fc if x.get("status") in ("hit", "miss")]
     hits = [x for x in judged if x["status"] == "hit"]
-    ahead_judged = [x for x in ahead if x.get("status") in ("hit", "miss")]
-    exc = [x["score"]["excess_pct"] for x in ahead_judged
-           if isinstance((x.get("score") or {}).get("excess_pct"), (int, float))]
+    exc = [float(x["excess_pct"]) for x in judged
+           if created_before_news(x)[0] is True and isinstance(x.get("excess_pct"), (int, float))]
     by_order = {}
     for x in fc:
         for b in x.get("beneficiaries") or []:
             o = b.get("order")
-            by_order.setdefault(o, {"n": 0, "unpriced": 0})
+            by_order.setdefault(o, {"n": 0, "unpriced": 0, "failed": 0, "none": 0})
             by_order[o]["n"] += 1
-            by_order[o]["unpriced"] += 1 if b.get("priced") is False else 0
+            ms = measure_state(b)
+            by_order[o]["unpriced"] += 1 if (b.get("priced") is False and ms in ("valid", "stale")) else 0
+            by_order[o]["failed"] += 1 if ms == "unavailable" else 0
+            by_order[o]["none"] += 1 if ms == "none" else 0
     mean_exc = (sum(exc) / len(exc)) if exc else None
     # 기계 판독 줄 — 게이트·주간 리포트가 읽는다. 문구를 바꾸면 그쪽도 같이 본다.
     print(f"[전망] 세움 {len(fc)} · 선행 {len(ahead)} · 판정 {len(judged)} · 적중 {len(hits)}"
           + (f" · 선행 초과 {mean_exc:+.1f}%p(n={len(exc)})" if mean_exc is not None else ""), file=buf)
+    print(due_line, file=buf)
     if mean_exc is not None and mean_exc <= 0:
         print(f"\n**★ 선행 전망의 초과수익이 {mean_exc:+.1f}%p로 0 이하다.** "
               f"설계 근거 조사(비용 차감 후 초과수익 없음)가 지금까지는 맞다. 이 줄을 감추지 않는다.\n", file=buf)
     print(f"\n| 지표 | 값 |\n|---|---|", file=buf)
     print(f"| 선행률 (뉴스보다 먼저 세운 전망) | {len(ahead)}/{len(fc)}"
           f"{f' = {100*len(ahead)/len(fc):.0f}%' if fc else ''} |", file=buf)
-    print(f"| 적중률 (판정된 것 중 hit) | {len(hits)}/{len(judged)}"
+    print(f"| 적중률 (이 기간 판정된 것 중 hit) | {len(hits)}/{len(judged)}"
           f"{f' = {100*len(hits)/len(judged):.0f}%' if judged else ' (판정 전)'} |", file=buf)
-    print(f"| 선행 전망 초과수익 (등중량, 벤치마크 대비) | "
+    print(f"| 선행 전망 초과수익 (이 기간 판정 · 벤치마크 대비) | "
           f"{f'{mean_exc:+.1f}%p (n={len(exc)})' if mean_exc is not None else '미측정 — horizon 도달 전'} |", file=buf)
-    print(f"\n| 차수 | 수혜 종목 | 미반영 |\n|---|---|---|", file=buf)
+    print(f"\n| 차수 | 수혜 종목 | 미반영 | 측정 실패 | 미측정 |\n|---|---|---|---|---|", file=buf)
     for o in sorted(k for k in by_order if k):
-        print(f"| {o}차 | {by_order[o]['n']} | {by_order[o]['unpriced']} |", file=buf)
+        print(f"| {o}차 | {by_order[o]['n']} | {by_order[o]['unpriced']} | {by_order[o]['failed']} | {by_order[o]['none']} |", file=buf)
+    if co["due_unjudged"]:
+        print("\n기한이 지났는데 판정하지 않은 전망(`market_map.py forecast judge --axis <id> --status hit|miss`):", file=buf)
+        for x in co["due_unjudged"]:
+            print(f"- {x['id']} — 기한 {_fc_due(x)} · {x.get('name', '')[:50]}", file=buf)
     print("\n뉴스보다 먼저 세운 전망:", file=buf)
     for x in ahead:
         print(f"- {x['id']} — {x.get('name', '')[:50]} ({created_before_news(x)[1]})", file=buf)
@@ -1084,7 +1341,7 @@ def priced_measure(axis_id: str, days: int = 20) -> dict:
     선두보다 10%p 넘게 뒤져 있으면 미반영(False), 그 사이는 None(미측정 아님 — '경계').
     """
     from kis_client import KisClient, KisError
-    m = _read(MAP, {"axes": []})
+    m = db.market_map_load()
     hit = [x for x in m["axes"] if x["id"] == axis_id]
     if not hit:
         raise SystemExit(f"그런 축이 없다: {axis_id}")
@@ -1092,45 +1349,49 @@ def priced_measure(axis_id: str, days: int = 20) -> dict:
     bens = ax.get("beneficiaries") or []
     if not bens:
         raise SystemExit(f"{axis_id}에 수혜 종목이 없다")
-    wl = _read(HERE / "config" / "watchlist.json", {})
+    wl = db.watchlist_doc()
     bench = (wl.get("benchmarks") or {})
     c = KisClient.for_mode()
     end = datetime.now(KST)
     start = (end - timedelta(days=days * 2 + 10))
 
     def ret(ticker, market, excd=""):
+        """(20일 수익률, 오류, 그 일봉의 마지막 날짜 YYYY-MM-DD)."""
         try:
             if market == "KR":
-                rows = c.domestic_daily(ticker, start.strftime("%Y%m%d"), end.strftime("%Y%m%d"))
+                rows = db.domestic_daily(c, ticker, start.strftime("%Y%m%d"), end.strftime("%Y%m%d"))   # 확정 일봉(저장소 경유 · U04)
             else:
                 # 거래소 코드가 없으면 NAS→NYS→AMS 순으로 시도한다 — VST·BE(NYSE)·SPY(AMEX)가
                 # NAS 고정으로 "일봉 0행"이 나 미국 수혜 전부가 측정 실패로 찍혔다(2026-09-15 실측).
                 tries = [excd] if excd else ["NAS", "NYS", "AMS"]
                 rows = []
                 for ex in tries:
-                    rows = [r for r in (c.overseas_daily(ticker, ex) or []) if r.get("close")]
+                    rows = [r for r in (db.overseas_daily(c, ticker, excd=ex) or []) if r.get("close")]
                     if len(rows) >= days + 1:
                         break
         except KisError as e:
-            return None, str(e)
+            return None, str(e), None
         rows = [r for r in rows if r.get("close")]
         if len(rows) < days + 1:
-            return None, f"일봉 {len(rows)}행뿐"
-        return (rows[0]["close"] / rows[days]["close"] - 1) * 100, ""
+            return None, f"일봉 {len(rows)}행뿐", None
+        d0 = str(rows[0].get("date") or "")
+        return (rows[0]["close"] / rows[days]["close"] - 1) * 100, "", (f"{d0[:4]}-{d0[4:6]}-{d0[6:8]}" if len(d0) == 8 else d0[:10])
 
     out, errs = {}, {}
     for b in bens:
         mk = b.get("market") or _market_of(b.get("ticker"))
-        r, e = ret(b["ticker"], mk, b.get("excd", ""))
+        r, e, asof = ret(b["ticker"], mk, b.get("excd", ""))
         if r is None:
             errs[b["ticker"]] = e
         else:
-            out[b["ticker"]] = {"ret20": r, "market": mk}
+            out[b["ticker"]] = {"ret20": r, "market": mk, "bars_asof": asof}
     bmk = {}
-    for mk in {v["market"] for v in out.values()}:
+    for mk in {b.get("market") or _market_of(b.get("ticker")) for b in bens}:
         bt = bench.get(mk) or {}
-        r, e = ret(bt.get("ticker", ""), mk, bt.get("excd", "")) if bt.get("ticker") else (None, "벤치마크 없음")
+        r, e, _ = ret(bt.get("ticker", ""), mk, bt.get("excd", "")) if bt.get("ticker") else (None, "벤치마크 없음", None)
         bmk[mk] = r
+        if r is None:
+            errs[f"벤치마크 {mk}"] = e
     lead = max((v["ret20"] for v in out.values()), default=None)
     for tk, v in out.items():
         b_r = bmk.get(v["market"])
@@ -1146,26 +1407,114 @@ def priced_measure(axis_id: str, days: int = 20) -> dict:
                       f"{v['vs_bench']:+.1f}%p · 선두 대비 {v['vs_lead']:+.1f}%p"
                       if v["vs_bench"] is not None and v["vs_lead"] is not None
                       else f"20일 {v['ret20']:+.1f}%")
-    # 축에 기록한다 — 측정일과 함께. 잰 것만 덮고 못 잰 것은 그대로 둔다.
+    # ★ 기록(2026-10-19 · Codex U05) — **마지막 성공**(priced·근거·측정일·숫자·일봉 기준일)과 **지금 측정 상태**(valid/unavailable ·
+    #   시도 시각·오류·run)를 나눈다. 축 전체(모든 수혜 + 필요한 벤치마크)를 잰 시도만 성공이다 — 하나라도 못 재면 선두가 정해지지 않으므로
+    #   그 축 수혜 전부 unavailable(마지막 성공은 그대로)로 둔다. 예전엔 실패가 근거 칸만 바꾸고 priced=False·측정일을 남겨 '미반영'으로
+    #   계속 셌고, 부분 실패는 나머지의 선두 대비 값을 바꿨다. 시세 조회 동안 다른 프로세스가 축을 고쳤을 수 있다 — 그 축 한 행에 결과만 얹는다.
     today = _run_day().isoformat()
-    for b in bens:
-        v = out.get(b["ticker"])
-        if v:
-            b["priced"] = v["priced"]; b["priced_basis"] = v["basis"]; b["priced_at"] = today
-        elif b["ticker"] in errs:
-            b["priced_basis"] = f"측정 실패 {today}: {errs[b['ticker']]}"
-    _write(MAP, m)
-    return {"measured": out, "errors": errs, "bench": bmk, "lead": lead}
+    now = datetime.now(KST).isoformat(timespec="seconds")
+    complete = not errs and bool(out)
+    try:
+        cur_ = db.current_run_read() or {}
+        run_ = db.run_id(cur_["stamp"], cur_["market"]) if cur_.get("stamp") and cur_.get("market") else None
+    except Exception:                                # noqa: BLE001
+        run_ = None
+    why = "선두 미정 — 측정 실패: " + "; ".join(f"{k}({v})" for k, v in errs.items()) if errs else None
+
+    def record(ax):
+        for b in ax.get("beneficiaries") or []:
+            v = out.get(b.get("ticker"))
+            if complete and v:
+                b.update({"priced": v["priced"], "priced_basis": v["basis"], "priced_at": today, "priced_bars_asof": v["bars_asof"],
+                          "priced_ret20": round(v["ret20"], 2),
+                          "priced_vs_bench": None if v["vs_bench"] is None else round(v["vs_bench"], 2),
+                          "priced_vs_lead": None if v["vs_lead"] is None else round(v["vs_lead"], 2),
+                          "measure_status": "valid", "measured_at": now, "measure_error": None, "measure_run_id": run_})
+            else:
+                b.update({"measure_status": "unavailable", "measured_at": now, "measure_error": why or "측정 없음",
+                          "measure_run_id": run_})
+        return ax
+    db.axis_update(axis_id, record)
+    return {"measured": out, "errors": errs, "bench": bmk, "lead": lead, "complete": complete}
+
+
+def measure_state(b: dict) -> str:
+    """수혜 행의 측정 상태(읽을 때 계산 — 저장하지 않는다 · U05): none(잰 적 없음) · unavailable(마지막 시도 실패) · stale(마지막 성공의 일봉이
+    마지막 닫힌 세션이 아니다 — 다른 20일 창이라 보이되 세지 않는다) · valid. 측정 시각만 있고 일봉 기준일을 모르는 옛 행은 stale(정직한 상태)."""
+    if b.get("measure_status") == "unavailable":
+        return "unavailable"
+    if not b.get("measured_at") and not b.get("priced_at"):
+        return "none"
+    asof = str(b.get("priced_bars_asof") or "")[:10]
+    if not asof:
+        return "stale"
+    try:
+        from kis_client import last_session_date
+        last = last_session_date(b.get("market") or _market_of(b.get("ticker"))).isoformat()
+    except Exception:                                # noqa: BLE001
+        return "stale"
+    return "valid" if asof == last else "stale"
+
+
+PRICED_LABEL = {True: "반영", False: "**미반영**", None: "경계"}
+
+
+def priced_label(b: dict) -> str:
+    """반영 칸 — 반영 / **미반영** / 경계(잰 결과가 둘 사이) / 미측정(잰 적 없음). 예전엔 경계(None)도 미측정으로 찍혔다."""
+    if not b.get("priced_at") and b.get("priced") is None:
+        return "미측정"
+    return PRICED_LABEL.get(b.get("priced"), "미측정")
+
+
+def measure_label(b: dict) -> str:
+    st = measure_state(b)
+    if st == "valid":
+        return f"{b.get('priced_at')} · {b.get('priced_basis') or ''}"
+    if st == "stale":
+        return f"오래됨 {b.get('priced_at') or '?'} · {b.get('priced_basis') or ''}"
+    if st == "unavailable":
+        last = f" (마지막 성공 {b.get('priced_at')}: {priced_label(b).replace('*', '')})" if b.get("priced_at") else ""
+        return f"실패 {str(b.get('measured_at') or '')[:16]}: {b.get('measure_error') or ''}{last}"
+    return "미측정"
+
+
+def priced_measure_all(axis_ids: list = None) -> dict:
+    """열린 방향 축(또는 주어진 축)을 전부 잰다 — `stage.py map`이 미반영을 세기 전에 부른다(사람 단계 없이 이번 세션 측정 · U05).
+    축 하나가 죽어도 나머지는 잰다(그 축은 unavailable로 남는다). 반환 {axes, complete, failed}."""
+    m = db.market_map_load()
+    ids = axis_ids if axis_ids is not None else [x["id"] for x in m.get("axes") or []
+                                                 if x.get("direction") and (x.get("status") or "open") == "open" and x.get("beneficiaries")]
+    done = failed = 0
+    for aid in ids:
+        try:
+            r = priced_measure(aid)
+            done += 1 if r.get("complete") else 0
+            failed += 0 if r.get("complete") else 1
+        except (SystemExit, Exception) as e:          # noqa: BLE001 — 클라이언트를 못 열었으면 그 축을 실패로 남긴다
+            failed += 1
+            now = datetime.now(KST).isoformat(timespec="seconds")
+
+            def mark(ax, err=f"측정 불가 — {type(e).__name__}: {str(e)[:120]}"):
+                for b in ax.get("beneficiaries") or []:
+                    b.update({"measure_status": "unavailable", "measured_at": now, "measure_error": err})
+                return ax
+            try:
+                db.axis_update(aid, mark)
+            except Exception:                        # noqa: BLE001
+                pass
+    return {"axes": len(ids), "complete": done, "failed": failed}
 
 
 def cmd_priced(a) -> int:
     res = priced_measure(a.axis, a.days)
     print(f"■ {a.axis} 수혜 종목 반영 여부 — {a.days}일 상대수익 (벤치마크 {res['bench']})\n")
     for tk, v in sorted(res["measured"].items(), key=lambda kv: -kv[1]["ret20"]):
-        pr = {True: "반영", False: "**미반영**", None: "경계"}[v["priced"]]
+        pr = PRICED_LABEL[v["priced"]] if res.get("complete") else "(저장 안 함)"
         print(f"  {tk:8} [{v['market']}] {pr:8} {v['basis']}")
     for tk, e in res["errors"].items():
         print(f"  {tk:8} 측정 실패 — {e}")
+    if not res.get("complete"):
+        print("\n  ★ 축 전체를 못 쟀다 — 선두가 정해지지 않아 이번 시도는 저장하지 않았다(수혜 전부 '측정 실패' · 마지막 성공은 그대로).")
     print("\n  미반영 = 축 선두보다 10%p 넘게 뒤져 있다 → 2차·3차 수혜 후보. "
           "반영 = 벤치마크·선두 모두 앞서 있다 → 이미 값에 들어갔다.")
     return 0
@@ -1184,12 +1533,12 @@ def _lookbacks(rows: list) -> dict:
 
 
 def _sector_state(m: dict) -> dict:
-    """market_map.json의 sectors를 코드로 색인. 없으면 빈 dict.
+    """지도의 sectors(저장소 dim_sector)를 코드로 색인. 없으면 빈 dict.
 
     ★ `carried_runs`를 **여기서 파생해 채운다.** 이 필드는 읽는 곳이 둘(보드·`cycle`)인데
     **쓰는 곳이 0곳**이라, "3run 이상 이월이면 등급 강등"이 구조적으로 발동할 수 없었다.
     쓰기를 추가하면 또 잊히므로(그게 이 필드가 죽은 이유다) **관찰 이력에서 센다** —
-    그 섹터를 본 기록(`sector_watch.jsonl`) 중 등급 갱신일 이후의 건수가 곧 이월 횟수다.
+    그 섹터를 본 기록(sector_watch) 중 등급 갱신일 이후의 건수가 곧 이월 횟수다.
     """
     idx = {s["code"]: s for s in m.get("sectors", []) if s.get("code")}
     watch = _watch_history()
@@ -1202,44 +1551,26 @@ def _sector_state(m: dict) -> dict:
 
 
 def _watch_history() -> list:
-    """`sector_watch.jsonl` 전건(시장 무관). 못 읽는 줄은 건너뛰되 조용히 삼키지 않는다."""
-    out, bad = [], 0
-    if not SECTOR_WATCH.exists():
-        return out
-    for line in SECTOR_WATCH.read_text(encoding="utf-8", errors="ignore").splitlines():
-        if not line.strip():
-            continue
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            bad += 1
-    if bad:
-        print(f"  ※ {SECTOR_WATCH.name}에서 {bad}줄을 못 읽었다 — 이월 횟수가 실제보다 "
-              f"적게 셀 수 있다.", file=sys.stderr)
-    return out
+    """섹터 관찰 기록(저장소 op_sector_watch · 옛 `sector_watch.jsonl`) 전건(시장 무관)."""
+    return db.log_rows("sector_watch")
 
 
 def history_since(code: str, since: str) -> str:
-    """`sector_history.jsonl`에서 **그 관찰 시점 이후** 그 섹터 지수의 변화를 잰다.
+    """섹터 지수 이력(저장소 op_sector_history)에서 **그 관찰 시점 이후** 그 섹터 지수의 변화를 잰다.
 
     왜 필요한가: `cycle` ①은 실시간 보드의 d5/d20을 보여주는데, 그건 *오늘로부터*
     5·20거래일 전 기준이라 **관찰한 날로부터의 성과가 아니다.** "9/9에 A를 준 섹터가
     그 뒤 어떻게 됐나"를 정직하게 답하려면 관찰일에 기록된 값과 비교해야 한다.
-    그 기록이 `sector_history.jsonl`이고, **적재만 하고 읽는 코드가 없어서 죽어 있었다.**
+    그 기록이 `sector_history`(저장소 op_sector_history)이고, **적재만 하고 읽는 코드가 없어서 죽어 있었다.**
 
-    파일은 날짜별로 중첩돼 있고(`{date, sectors:[{key, close, ...}]}`), 레벨(`close`)이
+    행은 날짜별로 중첩돼 있고(`{date, sectors:[{key, close, ...}]}`), 레벨(`close`)이
     있는 기록끼리만 비교한다 — `--quick` 보드는 레벨이 없으므로 그 날은 건너뛴다.
     """
-    if not SECTOR_HISTORY.exists():
+    hist = db.log_rows("sector_history")
+    if not hist:
         return ""
     first = last = None
-    for line in SECTOR_HISTORY.read_text(encoding="utf-8", errors="ignore").splitlines():
-        if not line.strip():
-            continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for rec in hist:
         if str(rec.get("date") or "") < str(since):
             continue
         for s in rec.get("sectors") or []:
@@ -1271,7 +1602,7 @@ def board(market: str, record: bool, quick: bool) -> int:
     """
     from kis_client import KisClient, KisError      # 지도 조회만 할 때 토큰을 받지 않도록 지연 임포트
 
-    m = _read(MAP, {"axes": []})
+    m = db.market_map_load()
     state = _sector_state(m)
     today = _run_day(market).isoformat()
     c = KisClient.for_mode()
@@ -1326,7 +1657,7 @@ def board(market: str, record: bool, quick: bool) -> int:
 
     if record:
         _record_board(rows, market, bench, today)
-        print(f"\n  → {SECTOR_HISTORY.name}에 {len(rows)}행 적재")
+        print(f"\n  → sector_history(저장소)에 {len(rows)}행 적재")
     return 0
 
 
@@ -1346,8 +1677,8 @@ def _fetch_board(c, market: str, quick: bool) -> tuple:
             r = {"key": s["code"], "name": s["name"], "d1": s["change_pct"],
                  "d5": None, "d20": None, "turnover": s["turnover_100m"]}
             if not quick:
-                hist = c.domestic_index_daily(s["code"], start.strftime("%Y%m%d"),
-                                              end.strftime("%Y%m%d"))
+                hist = db.domestic_index_daily(c, s["code"], start.strftime("%Y%m%d"),     # 보드 = 지금 값(미확정 허용 · 저장소 경유)
+                                               end.strftime("%Y%m%d"), need_final=False)
                 r.update(_lookbacks(hist))
                 r["d1"] = s["change_pct"]         # 장중이면 스냅샷이 더 최신이다
                 # ★ 지수 **레벨**도 남긴다. d1/d5/d20은 오늘 기준 변화율이라
@@ -1357,10 +1688,10 @@ def _fetch_board(c, market: str, quick: bool) -> tuple:
         rows.sort(key=lambda x: x["d1"], reverse=True)
         return rows, "KOSPI 종합", bench
 
-    br = _read(BRIDGE, {})
+    br = db.sector_bridge_doc()
     secs = br.get("us_sectors") or {}
     if not secs:
-        raise SystemExit(f"{BRIDGE.name}에 us_sectors가 없다 — 미국 보드를 만들 수 없다.")
+        raise SystemExit("섹터 짝(저장소 dim_sector_link · 옛 sector_bridge.json)에 us_sectors가 없다 — 미국 보드를 만들 수 없다.")
     rows = []
     for tic, meta in secs.items():
         # ★ 못 받은 섹터를 `continue`로 버리면 **행이 사라져 보드가 전수가 아니게 되고,
@@ -1368,7 +1699,7 @@ def _fetch_board(c, market: str, quick: bool) -> tuple:
         #   정면 위반이고, 커버리지 분모가 줄어 오히려 좋아 보인다.
         #   행은 남기고 값을 None으로 둔다.
         try:
-            hist = c.overseas_daily(tic, excd=meta.get("excd", "AMS"))
+            hist = db.overseas_daily(c, tic, excd=meta.get("excd", "AMS"), need_final=False)
         except Exception as e:                                # noqa: BLE001
             hist, err = [], f"{type(e).__name__}: {str(e)[:80]}"
         else:
@@ -1381,14 +1712,14 @@ def _fetch_board(c, market: str, quick: bool) -> tuple:
         lb = _lookbacks(hist)
         rows.append({"key": tic, "name": f"{meta['name']}({tic})", **lb,
                      "turnover": None, "close": hist[0].get("close") if hist else None})
-    spy = c.overseas_daily("SPY", excd="AMS")
+    spy = db.overseas_daily(c, "SPY", excd="AMS", need_final=False)
     bench = _pct(spy[0]["close"], spy[1]["close"]) if len(spy) > 1 else 0.0
     rows.sort(key=lambda x: (x["d1"] is None, -(x["d1"] or 0)))
     return rows, "S&P500(SPY)", bench
 
 
 def _upsert_sectors(rows: list, market: str, day: str) -> int:
-    """보드에서 본 섹터를 `market_map.json:sectors`에 **자리로 남긴다.**
+    """보드에서 본 섹터를 지도의 `sectors`(저장소 dim_sector)에 **자리로 남긴다.**
 
     ★ 왜 — `sectors`에 국내 코드(4자리 숫자)만 있어서 **미국 등급은 담을 곳이 없었고**,
     `board --market us`가 매 run `0/15`로 리셋됐다. 판단은 매번 새로 했는데 어디에도
@@ -1397,24 +1728,21 @@ def _upsert_sectors(rows: list, market: str, day: str) -> int:
     등급은 여기서 만들지 않는다 — 그건 판단이고 `grade` 명령이 쓴다. 여기서는
     '이 섹터를 언제 봤는가'만 남긴다(그게 `carried_runs` 계산의 재료다).
     """
-    m = _read(MAP, {"axes": [], "sectors": []})
-    idx = {s.get("code"): s for s in m.setdefault("sectors", []) if s.get("code")}
     n_new = 0
-    for r in rows:
-        code = r.get("key")
-        if not code:
-            continue
-        s = idx.get(code)
-        if s is None:
-            s = {"code": code, "name": r.get("name", code), "market": market.upper(),
-                 "grade": "—", "status": None, "chains": [], "names": [],
-                 "next_event": None, "resolves_when": None, "updated": None}
-            m["sectors"].append(s)
-            idx[code] = s
-            n_new += 1
-        s.setdefault("market", market.upper())
-        s["last_seen"] = day
-    _write(MAP, m)
+    with db.tx():                                       # 본 섹터 행만 고친다(한 트랜잭션) — 등급을 쓰는 같은 시각의 `grade`를 덮지 않는다
+        for r in rows:
+            code = r.get("key")
+            if not code:
+                continue
+            s = db.sector_get(code)
+            if s is None:
+                s = {"code": code, "name": r.get("name", code), "market": market.upper(),
+                     "grade": "—", "status": None, "chains": [], "names": [],
+                     "next_event": None, "resolves_when": None, "updated": None}
+                n_new += 1
+            s.setdefault("market", market.upper())
+            s["last_seen"] = day
+            db.sector_put(s)
     return n_new
 
 
@@ -1424,30 +1752,30 @@ def cmd_grade(a) -> int:
     등급이 파일에 남지 않으면 다음 run의 보드가 `—`로 시작하고, 그러면 매 run이
     같은 섹터를 처음부터 다시 판단한다. 그것이 지금까지 미국에서 일어난 일이다.
     """
-    m = _read(MAP, {"axes": [], "sectors": []})
-    idx = {s.get("code"): s for s in m.setdefault("sectors", []) if s.get("code")}
-    s = idx.get(a.code)
-    if s is None:
-        s = {"code": a.code, "name": a.name or a.code, "market": (a.market or "").upper(),
-             "chains": [], "names": [], "next_event": None, "resolves_when": None}
-        m["sectors"].append(s)
     if a.grade not in ("A", "B", "C", "—"):
         raise SystemExit("등급은 A·B·C 또는 —")
-    s["grade"] = a.grade
-    s["updated"] = _run_day().isoformat()
-    if a.note:
-        s["status"] = a.note
-    if a.research:
-        s.setdefault("research", [])
-        if a.research not in s["research"]:
-            s["research"].append(a.research)
-    if a.name:
-        s["name"] = a.name
-    _write(MAP, m)
+    # 그 섹터 한 행만 읽고-고치고-쓴다(한 트랜잭션) — 리서치 에이전트들이 다른 섹터 등급을 동시에 써도 덮지 않는다.
+    with db.tx():
+        s = db.sector_get(a.code)
+        if s is None:
+            s = {"code": a.code, "name": a.name or a.code, "market": (a.market or "").upper(),
+                 "chains": [], "names": [], "next_event": None, "resolves_when": None}
+        s["grade"] = a.grade
+        s["updated"] = _run_day().isoformat()
+        if a.note:
+            s["status"] = a.note
+        if a.research:
+            s.setdefault("research", [])
+            if a.research not in s["research"]:
+                s["research"].append(a.research)
+        if a.name:
+            s["name"] = a.name
+        db.sector_put(s)
     print(f"{a.code} {s.get('name')} [{s.get('market') or '?'}] 등급 {a.grade} 기록"
           + (f" · 리서치 {a.research}" if a.research else ""))
     # 짝 섹터를 알려준다 — 한쪽 등급이 반대편 판단의 입력이다.
-    for L in (_read(BRIDGE, {}) or {}).get("links", []):
+    idx = {x.get("code"): x for x in db.market_map_load().get("sectors", []) if x.get("code")}
+    for L in (db.sector_bridge_doc() or {}).get("links", []):
         if a.code in (L.get("us"), L.get("kr")):
             other = L["kr"] if a.code == L.get("us") else L["us"]
             o = idx.get(other) or {}
@@ -1463,10 +1791,10 @@ def paired_grades(codes: list) -> list:
     `sector_bridge.json:links` 24개는 지금까지 하루치 대응 매핑에만 쓰였고, 등급·리서치를
     건너보내지 않았다 — 미국 XLE가 A여도 국내 화학이 순환 큐에서 우선순위를 못 얻었다.
     """
-    m = _read(MAP, {"sectors": []})
+    m = db.market_map_load()
     idx = {s.get("code"): s for s in m.get("sectors", []) if s.get("code")}
     out = []
-    for L in (_read(BRIDGE, {}) or {}).get("links", []):
+    for L in (db.sector_bridge_doc() or {}).get("links", []):
         for here, there in ((L.get("us"), L.get("kr")), (L.get("kr"), L.get("us"))):
             if here in codes and there:
                 o = idx.get(there) or {}
@@ -1489,41 +1817,33 @@ def _record_board(rows: list, market: str, bench: float, day: str) -> None:
     if n_new:
         print(f"  [지도] {market.upper()} 섹터 {n_new}개를 sectors에 새로 열었다 — "
               f"이제 등급이 run을 넘어 남는다(`market_map.py grade`로 기록).")
-    SECTOR_HISTORY.parent.mkdir(parents=True, exist_ok=True)
     rec = {"date": day, "market": market, "benchmark_pct": bench,
            "sectors": [{"key": r["key"], "name": r["name"], "d1": r["d1"],
                         "d5": r["d5"], "d20": r["d20"],
                         "close": r.get("close")} for r in rows]}
     # ★ (날짜, 시장)당 한 행 — 재실행이면 **덮어쓴다**(멱등). 2026-09-22: 캡처 3회 재실행으로 같은 날 행이 둘 쌓여
     #   추세 계산이 같은 날을 두 번 셌다(09-10 kr·09-15 us도 같은 부산물).
-    kept = []
-    if SECTOR_HISTORY.exists():
-        for ln in SECTOR_HISTORY.read_text(encoding="utf-8", errors="ignore").splitlines():
-            if not ln.strip():
-                continue
-            try:
-                r = json.loads(ln)
-            except json.JSONDecodeError:
-                continue
-            if (r.get("date"), r.get("market")) == (day, market):
-                continue
-            kept.append(ln)
-    kept.append(json.dumps(rec, ensure_ascii=False))
-    SECTOR_HISTORY.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    with db.tx():
+        old = db.log_rows("sector_history")
+        kept = [r for r in old if (r.get("date"), r.get("market")) != (day, market)]
+        if len(kept) == len(old):
+            db.log_append("sector_history", rec)                 # 그날 첫 기록 — 끝에 더한다
+        else:
+            db.log_replace("sector_history", kept + [rec])       # 재실행 — 그날 행을 빼고 끝에 새 행
 
 
 def bridge(closed: str, record: bool = False, score: bool = False) -> int:
     """§1-B 대응 매핑 — **방금 닫힌 시장에서 움직인 것이 이쪽 무엇에 걸리는가.**
 
-    이건 채점이 아니라 **오늘 준비의 첫 입력**이다. 짝은 config/sector_bridge.json에
+    이건 채점이 아니라 **오늘 준비의 첫 입력**이다. 짝은 저장소(dim_sector_link · 옛 config/sector_bridge.json)에
     미리 고정돼 있다 — 매번 즉흥으로 지으면 그날 서사에 맞는 짝만 고르게 된다.
     """
     from kis_client import KisClient, KisError
 
-    br = _read(BRIDGE, {})
+    br = db.sector_bridge_doc()
     links = br.get("links") or []
     if not links:
-        print(f"{BRIDGE.name}에 links가 없다.", file=sys.stderr)
+        print("섹터 짝(저장소 dim_sector_link)에 links가 없다.", file=sys.stderr)
         return 2
     prep = "kr" if closed == "us" else "us"
     c = KisClient.for_mode()
@@ -1565,22 +1885,20 @@ def bridge(closed: str, record: bool = False, score: bool = False) -> int:
     for gap in br.get("kr_without_us" if prep == "kr" else "us_without_kr", []):
         who = gap.get("kr_name") or gap.get("us")
         print(f"\n  ⊘ 대응 없음: {who} — {gap['why']}")
-    print("\n  ※ 이 표는 가설이다. 3회 역행한 짝은 sector_bridge.json에서 내린다.")
+    print("\n  ※ 이 표는 가설이다. 3회 역행한 짝은 `market_map.py bridge-retire`로 내린다.")
 
     if score:
         _score_bridge(c, closed, prep, by_key)
     if record:
         _record_bridge(closed, prep, preds)
-        print(f"  → {BRIDGE_LOG.name}에 예측 {len(preds)}건 기록 (다음 run이 채점한다)")
+        print(f"  → bridge_log(저장소)에 예측 {len(preds)}건 기록 (다음 run이 채점한다)")
     return 0
 
 
 def _record_bridge(closed: str, prep: str, preds: list) -> None:
-    BRIDGE_LOG.parent.mkdir(parents=True, exist_ok=True)
     rec = {"date": _run_day(prep).isoformat(), "closed": closed,
            "prep": prep, "preds": preds}
-    with BRIDGE_LOG.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    db.log_append("bridge_log", rec)
 
 
 def _score_bridge(c, closed: str, prep: str, by_key: dict) -> None:
@@ -1594,16 +1912,13 @@ def _score_bridge(c, closed: str, prep: str, by_key: dict) -> None:
     그래서 **절대 등락 방향**과 **초과수익 방향**을 따로 보고, 둘이 엇갈리면 `혼재`로 빼둔다 —
     엇갈린 날은 대응표가 틀린 게 아니라 시장 전체가 움직인 것이다.
     """
-    if not BRIDGE_LOG.exists():
+    logged = db.log_rows("bridge_log")
+    if not logged:
         print("\n  (채점할 직전 예측이 없다 — 이번 run부터 --record로 쌓인다)")
         return
     today = _run_day(prep).isoformat()
     prev = None
-    for line in BRIDGE_LOG.read_text(encoding="utf-8").splitlines():
-        try:
-            r = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for r in logged:
         if r.get("prep") == prep and r.get("date") != today:
             prev = r                      # 같은 방향의 가장 최근 예측
     if not prev or not prev.get("preds"):
@@ -1655,7 +1970,7 @@ def cycle(prep: str, note: str = "", sectors: str = "") -> int:
     """
     from kis_client import KisClient, KisError
 
-    m = _read(MAP, {"axes": [], "sectors": []})
+    m = db.market_map_load()
     state = _sector_state(m)
     today = _run_day(prep).isoformat()
 
@@ -1674,21 +1989,11 @@ def cycle(prep: str, note: str = "", sectors: str = "") -> int:
             for c, st in sorted(here.items()):
                 print(f"    {c:6} {st.get('name', ''):<16} {st.get('grade') or '—'}", file=sys.stderr)
             return 2
-        SECTOR_WATCH.parent.mkdir(parents=True, exist_ok=True)
         rec = {"date": today, "market": prep, "note": note, "sectors": want}
-        with SECTOR_WATCH.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        print(f"기록: {rec['sectors']} → {SECTOR_WATCH.name}")
+        db.log_append("sector_watch", rec)
+        print(f"기록: {rec['sectors']} → sector_watch(저장소)")
 
-    hist = []
-    if SECTOR_WATCH.exists():
-        for line in SECTOR_WATCH.read_text(encoding="utf-8").splitlines():
-            try:
-                r = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if r.get("market") == prep:
-                hist.append(r)
+    hist = [r for r in db.log_rows("sector_watch") if r.get("market") == prep]
 
     print(f"\n■ 순환 슬롯 — {prep.upper()} · 관찰 이력 {len(hist)}건\n")
 
@@ -1774,12 +2079,17 @@ def main() -> int:
     b = sub.add_parser("board", help="섹터 보드 — 전 업종을 재서 한 표로")
     b.add_argument("--market", choices=["kr", "us"], default="kr")
     b.add_argument("--quick", action="store_true", help="당일 등락만(5·20일 생략, 호출 절약)")
-    b.add_argument("--record", action="store_true", help="journal/sector_history.jsonl에 적재")
+    b.add_argument("--record", action="store_true", help="sector_history(저장소)에 적재")
     br = sub.add_parser("bridge", help="다른 시장 회고 → 이 시장 준비 입력")
     br.add_argument("--closed", choices=["kr", "us"], required=True,
                     help="방금 닫힌 시장(회고 대상)")
     br.add_argument("--record", action="store_true", help="예측을 기록해 다음 run이 채점하게 한다")
     br.add_argument("--score", action="store_true", help="직전 예측을 오늘 실적으로 채점한다")
+    bx = sub.add_parser("bridge-retire", help="3회 역행한 섹터 짝을 내린다(retired_links로 옮기고 사유를 남긴다)")
+    bx.add_argument("--us", required=True, help="미국 섹터 ETF 코드 (예: XLC)")
+    bx.add_argument("--kr", required=True, help="국내 업종 코드 (예: 0020)")
+    bx.add_argument("--why", required=True, help="역행 기록 — 어느 블록에서 몇 회(혼재 제외)")
+    bx.add_argument("--by", default="", help="내린 run (예: us:260928 carry)")
     cy = sub.add_parser("cycle", help="순환 슬롯 — 어제 본 것과 이어서 오늘 볼 것을 고른다")
     cy.add_argument("--market", choices=["kr", "us"], default="kr")
     cy.add_argument("--sectors", default="", help="이번 run에서 본 섹터 코드 (쉼표 구분)")
@@ -1810,6 +2120,8 @@ def main() -> int:
     ex.add_argument("--by", choices=["driver"], default="driver")
     ex.add_argument("--market", choices=["kr", "us"], default="kr", help="이번 run 시장(그 시장 잔고를 먼저 쓴다)")
     ex.add_argument("--out", default="")
+    ex.add_argument("--stamp", default="", help="YYMMDD — 있으면 요인 상태(바스켓 고점 대비 · 규칙 매도 · 꺾임)까지 재서 저장소에 쓴다")
+    ex.add_argument("--no-db", action="store_true", help="요인 상태를 저장소에 쓰지 않는다(읽기 전용 확인)")
     xm = sub.add_parser("xmarket", help="교차 시장 입력 — 반대 시장이 바꾼 전망·반증·대응 빈 시나리오·발화")
     xm.add_argument("--market", choices=["kr", "us"], required=True, help="이번 run 시장")
     xm.add_argument("--stamp", required=True, help="YYMMDD")
@@ -1853,6 +2165,10 @@ def main() -> int:
         return cycle(args.market, args.note, args.sectors)
     if args.cmd == "bridge":
         return bridge(args.closed, args.record, args.score)
+    if args.cmd == "bridge-retire":
+        ok = db.sector_link_retire(args.us, args.kr, args.why, args.by, _run_day().isoformat())
+        print(f"{args.us} ↔ {args.kr} " + ("짝을 내렸다(retired_links)" if ok else "— 살아 있는 짝이 아니다(links에 없음)"))
+        return 0 if ok else 2
     p = Path(args.file)
     if not p.exists():
         print(f"파일 없음: {p}", file=sys.stderr)

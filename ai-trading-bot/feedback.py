@@ -34,10 +34,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import db  # noqa: E402 — 피드백 원장(op_feedback)·자산 곡선·배분·논지·축·로그·run 시각은 저장소에서
 import regret as rg  # noqa: E402
 
 KST = timezone(timedelta(hours=9))
-LEDGER = HERE / "journal" / "feedback.jsonl"
 POLICY = HERE / "config" / "feedback_policy.json"
 OUTDIR = HERE / "data" / "feedback"
 WEEK_DAYS = 20                 # 주간 창(거래일)
@@ -61,7 +61,10 @@ METRICS = {
     "excess_us_pct": "주간 초과수익 US(%p)",
     "invested_gap_kr_pct": "투자비중 목표 대비 부족 KR(%p)",
     "invested_gap_us_pct": "투자비중 목표 대비 부족 US(%p)",
-    "return_30d_total_pct": "계좌 30일 수익률(%) — 양 시장 원화 합산 · 10%는 바닥(하한)이지 목표가 아니다 · 가동 30일 미만이면 가동 이후",
+    "return_30d_total_pct": "계좌 30일 수익률(%) — 양 시장 원화 합산(공유 현금 한 번 · 그날 환율 · 입출금 제외 — 측정 판 2) · 10%는 바닥(하한)이지 목표가 아니다 · 가동 30일 미만이면 가동 이후",
+    "return_30d_fixed_fx_pct": "계좌 30일 수익률(%) — 끝 환율 하나로 양 끝을 잰 참고값(환율 효과를 뺀 운용 성과 · 측정 판 2)",
+    "proposal_ret_median_20d": "승인된 매수 제안의 결정 뒤 20확정세션 수익 중앙값(%) — ex_outcome(결정가 = 심사 때 현재가) · 60일",
+    "rejected_ret_median_20d": "거부된 매수 제안의 같은 시계 수익 중앙값(%) — 거부가 옳았나를 같은 잣대로(ex_outcome) · 60일",
     # 도구 결함 검증용 — 도구를 고쳤으면 다음 주에 이 값이 움직여야 한다
     "watch_loop_checks_7d": "장중 감시 루프 점검 횟수(7일) — run 안의 1회성 점검(mode=intraday) 제외",
     "sell_rows_untagged_14d": "논지가 있는 종목의 모델 매도 체결 중 논지 꼬리표(thesis_id) 없는 행 수(14일)",
@@ -82,7 +85,14 @@ METRICS = {
     "scenario_rows_one_market_pct": "최근 7일 시그널 시나리오 행 중 한 시장 대응뿐이고 '영향 없음' 사유도 없는 비율(%)",
     # 실계좌 전환(2026-10-12) — 회전이 잦으면 비용이 수익을 먹는다
     "net_cost_drag_30d_pct": "최근 30일 체결 비용 추정(수수료·국내 매도세·환전) ÷ 자산(%) — config/costs.json 요율",
+    # run 시간(Phase 3 저장소 · ex_run) — 성능은 그대로 두고 시간만 줄인다. run 행이 없으면 None(미측정 — 0이 아니다)
+    "post_fill_minutes_avg_7d": "체결 뒤 마감까지 평균(분 · 7일) — v_run_timing.post_fill_min",
+    "capture_to_send_minutes_avg_7d": "수집에서 전송까지 평균(분 · 7일) — v_run_timing.capture_to_send_min",
+    "before_news_facts_7d": "뉴스 전에 세운 사실·축 수 합(7일) — ex_run.before_news_n",
+    "material_repeat_pct_7d": "재료 반복 비율(% · 7일) — 반복 등록 사실 ÷ (반복 + 새 사실) · ex_run.facts_repeat·facts_new",
 }
+MEASUREMENT_VERSION = 2       # 2026-10-19 Codex R06·R07 — 통합자산·비용 측정 방식이 바뀐 날부터(그 전 지표와 비교 금지)
+RUN_METRICS = ("post_fill_minutes_avg_7d", "capture_to_send_minutes_avg_7d", "before_news_facts_7d", "material_repeat_pct_7d")
 
 
 # 적용일 이후 사건만으로 다시 잴 수 있는 지표(검증용 · `post_metric`). 여기 없는 지표로 판정하면 적용 전 사건이 섞인
@@ -90,8 +100,9 @@ METRICS = {
 POST_EVENT = {"early_sell_rate", "late_sell_rate", "first_entry_avg_pct", "entry_reach_rate",
               "miss_forecast_no_thesis_pct", "miss_no_axis_pct", "miss_universe_out_pct", "miss_entry_unreached_pct",
               "sell_rows_untagged_14d", "rate_limit_failed_orders_14d", "funds_rejects_with_sells_14d",
-              "watch_loop_checks_7d", "snap_eval_total_mismatch_7d", "unsent_zero_qty_7d"}
-POST_STATE = {"excess_kr_pct", "excess_us_pct", "invested_gap_kr_pct", "invested_gap_us_pct", "return_30d_total_pct",
+              "watch_loop_checks_7d", "snap_eval_total_mismatch_7d", "unsent_zero_qty_7d",
+              "proposal_ret_median_20d", "rejected_ret_median_20d"} | set(RUN_METRICS)
+POST_STATE = {"excess_kr_pct", "excess_us_pct", "invested_gap_kr_pct", "invested_gap_us_pct", "return_30d_total_pct", "return_30d_fixed_fx_pct",
               "verify_pre_mixed_rows", "scenario_open_over_20td", "fired_retrace_no_cause_7d", "held_without_trail",
               "loss_misjudged_rate", "loss_verdict_flip_rate", "forecast_horizon_hit_rate",
               "forecast_single_market", "scenario_rows_one_market_pct",
@@ -103,17 +114,24 @@ SNAP_MISMATCH = 0.2                         # 스냅샷 eval_total이 '종목 �
 
 
 def _j(p, default=None):
+    """run 파일(시그널·승인·거래 기록·스냅샷·수집 JSON)·설정 읽기 — 원장은 저장소에서 읽는다."""
     try:
         return json.loads(Path(p).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return default
 
 
+def _same_family(rec: dict) -> bool:
+    """파일(승인·스냅샷·거래 기록) 하나가 지금 계좌 계열의 것인가 — 머리 account_mode → svr → runs[] · 표시 없는 옛 파일은 모의."""
+    import portfolio
+    from kis_client import acct_family
+    return portfolio.file_family(rec) == acct_family()
+
+
 def _trades_same(f) -> list:
-    """거래 기록의 trades — 지금 계좌 계열의 파일만(2026-10-15 · 실계좌 전환 뒤 모의 거래를 실계좌 지표로 세지 않게 · 표시 없는 옛 파일은 모의)."""
-    from kis_client import same_account
+    """거래 기록의 trades — 지금 계좌 계열의 파일만(2026-10-15 · 계좌 전환에 대비해 모의 거래를 실계좌 지표로 세지 않게 · 표시 없는 옛 파일은 모의)."""
     d = _j(f, {}) or {}
-    return (d.get("trades") or []) if same_account(d) else []
+    return (d.get("trades") or []) if _same_family(d) else []      # account_mode → svr → runs[](2026-10-19 R07)
 
 
 def _now() -> str:
@@ -242,10 +260,13 @@ def early_sells(ctx, keep: dict, lo: str, hi: str) -> tuple:
 
 
 def late_sells(ctx, mvs: list) -> tuple:
-    """보유 중이던 종목이 창 안 고점 대비 −8% 이상 되돌렸는데 고점 뒤 매도가 없던 것. 반환 (목록, 보유 급등 수)."""
+    """**고점일에 보유 중이던** 종목이 창 안 고점 대비 −8% 이상 되돌렸는데 고점 뒤 매도가 없고, 걸어 둔 추적 다리 폭도 넘은 것.
+    반환 (목록, 보유 급등 수). 고점 전에 이미 판 보유는 늦은 매도가 아니다 · 되돌림이 아직 추적 다리(고점 대비 하락) 안이면
+    다리가 할 일을 하는 중이다(2026-10-17 예행 피드백 FB-261017-1)."""
     out, n_held = [], 0
     for mv in mvs:
-        held, w, _ = rg._weight(ctx, mv["ticker"], mv.get("trough_date", ""), mv.get("peak_date", ""))
+        _, w, _ = rg._weight(ctx, mv["ticker"], mv.get("trough_date", ""), mv.get("peak_date", ""))
+        held, _, _ = rg._weight(ctx, mv["ticker"], mv.get("peak_date", ""), mv.get("peak_date", ""))
         if not held or mv["ret"] < EARLY_PCT:
             continue
         n_held += 1
@@ -254,7 +275,7 @@ def late_sells(ctx, mvs: list) -> tuple:
         sold_after = [s for s in _sells(ctx, mv["peak_date"], ctx.stamp) if s["ticker"] == mv["ticker"]]
         if sold_after:
             continue
-        legs = []
+        legs, trail_ok = [], False
         for t in ctx.theses:
             if t.get("ticker") != mv["ticker"] or t.get("status") == "closed":
                 continue
@@ -264,6 +285,14 @@ def late_sells(ctx, mvs: list) -> tuple:
                     lvl = float(m.group(1))
                     legs.append(f"{t.get('id')} {x.get('id')} ≥ {lvl:,.2f} (고점 {mv['peak']:,.2f} 대비 "
                                 f"{(lvl / mv['peak'] - 1) * 100:+.1f}%{' · 발화됨' if x.get('fired') else ''})")
+                m2 = re.search(r"from_peak_pct\s*<=\s*-?\s*([\d.]+)", str(x.get("check") or ""))
+                if m2:
+                    wd = float(m2.group(1))
+                    legs.append(f"{t.get('id')} {x.get('id')} 추적 −{wd:.1f}%{' · 발화됨' if x.get('fired') else ''}")
+                    if not x.get("fired") and mv["retrace_pct"] > -wd:
+                        trail_ok = True
+        if trail_ok:
+            continue                                     # 되돌림이 추적 다리 안 — 늦은 매도가 아니다
         out.append({"ticker": mv["ticker"], "name": mv.get("name", ""), "peak": mv["peak"], "peak_date": mv["peak_date"],
                     "retrace_pct": round(mv["retrace_pct"], 2), "ret": round(mv["ret"], 2), "weight_max_pct": round(w, 2),
                     "profit_legs": legs or ["이익실현 다리 없음"]})
@@ -271,19 +300,37 @@ def late_sells(ctx, mvs: list) -> tuple:
 
 
 def _equity_rows() -> list:
-    rows = []
-    try:
-        from kis_client import same_account                 # 지금 계좌 계열만(2026-10-15 · 실계좌 전환)
-        for ln in (HERE / "journal" / "equity_curve.jsonl").read_text(encoding="utf-8").splitlines():
-            try:
-                r = json.loads(ln)
-            except json.JSONDecodeError:
-                continue
-            if same_account(r):
-                rows.append(r)
-    except OSError:
-        pass
-    return rows
+    """자산 곡선(ex_equity_point) — 지금 계좌 계열만(2026-10-15 · 실계좌 전환 준비)."""
+    from kis_client import same_account
+    return [r for r in db.equity_rows() if same_account(r)]
+
+
+def _theses() -> list:
+    return db.theses_all()
+
+
+def run_metrics(since: str) -> dict:
+    """run 시간 지표 넷 — 스탬프가 `since`(YYMMDD) 이후인 run(ex_run · v_run_timing). 값이 있는 run이 없으면 None(0이 아니다).
+    반환 {지표: 값, '_n': {지표: 표본 수}}."""
+    rows = db.q("SELECT post_fill_min, capture_to_send_min, before_news_n, facts_repeat, facts_new FROM v_run_timing"
+                " WHERE stamp >= ?", (since,))
+    out, n = {}, {}
+
+    def avg(col):
+        xs = [float(r[col]) for r in rows if r.get(col) is not None]
+        n[col] = len(xs)
+        return round(sum(xs) / len(xs), 1) if xs else None
+    out["post_fill_minutes_avg_7d"] = avg("post_fill_min")
+    out["capture_to_send_minutes_avg_7d"] = avg("capture_to_send_min")
+    bn = [int(r["before_news_n"]) for r in rows if r.get("before_news_n") is not None]
+    out["before_news_facts_7d"] = sum(bn) if bn else None
+    fr = [r for r in rows if r.get("facts_repeat") is not None or r.get("facts_new") is not None]
+    rep_n = sum(int(r.get("facts_repeat") or 0) for r in fr)
+    tot = rep_n + sum(int(r.get("facts_new") or 0) for r in fr)
+    out["material_repeat_pct_7d"] = round(100 * rep_n / tot, 1) if tot else None
+    out["_n"] = {"post_fill_minutes_avg_7d": n["post_fill_min"], "capture_to_send_minutes_avg_7d": n["capture_to_send_min"],
+                 "before_news_facts_7d": len(bn), "material_repeat_pct_7d": tot}
+    return out
 
 
 def _profit_floor() -> float:
@@ -297,34 +344,105 @@ def _profit_floor() -> float:
 PROFIT_FLOOR_PCT = _profit_floor()
 
 
-def account_return(days: int = 30) -> dict:
-    """양 시장 합산(원화) 수익률 — 최근 `days`일, 가동 기간이 짧으면 가동 이후. 환율은 최신 국내 스냅샷 값 하나로 양 끝을 잰다
-    (환율 효과를 빼고 운용 성과만 본다). 반환 {pct, since, until, krw_now, floor_gap_pp}."""
-    eq = _equity_rows()
-    fx = 0.0
-    snaps = sorted((HERE / "data").glob("snapshot_2*_kr.json"))
-    for f in reversed(snaps[-3:]):
-        fx = float(((_j(f, {}) or {}).get("balance") or {}).get("exchange_rate") or 0)
-        if fx:
-            break
-    by = {}
-    for r in eq:
-        if r.get("equity") and r.get("market") in ("KR", "US") and r.get("date"):
-            by.setdefault(r["market"], []).append(r)
-    if not fx or set(by) != {"KR", "US"}:
-        return {"pct": None}
-    last_d = min(by["KR"][-1]["date"], by["US"][-1]["date"])
-    cut = (datetime.strptime(last_d, "%Y-%m-%d") - timedelta(days=days)).strftime("%Y-%m-%d")
-    def at(mk, d, first=False):
-        rows = [r for r in by[mk] if (r["date"] >= d if first else r["date"] <= d)]
-        return (rows[0] if first else rows[-1]) if rows else None
-    k0 = at("KR", cut) or by["KR"][0]; u0 = at("US", cut) or by["US"][0]
-    k1, u1 = at("KR", last_d), at("US", last_d)
-    v0 = float(k0["equity"]) + float(u0["equity"]) * fx
-    v1 = float(k1["equity"]) + float(u1["equity"]) * fx
-    pct = (v1 / v0 - 1) * 100 if v0 > 0 else None
-    return {"pct": round(pct, 2) if pct is not None else None, "since": max(k0["date"], u0["date"]), "until": last_d,
-            "krw_now": round(v1), "floor_gap_pp": round(pct - PROFIT_FLOOR_PCT, 2) if pct is not None else None}
+OUTCOME_HORIZONS = (5, 10, 20)                    # base_rates.HORIZONS 중 논지 시계(주~월)에 닿는 셋 — 새 숫자 아님
+# 결과 표 계산 규칙 판(W05 · 2026-10-19) — 2: 실제 체결은 그 결정(심사 회차 → 승인 행 → 주문)에만 · 거절은 체결 없음 · unlinked는 NULL
+OUTCOME_CALC_VERSION = 2
+
+
+def _decision_fill(r: dict) -> tuple:
+    """심사 행 하나(결정)의 **실제** 체결 — (fill_link, 체결 수량, 평단). 결정 → 승인 행(같은 run·같은 심사 회차·종목·BUY·수량 있음)
+    → 그 승인 행에 이어진 주문(approval_id) → 주문마다 마지막 체결 관측(W05). 같은 날 같은 종목의 다른 결정(다른 회차·거절)의 체결을
+    붙이지 않는다. 승인되지 않은 결정은 실제 체결이 없다(not_accepted · 가상 수익만) · 승인됐는데 이을 승인 행이 없으면 unlinked(NULL)."""
+    if r.get("outcome") != "accepted":
+        return "not_accepted", None, None
+    appr = [a["id"] for a in db.q("SELECT id FROM ex_approval WHERE run_id=? AND pass='main' AND screen_pass=? AND ticker=?"
+                                  " AND action='BUY' AND qty IS NOT NULL", (r["run_id"], r["pass_no"], str(r["ticker"])))]
+    if not appr:
+        return "unlinked", None, None
+    ph = ",".join("?" * len(appr))
+    f = db.q1(f"SELECT SUM(f.filled_qty) AS q, SUM(f.filled_qty * f.avg_price) / NULLIF(SUM(f.filled_qty), 0) AS px FROM ex_order o"
+              f" JOIN v_fill_latest f ON f.order_id = o.id WHERE o.approval_id IN ({ph}) AND o.side='BUY'"
+              f" AND f.verdict IN ('FILLED', 'PARTIAL')", tuple(appr)) or {}
+    return "approval", f.get("q") or 0, f.get("px")
+
+
+def outcomes(since: str = None) -> int:
+    """★ 결정 뒤 결과(2026-10-19 · Codex J03 · W05) — 심사한 매수(승인·거부 모두 · main 회차)를 같은 시계(5·10·20 확정 세션)로 잰다 → ex_outcome.
+    결정가 = 심사 때 현재가(ex_screen.ctx.price) · 기한가 = 결정일 뒤 h번째 **확정** 봉 종가 · 그 사이 최대 상승·하락(가상 수익 — 모든 결정).
+    실제 체결은 **그 결정에만** 붙인다(`_decision_fill` — 심사 회차 → 승인 행 → 주문 → 체결) · 추정 순손익(편도 비용 요율 · 그 시장 통화).
+    확정 봉이 다 모인 시계만 기록 · 같은 계산 판이면 다시 쓰지 않고(멱등) 낮은 판의 행은 지금 규칙으로 다시 쓴다(`calc_version`). 반환 새로 쓴 행 수."""
+    import costs as _costs
+    w, a = ["mode='main'", "action='BUY'"], []
+    if since:
+        w.append("ts >= ?")
+        a.append(since)
+    n = 0
+    cfg = _costs.load()
+    for r in db.q(f"SELECT id, run_id, pass_no, ts, ticker, outcome, ctx FROM ex_screen WHERE {' AND '.join(w)} ORDER BY id", tuple(a)):
+        try:
+            ctx = json.loads(r["ctx"] or "{}")
+        except ValueError:
+            continue
+        price = ctx.get("price")
+        if not price:
+            continue                                 # 심사 때 현재가가 없는 옛 회차(v10 전) — 결과를 지어내지 않는다
+        st_, mk = str(r["run_id"]).split("_", 1)
+        ddate = f"20{st_[:2]}-{st_[2:4]}-{st_[4:6]}"
+        after = [b for b in db.bars(mk.upper(), str(r["ticker"]), since=ddate) if str(b["date"]) > ddate]
+        link, q_, px_ = _decision_fill(r)
+        for h in OUTCOME_HORIZONS:
+            if len(after) < h:
+                continue
+            old = db.q1("SELECT calc_version FROM ex_outcome WHERE screen_id=? AND horizon=?", (r["id"], h))
+            if old and int(old.get("calc_version") or 1) >= OUTCOME_CALC_VERSION:
+                continue
+            win = after[:h]
+            end = float(win[-1]["close"])
+            hi = max(float(b.get("high") or b["close"]) for b in win)
+            lo = min(float(b.get("low") or b["close"]) for b in win)
+            pnl = None
+            if q_ and px_:
+                cost = (px_ * q_ * _costs.oneway_pct(mk.upper(), "BUY", "", cfg) + end * q_ * _costs.oneway_pct(mk.upper(), "SELL", "", cfg)) / 100
+                pnl = round((end - px_) * q_ - cost, 2)
+            filled = None if link == "unlinked" else (1 if q_ else 0)
+            db.connect().execute(
+                "INSERT OR REPLACE INTO ex_outcome (screen_id, horizon, decision_date, price_at_decision, bar_date, price_at_horizon, ret_pct,"
+                " max_up_pct, max_down_pct, bars_final, filled, filled_qty, avg_fill_price, pnl_net, computed_at, fill_link, calc_version)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (r["id"], h, ddate, float(price), win[-1]["date"], end, round((end / float(price) - 1) * 100, 3),
+                 round((hi / float(price) - 1) * 100, 3), round((lo / float(price) - 1) * 100, 3), 1, filled,
+                 (q_ or None) if link == "approval" else None, px_ if link == "approval" else None, pnl, _now(), link,
+                 OUTCOME_CALC_VERSION))
+            n += 1
+    return n
+
+
+def outcome_median(accepted: bool, since: str = None, horizon: int = 20, family: str = None):
+    """승인(또는 거부)된 매수 결정의 결정 뒤 h세션 수익 중앙값 · 표본 없으면 None(미측정 — 0이 아니다).
+    평가 단위(W05) = run·종목의 **마지막 main 회차 결정** 하나(거절 뒤 재제안으로 승인되면 승인 한 표본 · 같은 결정이 회차마다
+    겹치지 않는다) · `family`(paper|real)를 주면 그 계좌 계열 run만(run 시작 때 계좌 모드)."""
+    from statistics import median
+    w = ["o.horizon=?", "s.outcome=?", "s.mode='main'",
+         "s.id = (SELECT MAX(s2.id) FROM ex_screen s2 WHERE s2.run_id=s.run_id AND s2.ticker=s.ticker AND s2.action=s.action"
+         " AND s2.mode='main')"]
+    a = [horizon, "accepted" if accepted else "rejected"]
+    if since:
+        w.append("s.ts >= ?")
+        a.append(since)
+    rows = db.q(f"SELECT o.ret_pct, r.account_mode FROM ex_outcome o JOIN ex_screen s ON s.id = o.screen_id"
+                f" LEFT JOIN ex_run r ON r.run_id = s.run_id WHERE {' AND '.join(w)}", tuple(a))
+    vals = [r["ret_pct"] for r in rows if r["ret_pct"] is not None
+            and (family is None or db.acct_family_of(r.get("account_mode")) == family)]
+    return round(median(vals), 2) if vals else None
+
+
+def account_return(days: int = 30, fixed_fx: bool = False) -> dict:
+    """양 시장 합산(원화) 수익률 — 지금 계좌 계열 · 최근 `days`일(가동이 짧으면 가동 이후). 통합자산은 portfolio 한 곳(2026-10-19 ·
+    Codex R06): 통합증거금 공유 현금은 한 번만 · 양 끝은 그날 환율(fixed_fx면 끝 환율 하나 — 환율 효과를 뺀 참고값) · 입출금은 Modified Dietz로
+    뺀다. 예전엔 공유 현금을 두 번 세어 주식이 그대로인데 산 날 수익률이 −25%로 나왔다. 반환 {pct, since, until, krw_now, floor_gap_pp, …}."""
+    import portfolio
+    from kis_client import acct_family
+    return portfolio.account_return(acct_family(), days, fixed_fx)
 
 
 def account_line(days: int = 30) -> str:
@@ -351,7 +469,7 @@ def post_metric(metric: str, since: str, col: dict = None, cur: dict = None) -> 
     def stamped(pattern, rx):
         for f in sorted(glob.glob(str(HERE / pattern))):
             m = re.search(rx, f)
-            if m and m.group(1) >= since:
+            if m and m.group(1) >= since and _same_family(_j(f, {}) or {}):     # 지금 계좌 계열의 파일만(2026-10-19 · R07)
                 yield m.group(1), f
     if metric == "early_sell_rate":
         n = 0
@@ -362,9 +480,12 @@ def post_metric(metric: str, since: str, col: dict = None, cur: dict = None) -> 
                      if t.get("action") == "SELL" and (t.get("fill") or {}).get("verdict") in ("FILLED", "PARTIAL"))
         e = sum(1 for x in ((col or {}).get("early_sells") or {}).get("rows") or [] if since <= x.get("stamp", "") <= mature)
         return (round(100 * e / n, 1) if n else None), n, f"판 지 {MATURE_DAYS}일 지난 적용 후 매도만"
+    if metric in RUN_METRICS:
+        lo = max(since, (now - timedelta(days=7)).strftime("%y%m%d"))
+        rm = run_metrics(lo)
+        return rm[metric], rm["_n"][metric], "최근 7일·적용 후 run"
     if metric in ("first_entry_avg_pct", "entry_reach_rate"):
-        th = (_j(HERE / "journal" / "theses.json", {}) or {}).get("theses") or []
-        th = [t for t in th if rg._st(t.get("created")) >= since]
+        th = [t for t in _theses() if rg._st(t.get("created")) >= since]
         if metric == "first_entry_avg_pct":
             xs = [float(t["entry_triggers"][0]["size_pct"]) for t in th
                   if (t.get("entry_triggers") or [{}])[0].get("size_pct") is not None]
@@ -389,8 +510,7 @@ def post_metric(metric: str, since: str, col: dict = None, cur: dict = None) -> 
              "miss_entry_unreached_pct": lambda r: any(b["type"] == "entry_unreached" for b in r["blockers"])}[metric]
         return round(100 * sum(bool(f(r)) for r in miss) / len(miss), 1), len(miss), "고점이 적용 후인 놓친 급등"
     if metric in ("sell_rows_untagged_14d", "rate_limit_failed_orders_14d", "unsent_zero_qty_7d"):
-        th = (_j(HERE / "journal" / "theses.json", {}) or {}).get("theses") or []
-        tk_th = {t.get("ticker") for t in th}
+        tk_th = {t.get("ticker") for t in _theses()}
         v = n = 0
         for _, f in stamped("journal/trades_*.json", r"trades_(\d{6})_"):
             for t in _trades_same(f):
@@ -401,7 +521,7 @@ def post_metric(metric: str, since: str, col: dict = None, cur: dict = None) -> 
                         n += 1; v += not t.get("thesis_id")
                 else:
                     n += 1
-                    v += (t.get("status") == "FAILED" and ("EGW00201" in txt if metric.startswith("rate") else "0주" in txt))
+                    v += (t.get("status") in ("FAILED", "REJECTED", "UNSENT") and ("EGW00201" in txt if metric.startswith("rate") else "0주" in txt))
         return v, n, "적용 후 주문 기록"
     if metric == "funds_rejects_with_sells_14d":
         v = n = 0
@@ -412,12 +532,17 @@ def post_metric(metric: str, since: str, col: dict = None, cur: dict = None) -> 
                 v += sum(1 for r in a.get("rejected") or [] if re.search(r"자금|현금", str(r.get("why") or "")))
         return v, n, "비회전 매도가 있던 적용 후 승인"
     if metric == "watch_loop_checks_7d":
-        try:
-            logs = [json.loads(l) for l in (HERE / "journal" / "stops_log.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
-        except (OSError, json.JSONDecodeError):
+        logs = db.log_rows("stops_log")
+        if not logs:
             return None, 0, "stops_log 없음"
         lo = max(since, (now - timedelta(days=7)).strftime("%y%m%d"))
         return sum(1 for r in logs if rg._st(r.get("ts")) >= lo and r.get("mode") == "loop" and r.get("open")), 1, "최근 7일·적용 후"
+    if metric in ("proposal_ret_median_20d", "rejected_ret_median_20d"):
+        # 적용일 뒤에 심사한 제안만(시간순 평가 — 규칙을 고른 창으로 그 규칙을 채점하지 않는다 · FB-261010-4)
+        since_iso = f"20{since[:2]}-{since[2:4]}-{since[4:6]}" if re.fullmatch(r"\d{6}", str(since or "")) else since
+        from kis_client import acct_family as _af_
+        v = outcome_median(metric == "proposal_ret_median_20d", since_iso, family=_af_())
+        return v, (0 if v is None else 1), "적용 후 심사한 매수의 20세션 결과"
     if metric == "snap_eval_total_mismatch_7d":
         v = n = 0
         for _, f in stamped("data/snapshot_2*_*.json", r"snapshot_(\d{6})_"):
@@ -433,7 +558,7 @@ def metrics(collected: dict = None) -> dict:
     """지표 현재값. 수집 결과가 있으면 급등·매도 항목도 채우고, 없으면 그 항목은 None(미측정 — 0이 아니다)."""
     out = {k: None for k in METRICS}
     since = (datetime.now(KST) - timedelta(days=45)).strftime("%y%m%d")
-    th = (_j(HERE / "journal" / "theses.json", {}) or {}).get("theses") or []
+    th = _theses()
     legs, fired, firsts = 0, 0, []
     for t in th:
         if rg._st(t.get("created")) < since:
@@ -456,18 +581,15 @@ def metrics(collected: dict = None) -> dict:
             base = next((r for r in reversed(rows) if r["date"] <= cut), rows[0])
             out[f"excess_{mk.lower()}_pct"] = round(((last["equity"] / base["equity"]) -
                                                      (last["shadow_benchmark_equity"] / base["shadow_benchmark_equity"])) * 100, 2)
-            al = [json.loads(l) for l in (HERE / "journal" / "allocation.jsonl").read_text(encoding="utf-8").splitlines()
-                  if l.strip() and f'"market": "{mk.lower()}"' in l] if (HERE / "journal" / "allocation.jsonl").exists() else []
+            al = db.allocation_rows(mk.lower())
             if al and last.get("equity"):
                 inv = (last["equity"] - float(last.get("cash") or 0)) / last["equity"] * 100
                 out[f"invested_gap_{mk.lower()}_pct"] = round(float(al[-1].get("target_invested_pct") or 0) - inv, 1)
     s14 = (datetime.now(KST) - timedelta(days=14)).strftime("%y%m%d")
     s7 = (datetime.now(KST) - timedelta(days=7)).isoformat()
-    try:
-        logs = [json.loads(l) for l in (HERE / "journal" / "stops_log.jsonl").read_text(encoding="utf-8").splitlines() if l.strip()]
+    logs = db.log_rows("stops_log")
+    if logs:                                             # 장중 감시 기록이 하나도 없으면 미측정(None)
         out["watch_loop_checks_7d"] = sum(1 for r in logs if str(r.get("ts", "")) >= s7 and r.get("mode") == "loop" and r.get("open"))
-    except (OSError, json.JSONDecodeError):
-        pass
     tk_th = {t.get("ticker") for t in th}
     untag, rl, fr = 0, 0, 0
     for f in sorted(glob.glob(str(HERE / "journal" / "trades_*.json"))):
@@ -478,13 +600,15 @@ def metrics(collected: dict = None) -> dict:
             if (t.get("action") == "SELL" and t.get("source") == "llm" and not t.get("thesis_id")
                     and t.get("ticker") in tk_th and (t.get("fill") or {}).get("verdict") in ("FILLED", "PARTIAL")):
                 untag += 1
-            if t.get("status") == "FAILED" and "EGW00201" in json.dumps(t.get("result") or {}, ensure_ascii=False) + str(t.get("error", "")):
+            if t.get("status") in ("FAILED", "REJECTED", "UNSENT") and "EGW00201" in json.dumps(t.get("result") or {}, ensure_ascii=False) + str(t.get("error", "")):
                 rl += 1
     for f in sorted(glob.glob(str(HERE / "signals" / "approved_*.json"))):
         m = re.search(r"approved_(\d{6})_", f)
         if not m or m.group(1) < s14:
             continue
         a = _j(f, {}) or {}
+        if not _same_family(a):                     # 지금 계좌 계열의 승인만(2026-10-19 · R07)
+            continue
         if any(o.get("action") == "SELL" and o.get("source") != "funding" for o in a.get("orders") or []):
             fr += sum(1 for r in a.get("rejected") or [] if re.search(r"자금|현금", str(r.get("why") or "")))
     out["sell_rows_untagged_14d"], out["rate_limit_failed_orders_14d"], out["funds_rejects_with_sells_14d"] = untag, rl, fr
@@ -495,7 +619,10 @@ def metrics(collected: dict = None) -> dict:
         m = re.search(r"snapshot_(\d{6})_", f)
         if not m or m.group(1) < s7:
             continue
-        b = (_j(f, {}) or {}).get("balance") or {}
+        sj = _j(f, {}) or {}
+        if not _same_family(sj):                    # 지금 계좌 계열의 스냅샷만(2026-10-19 · R07)
+            continue
+        b = sj.get("balance") or {}
         tot = sum(float(p.get("eval_amt") or 0) for p in b.get("positions") or []) + max(0.0, float(b.get("cash") or 0))
         if tot > 0 and abs(float(b.get("eval_total") or 0) - tot) / tot > SNAP_MISMATCH:
             mism += 1
@@ -506,7 +633,7 @@ def metrics(collected: dict = None) -> dict:
         if not m or m.group(1) < s7:
             continue
         for t in _trades_same(f):
-            if t.get("status") == "FAILED" and "0주" in json.dumps(t.get("result") or {}, ensure_ascii=False) + str(t.get("error", "")):
+            if t.get("status") in ("FAILED", "REJECTED", "UNSENT") and "0주" in json.dumps(t.get("result") or {}, ensure_ascii=False) + str(t.get("error", "")):
                 z += 1
     out["unsent_zero_qty_7d"] = z
     today = datetime.now(KST).strftime("%y%m%d")
@@ -514,6 +641,14 @@ def metrics(collected: dict = None) -> dict:
                                        and rg._st((r.get("next_check") or {}).get("date", "")) <= today
                                        and (r.get("expected") or {}).get("metric") not in POST_METRICS)
     out["return_30d_total_pct"] = account_return(30).get("pct")
+    out["return_30d_fixed_fx_pct"] = account_return(30, fixed_fx=True).get("pct")
+    s60 = (datetime.now(KST) - timedelta(days=60)).isoformat(timespec="seconds")
+    from kis_client import acct_family as _af_
+    out["proposal_ret_median_20d"] = outcome_median(True, s60, family=_af_())      # 지금 계좌 계열만(W05)
+    out["rejected_ret_median_20d"] = outcome_median(False, s60, family=_af_())
+    rm = run_metrics(s7)                                 # run 시간(ex_run) — 행이 없으면 None
+    for k in RUN_METRICS:
+        out[k] = rm[k]
     # 시나리오·손실 차선(FB-261012) — 도구가 못 돌면 None(미측정 — 0이 아니다)
     try:
         import loss_review as lr
@@ -525,10 +660,11 @@ def metrics(collected: dict = None) -> dict:
         out["loss_verdict_flip_rate"] = fl.get("rate")
         try:
             import costs as _costs
-            out["net_cost_drag_30d_pct"] = _costs.drag(30).get("pct")
+            from kis_client import acct_family as _af
+            out["net_cost_drag_30d_pct"] = _costs.drag(30, _af()).get("pct")      # 분자·분모 같은 계좌 계열(R07)
         except Exception:                               # noqa: BLE001
             out["net_cost_drag_30d_pct"] = None
-        ax = (_j(HERE / "journal" / "market_map.json", {}) or {}).get("axes") or []
+        ax = db.market_map_load().get("axes") or []
         judged = [a for a in ax if a.get("status") in ("hit", "miss")]
         out["forecast_horizon_hit_rate"] = round(100 * sum(a["status"] == "hit" for a in judged) / len(judged), 1) if judged else None
         n_nc = 0
@@ -540,7 +676,7 @@ def metrics(collected: dict = None) -> dict:
             n_nc += int(mm.group(1)) if mm else 0
         out["fired_retrace_no_cause_7d"] = n_nc
         import market_map as _mm
-        _ax = _mm._read(_mm.MAP, {"axes": []}).get("axes") or []
+        _ax = ax
         out["forecast_single_market"] = sum(1 for a in _ax if a.get("direction") and (a.get("status") or "open") == "open"
                                             and _mm.forecast_validate(a, _ax))
         tot = one = 0
@@ -587,31 +723,27 @@ def _weekly_excerpt() -> str:
     return f"`{files[-1].name}`\n\n" + (txt[i:].strip()[:4000] if i >= 0 else "(④절 없음 — 주간 리포트가 중간에 멈췄을 수 있다)")
 
 
-REAL_ROW = re.compile(r"^\|\s*(.+?)\s*\|\s*(★|✓|—)\s*\|\s*(.*?)\s*\|\s*$")
-
-
 def real_checks(week: str, days: int = 7) -> dict:
-    """이번 주 실전 점검표(`data/run_evidence/real_check_<st>_<mkt>.md` · 2026-10-15) — run별 머리줄 · 항목별 ★ 수와 예.
+    """이번 주 실전 점검표(저장소 op_real_check — `real_check.py`가 run마다 쓴다 · 2026-10-15) — run별 머리줄 · 항목별 ★ 수와 예.
     왜: 사용자(10-15) "이번 주 남은 모의 run에서 실전 관점으로 점검·기록하고 토요일 trade-feedback으로 고친다." 점검표가 run마다 쌓이지만
-    토요일이 읽지 않으면 기록으로 끝난다."""
+    토요일이 읽지 않으면 기록으로 끝난다. 머리줄은 판정 행으로 다시 만든다(`real_check.head_line` — 마크다운 파일과 같은 줄)."""
+    import real_check as _rc
     lo = rg._prev_stamp(week, days)
-    runs, items = [], {}
-    for f in sorted((HERE / "data" / "run_evidence").glob("real_check_*_*.md")):
-        m = re.match(r"real_check_(\d{6})_(kr|us)\.md$", f.name)
+    by_run = {}
+    for r in db.q("SELECT run_id, item, status, note FROM op_real_check ORDER BY run_id, item"):
+        m = re.match(r"(\d{6})_(kr|us)$", str(r["run_id"]))
         if not m or not (lo <= m.group(1) <= week):
             continue
-        txt = f.read_text(encoding="utf-8", errors="ignore")
-        head = next((ln.strip() for ln in txt.splitlines() if ln.startswith("[실전점검]")), "")
-        runs.append({"stamp": m.group(1), "market": m.group(2), "head": head, "file": f.name})
-        for ln in txt.splitlines():
-            mm = REAL_ROW.match(ln)
-            if not mm or mm.group(1) in ("항목", "---"):
-                continue
-            it = items.setdefault(mm.group(1), {"runs": 0, "star": 0, "examples": []})
+        by_run.setdefault((m.group(1), m.group(2)), []).append((r["item"], r["status"], r["note"] or ""))
+    runs, items = [], {}
+    for (st, mk), res in sorted(by_run.items()):
+        runs.append({"stamp": st, "market": mk, "head": _rc.head_line(st, mk, res), "file": f"real_check_{st}_{mk}.md"})
+        for name, v, why in res:
+            it = items.setdefault(name, {"runs": 0, "star": 0, "examples": []})
             it["runs"] += 1
-            if mm.group(2) == "★":
+            if v == "★":
                 it["star"] += 1
-                it["examples"].append(f"{m.group(1)} {m.group(2).upper()}: {mm.group(3)[:110]}")
+                it["examples"].append(f"{st} {mk.upper()}: {why.replace('|', '·')[:110]}")
     return {"runs": runs, "items": items}
 
 
@@ -619,7 +751,7 @@ def collect(week: str, days: int = WEEK_DAYS, threshold: float = WEEK_THRESHOLD)
     from kis_client import KisClient
     client = KisClient.for_mode()
     res = {"week": week, "at": _now(), "days": days, "threshold": threshold, "markets": {}}
-    th = (_j(HERE / "journal" / "theses.json", {}) or {}).get("theses") or []
+    th = _theses()
     corpus = Corpus(rg._prev_stamp(week, days * 2 + 10), week)
     es_rows, es_n, ls_rows, ls_n = [], 0, [], 0
     for mk in ("kr", "us"):
@@ -653,7 +785,12 @@ def collect(week: str, days: int = WEEK_DAYS, threshold: float = WEEK_THRESHOLD)
     except Exception as e:                                   # noqa: BLE001
         res["losses"] = {"error": f"{type(e).__name__}: {e}", "rows": [], "forecasts_due": [], "stale_scenarios": [],
                          "flips": {}, "net_realized": {}}
+    try:                                             # 결정 뒤 결과(J03) — 확정 봉이 모인 시계만 · 실패는 수집을 막지 않는다
+        res["outcomes_new"] = outcomes((datetime.now(KST) - timedelta(days=90)).isoformat(timespec="seconds"))
+    except Exception as e:                           # noqa: BLE001
+        res["outcomes_new"] = f"실패 {type(e).__name__}: {e}"
     res["metrics"] = metrics(res)
+    res["measurement_version"] = MEASUREMENT_VERSION
     res["weekly_excerpt"] = _weekly_excerpt()
     try:
         res["real_checks"] = real_checks(week)
@@ -680,7 +817,7 @@ def render_collect(res: dict) -> str:
          f"{len((res.get('losses') or {}).get('forecasts_due') or [])} · 오래 열린 시나리오 "
          f"{len((res.get('losses') or {}).get('stale_scenarios') or [])} · 조회 실패 {n_err}", "",
          f"> 창 {days}거래일 · **저점→고점 최대 상승폭** ≥ +{th:.0f}% — 종가 대 종가가 아니므로 올랐다가 되돌린 종목도 들어온다. "
-         f"측정 대상 = 유니버스 + 지도 + 시총 상위(`config/main_names.json`). 수집은 판정하지 않는다 — 결함·맞은 판단·운은 "
+         f"측정 대상 = 유니버스 + 지도 + 시총 상위(저장소 dim_company.main_rank · `main_names.py --show`). 수집은 판정하지 않는다 — 결함·맞은 판단·운은 "
          f"`analysis/피드백_{wk}.md` §2가 가른다. 생성 {res['at']}", ""]
     for mk in ("kr", "us"):
         rows = m[mk]["movers"]
@@ -720,7 +857,9 @@ def render_collect(res: dict) -> str:
     elif lo_:
         import loss_review as lr
         L += ["", lr.render(lo_).rstrip()]
-    L += ["", "## 지표 — 현재값 (제안의 baseline·검증의 비교값)", "", "| 지표 | 값 |", "|---|---|"]
+    L += ["", "## 지표 — 현재값 (제안의 baseline·검증의 비교값)", "",
+          f"측정 판 {res.get('measurement_version', 1)} — 판 2(2026-10-19~)는 통합자산을 공유 현금 한 번·그날 환율·입출금 제외로, 비용을 계좌 "
+          "계열별로 잰다. 판이 다른 주의 `return_30d_*`·`net_cost_drag_30d_pct`와 비교하지 않는다.", "", "| 지표 | 값 |", "|---|---|"]
     for k, v in res["metrics"].items():
         L.append(f"| `{k}` {METRICS[k]} | {'미측정' if v is None else v} |")
     L += ["", "## 지난주 적용분 — 검증일 도래", ""]
@@ -755,19 +894,18 @@ def render_collect(res: dict) -> str:
 # ───────────────────────────────────────────────────────────── 원장
 
 def ledger() -> list:
-    rows = []
-    if LEDGER.exists():
-        for ln in LEDGER.read_text(encoding="utf-8").splitlines():
-            try:
-                rows.append(json.loads(ln))
-            except json.JSONDecodeError:
-                pass
-    return rows
+    """피드백 원장(op_feedback) — 행 순서 그대로. 렌더본 journal/feedback.jsonl은 저장소가 쓰기 뒤에 자동으로 다시 쓴다."""
+    return db.log_rows("feedback")
 
 
 def _write(rows: list) -> None:
-    LEDGER.parent.mkdir(parents=True, exist_ok=True)
-    LEDGER.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    """원장 통째 다시 쓰기(옛 모양 — 행 단위 쓰기는 `_put`)."""
+    db.log_replace("feedback", rows)
+
+
+def _put(row: dict) -> None:
+    """id가 같은 행을 바꾸고, 없으면 끝에 붙인다."""
+    db.log_upsert("feedback", row)
 
 
 def policy() -> dict:
@@ -847,8 +985,8 @@ def cmd_propose_add(path: str, week: str) -> int:
         else:
             row["autonomy"], row["autonomy_why"] = None, "결함 아님 — 고칠 것 없음(기록)"
         rows.append(row)
+        _put(row)
         print(f"✓ {row['id']} · {row['kind']} · {row['verdict']} · {row['autonomy'] or '-'} — {row['cause'][:70]}")
-    _write(rows)
     return 1 if bad else 0
 
 
@@ -865,7 +1003,7 @@ def cmd_propose_set(rid: str, status: str, note: str, next_check: str = "") -> i
         r["next_check"] = {**(r.get("next_check") or {}), "date": next_check}
         r.setdefault("history", []).append({"at": _now(), "from": r.get("status"), "to": r.get("status"),
                                             "note": f"검증일 {old} → {next_check}" + (f" · {note}" if note else "")})
-        _write(rows)
+        _put(r)
         print(f"✓ {rid}: 검증일 {old} → {next_check}")
         if not status:
             return 0
@@ -885,7 +1023,7 @@ def cmd_propose_set(rid: str, status: str, note: str, next_check: str = "") -> i
     r["status"] = status
     if status == "applied":
         r["applied_at"] = _now()
-    _write(rows)
+    _put(r)
     print(f"✓ {rid}: {r['history'][-1]['from']} → {status}")
     return 0
 
@@ -962,10 +1100,9 @@ def main() -> int:
         print(f"→ {md}\n→ {md.with_suffix('.json')}")
         return 0
     if a.cmd == "trail":
-        wl = {r["ticker"]: r.get("name", "") for r in ((_j(HERE / "config" / "watchlist.json", {}) or {}).get(a.market.upper()) or [])}
+        wl = {r["ticker"]: r.get("name", "") for r in db.companies(a.market.upper())}
         name = a.name or wl.get(a.ticker, "")
-        rows = trail(Corpus(rg._prev_stamp(a.peak, a.days), a.peak), a.ticker, name,
-                     (_j(HERE / "journal" / "theses.json", {}) or {}).get("theses") or [], cap=200)
+        rows = trail(Corpus(rg._prev_stamp(a.peak, a.days), a.peak), a.ticker, name, _theses(), cap=200)
         print(f"■ 평가 이력 — {a.ticker} {name} · {rg._prev_stamp(a.peak, a.days)}~{a.peak} · {len(rows)}줄")
         print("| 날짜 | 종류 | 파일 | 절 | 줄 |\n|---|---|---|---|---|")
         for r in rows:

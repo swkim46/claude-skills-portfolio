@@ -182,14 +182,17 @@ try:
     led = [json.loads(x) for x in open(env["STEPGATE_PROMO_LEDGER"], encoding="utf-8") if x.strip()]
     check("대체된 요청의 결과 — 기록하되 superseded 표시·종료 0", rcr == 0 and led and led[-1].get("superseded") is True
           and led[-1].get("findings_file", "").endswith("audit_x.md"), f"rc={rcr} {orr[-200:]} {led[-1:] }")
+    import hashlib as _hl
+    first_sha = _hl.sha256("# 판정표\nPROPAGATE OK (x)\nPROPAGATE SCOPE 훑은 파일 1: a.md\n".encode("utf-8")).hexdigest()[:16]
+    check("원장 줄에 감사가 본 판 — 과제 폴더 · 산출물 절대경로 · judge 때 내용 해시(2026-10-19 · Codex W06)",
+          led and led[-1].get("dir") == proj and led[-1].get("deliverable") == os.path.abspath(dv)
+          and led[-1].get("content_sha") == first_sha, f"{ {k: led[-1].get(k) for k in ('dir', 'deliverable', 'content_sha')} if led else None} vs {first_sha}")
     rcs, os_ = sgc("audit-status", "fact-check", "dir=" + proj)
     check("대체된 FAIL이 활성 감사로 되살아나지 않는다(활성 1 · FAIL 0)", "FAIL=0" in os_ and "PENDING=1" in os_, os_[-300:])
     rcb, ob = sgc("audit-judge", r3, "--record", "subverdict=FAIL", "findings=x", "lenses=lint-ok", "findings_file=/nope/x.md")
     check("findings_file이 없으면 거부", rcb == 3, ob[-200:])
-    sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..", "..", "..", "ai-trading-bot")))
-    import fc_track1 as _f1
-    rounds = _f1.audit_rounds("AI클레임_261015_kr_A_판정.md", ledger=__import__("pathlib").Path(env["STEPGATE_PROMO_LEDGER"]))
-    check("fc_track1 회차 — 대체된 감사는 세지 않는다", rounds == [], rounds)
+    # 소비자 쪽(대체된 감사를 회차로 세지 않는다)은 매매 저장소 사실 층이 본다 — ai-trading-bot `test_facts.py` (15)
+    # (옛 fc_track1.audit_rounds는 2026-10-17 `facts.audit_rounds`로 옮겨 `_archive/`에 있다)
 
     # ── 6. 모의 감사 미리보기(2026-10-15) — 정식 감사와 같은 패킷 · 큐에 안 남는다 ──
     rcv, pv = sgc("audit-packet-preview", "fact-check", "verdict", "deliverable=" + dv, "dir=" + proj)
@@ -199,6 +202,48 @@ try:
     check("미리보기는 큐에 아무것도 넣지 않는다(활성 수 그대로)", "PENDING=1" in os2 and "FAIL=0" in os2, os2[-200:])
     rcj, pj = sgc("audit-judge", r3)
     check("정식 패킷은 그대로(req 표시·--record 안내)", "AUDIT PACKET [" in pj and "--record" in pj and "PREVIEW" not in pj, pj[:200])
+
+    # ── 7. 통과 기록(2026-10-19 · trade-run R03) — PASS마다 approved= 파일 바이트 해시를 서명해 덧붙인다 · 위조·만료 거부 ·
+    #       init/clear가 지운다. 게이트 폴더는 임시 폴더로(TEMP) — 실제 ~/claude_stepgate를 건드리지 않는다.
+    old_temp = os.environ.get("TEMP")
+    os.environ["TEMP"] = os.path.join(TMP, "gd")
+    try:
+        apf = os.path.join(TMP, "approved_261013_kr.json")
+        with open(apf, "w", encoding="utf-8") as f:
+            f.write('{"orders": []}')
+        import hashlib as _h
+        want = _h.sha256(open(apf, "rb").read()).hexdigest()
+        r1 = sg.append_pass_record("trade-run", "dispatch", "d_test", {"approved": apf, "deliverable": apf})
+        recs = sg.read_pass_records("trade-run", "dispatch")
+        check("통과 기록 — 승인 파일 해시가 서명되어 읽힌다", len(recs) == 1 and recs[0]["approved_sha256"] == want, str(recs)[:200])
+        sg.append_pass_record("trade-run", "execute", "d_test", {})
+        check("다음 단계 통과가 dispatch 기록을 지우지 않는다(덧붙이기)",
+              len(sg.read_pass_records("trade-run", "dispatch")) == 1 and len(sg.read_pass_records("trade-run")) == 2, "")
+        path = sg.pass_record_path("trade-run", "d_test")
+        lines = open(path, encoding="utf-8").read().splitlines()
+        forged = json.loads(lines[0]); forged["approved_sha256"] = "0" * 64
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(forged, ensure_ascii=False) + "\n")
+        check("손으로 고친 기록(해시 위조)은 읽지 않는다",
+              [r["approved_sha256"] for r in sg.read_pass_records("trade-run", "dispatch")] == [want], "")
+        old = json.loads(lines[0]); old["epoch"] = 1; old["sig"] = sg._pass_sig(old)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(old, ensure_ascii=False) + "\n")
+        check("만료(12시간 넘은) 기록은 읽지 않는다", len(sg.read_pass_records("trade-run", "dispatch")) == 1, "")
+        sg.remove_ledger("trade-run", "d_test")
+        check("init/clear(remove_ledger)가 통과 기록을 지운다", sg.read_pass_records("trade-run") == [], "")
+        # 같은 체크포인트 재판정은 순서 위반이 아니다 — 토큰이 dispatch여도 dispatch를 다시 받을 수 있다(after=note)
+        sg.write_token("trade-run", "dispatch", "d_test")
+        tok = sg.read_token("trade-run", "d_test")
+        check("재판정 허용 조건 — 지금 토큰이 같은 cp PASS", tok and tok.get("cp") == "dispatch" and not tok.get("_invalid"), str(tok))
+        src = open(os.path.join(HERE, "stepgate.py"), encoding="utf-8").read()
+        check("cmd_judge가 같은 cp 재판정을 순서 위반으로 막지 않는다", "again = bool(tok) and not bad and str(tok.get(\"cp\")) == str(cp)" in src, "")
+        sg.remove_ledger("trade-run", "d_test")
+    finally:
+        if old_temp is None:
+            os.environ.pop("TEMP", None)
+        else:
+            os.environ["TEMP"] = old_temp
 finally:
     sg.RUBRIC_DIR = saved_dir
     shutil.rmtree(TMP, ignore_errors=True)

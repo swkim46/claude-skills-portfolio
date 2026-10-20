@@ -25,7 +25,7 @@ SG judge trade-run carry <id>=<값> … \
 
 직전 시그널만 보면 **그 run이 새로 적은 것만** 보인다. 시그널의 `scenarios` id는 매 run
 재사용되므로(실측: `A~E` → `A~F` → `S1~S8`) 며칠 전에 "기다린다"고 해둔 조건이 사라진다.
-`journal/scenarios.json`이 그 조건을 `SC-<YYMMDD>-<n>`으로 붙들고 있다.
+저장소 `jd_scenario`(`scenarios.py list`)가 그 조건을 `SC-<YYMMDD>-<n>`으로 붙들고 있다.
 
 ```
 python3 scenarios.py list --open        # ★ 전 시장 — 조건은 시장에 속하지 않는다
@@ -43,6 +43,9 @@ python3 scenarios.py judge --id SC-260910-1 --realized y --acted y --note "e2 �
   `python3 scenarios.py judge --carry-forward <오늘>`로 나머지를 '미도래 — next_check'로 이월 기록한다.
   날짜를 모르면 비운다 — 매 run 판정 대상으로 남는다(보수적이라 놓치는 판정이 없다).
   *실사례(2026-10-01): 134건을 전건 다시 판정했고 130건이 '판정일 미도래'였다.*
+- **★ 요인 행(`factor`)은 매 run 판정한다(FB-261017-7)** — `--needs-check`에 늘 나오고 `--carry-forward`가 넘기지 않는다. 1단 `## 요인 상태`의
+  그 요인 상태로 `python3 scenarios.py judge --id <id> --realized y|n --price_cond y --note "[요인 판정] <요인> — <상태 · 결정 요약>"`. 꺾임(실현)이어도
+  행은 닫히지 않는다 — 다음 run도 다시 판정한다(그 요인 보유가 끝나 접을 때만 `--expire`). 대응은 4단 §7 `[요인 판정]` 블록이다.
 - **★ `## 오래 열린 시나리오` 블록(`scenarios.py list --stale`)을 그 자리에서 정리한다(FB-261012-1).** 열린 지 20거래일을
   넘겼거나 조건에 적힌 예정일에서 10거래일이 지났는데 실현되지 않은 행이다 — 그 이벤트에 **지연·무소식 가지가 없었다**는 뜻이다.
   행마다 둘 중 하나: ① 그 결과가 아직 올 수 있으면 지연 가지를 새 시나리오 행으로 세운다(`next_check`에 새 예정일 · 대응)
@@ -71,6 +74,9 @@ python3 scenarios.py judge --id SC-260910-1 --realized y --acted y --note "e2 �
 ```
 python3 stage.py carry --market <kr|us>
 ```
+**★ 전제는 capture 성공 기록이다(2026-10-19 · Codex U02)** — carry·map은 이 run의 capture가 성공(ok·reduced)했고 그때 기록한
+스냅샷·도구 파일의 해시가 지금 파일과 같을 때만 돈다. 아니면 종료코드 2(`capture 성공 기록이 없다` · `산출물이 바뀌었거나 없다`) —
+파일이 있다는 것만으로는 안 된다. capture를 다시 돌린 뒤 carry부터 잇는다.
 `theses.py check` → `review.py --record` → `market_map.py bridge --closed` → `cycle`을
 순서대로 돌려 한 파일로 모은다.
 
@@ -97,7 +103,7 @@ carry 파일에 붙인다. 이번 run의 5단은 **그 블록에서 시작한다
 ### ★ run 사이에 규칙이 낸 매도를 이어받는다 — `stops.py`·회전 매도
 
 `journal/trades_*.json`의 `source: discipline`(손절·목표 가격 조건)·`funding`(회전 매도) 행과
-`journal/stops_log.jsonl`은 **모델이 아니라 규칙이 낸 주문**이다. §1-A에 "규칙이 판 것"으로 적고,
+감시 루프 기록(저장소 `op_stops`)은 **모델이 아니라 규칙이 낸 주문**이다. §1-A에 "규칙이 판 것"으로 적고,
 전량 매도로 `closed`된 논지는 다시 세우지 않는다(같은 논지를 다시 사려면 새 논지로 — 왜 손절선이
 틀렸는지부터). *실사례(2026-09-16 13:41): 한화오션 x2 손절을 `stops.py`가 81,300에 집행했다.*
 
@@ -111,6 +117,10 @@ python3 theses.py check --snapshot data/snapshot_<YYMMDD>_<mkt>.json --market <K
 
 **논지 원장(`theses_levels.md`)에 걸어둔 매수·매도 조건이 발화했는지부터 본다.** 발화한 트리거는
 **이미 내린 결정**이다 — 오늘 다시 판단할 대상이 아니라 집행할 대상이다.
+
+**★ 맨 위에 `★ 재검토 필요`가 뜨면 그 논지부터 처리한다(2026-10-19).** 근거 사실이 MISMATCH로 판정된 논지다 — `risk_guard`가 그 매수를
+받지 않는다. 주문 쪽 근거를 바꿔 넘기지 말고(그것은 회피로 거부된다) 논지를 고친다: `theses.py set-evidence --id <id> --drop <틀린 F>
+--facts <새 F> --why "…"` 또는 `theses.py set-status --id <id> --status closed`. 새 근거의 매수는 다음 run 몫이다(`stage5_decide.md` 〈근거가 틀린 논지〉).
 
 **재료보다 먼저 보는 이유**: 뉴스를 먼저 읽으면 그날의 서사에 물들어 어제 세운 조건을
 다시 저울질하게 된다. 그러면 미리 정해둔 의미가 사라진다.
@@ -166,6 +176,12 @@ python3 review.py --market <직전 run의 시장> --session <그 세션 날짜> 
 그 run의 조사는 하루 만에 버려진다. `crosscheck.py`가 **각서가 아니라 이름으로** 대조한다 —
 직전 run이 세운 축·일정·리서치가 오늘 노트 §2·§5에 등장하지 않으면 그 자리에서 걸린다.
 
+### ★ 앞 run이 세운 사실을 이어받는다 — `### 출처 재사용 후보` 블록
+
+`stage.py carry`가 `facts.py reuse`(최근 7일 다른 run이 세운 사실 — 사실 id · 기준일 · 출처 등급 · 검증 상태)를 carry 파일
+`### 출처 재사용 후보 (facts.py reuse …)` 블록에 붙인다(같은 파일에 되돌림 대기·늦게 온 주문 근거 감사 알림도 자동으로 붙는다 — 아래 〈감사 소급〉). 3·4단은 여기 있는 사실을 **다시 조사하지 않고** 노트에 `{{F-id}}`로 쓴다 — 같은 열쇠로 `facts.py add`하면 기존 행이 이번 run 번호를 받는다.
+`verified`인 고정 사실은 다시 검증하지 않는다. 기준일이 지난 `dated` 사실(가이던스·컨센서스·목표가·정책 상태)만 새 값을 찾는다.
+
 ### ★ 아쉬움을 매 run 숫자로 센다
 
 ```
@@ -173,7 +189,7 @@ python3 regret.py --market <mkt> --stamp <YYMMDD> --fetch --record \
     --out data/run_evidence/regret_<YYMMDD>_<mkt>.md
 ```
 최근 5거래일 창 안 **저점→고점 최대 상승폭**이 +8% 이상인 종목(유니버스 + 지도가 아는 유니버스 밖 이름 + 시총 상위
-`config/main_names.json`)마다 `축 → 전망 → 논지 → 포지션 → 막은 것` 다섯 칸을 센다. **어느 단에서 끊겼는가**가 고칠 자리다.
+저장소 `dim_company.main_rank` — `main_names.py --show`)마다 `축 → 전망 → 논지 → 포지션 → 막은 것` 다섯 칸을 센다. **어느 단에서 끊겼는가**가 고칠 자리다.
 - **종가 대 종가가 아니다** — 창 안 어느 날 종가에 샀어도 그 뒤 고가까지 몇 %인가를 잰다. 그래서 **올랐다가 되돌린 종목도
   들어온다**(되돌림 열). 되돌린 종목은 진입을 놓친 것이고, 보유 중이었다면 매도도 놓친 것이다.
 - **논지는 그 창에 살아 있던 것만 센다** — 창 시작 전에 닫힌 논지는 `✗ (닫힘)`이다(닫힌 논지를 세면 깔때기가 거짓으로 통과한다).
@@ -191,9 +207,14 @@ python3 regret.py --market <mkt> --stamp <YYMMDD> --fetch --record \
 ### ★ 감사 소급 — 직전 run의 감사가 뒤집은 매수는 이 run이 판다 (2026-10-13)
 
 `stage.py carry`가 `## 감사 소급` 절을 붙인다 — 직전 run의 주문 뒤 감사가 판정표 재채점으로 매수 근거를 뒤집었는데 장이 닫혀 못 판 것
-(`journal/audit_reversals.jsonl` 대기 행). **사람에게 묻지 않고 기계가 판다** — 장중이면 1단 `stops.py --market <mkt> --send`가,
+(저장소 `ex_reversal_event` 대기 행 — `facts.py pending`). **사람에게 묻지 않고 기계가 판다** — 장중이면 1단 `stops.py --market <mkt> --send`가,
 아니면 5단 `risk_guard`가 `source: audit_reversal` SELL로 싣는다(보유 0이면 void). 이 절을 지우거나 판단으로 미루지 않는다.
 `carry` 게이트가 절의 존재를 본다.
+
+**〈낡은 근거〉(FB-261017-9)** — 직전 run이 닫힌 뒤 도착한 감사가 체결 매수의 받치는 사실을 STALE·UNVERIFIABLE로 남겼으면(`stale_support`) 이어받기에
+`### 낡은 근거(stale_support) — 보유 재판정` 표가 붙는다(`facts.carry_note` · '① 감사 결과 미반영'과 같은 자리). 팔린 것이 아니다 — 이 run §6에
+`[보유 재판정] <종목> — 낡은 사실 다시 확인 → 유지 / 정리(facts.py reverse)`를 쓴다. 정상 경로에서는 그 run이 끝낸다(`stage.py close`가 미결을 막는다) —
+이 표는 늦게 온 감사의 안전망이다. 승인 파일(`buy_ref`)·판정 행(`fc_rows`)이 없는 소급 행은 도구가 낸 것이 아니라 void로 닫혀 `## 감사 소급`에 뜨지 않는다.
 
 ### ★ 지지 이탈 — 지지 구간을 기준으로 산 보유가 종가로 구간 아래에 끝났으면 오늘 재판정한다 (2026-10-14)
 
@@ -220,7 +241,7 @@ kind=price · approved의 '목표 여유 없음'·'상승 여지 바닥 미달'�
 
 ### ★ 대기 후보(하루만 제안됨) — 다시 추천하거나 내린다
 
-`stage.py carry`가 `## 대기 후보(하루만 제안됨)` 블록을 붙인다 — 유니버스 대기열(`journal/universe_pending.json`)에서 서로 다른
+`stage.py carry`가 `## 대기 후보(하루만 제안됨)` 블록을 붙인다 — 유니버스 대기열(저장소 `op_pending` — `python3 db.py show op_pending`)에서 서로 다른
 제안일이 하루뿐인 후보다. 편입은 서로 다른 이틀 제안이 있어야 하므로(냉각 — 뉴스레터 인젝션 방어) 다시 언급하지 않으면 영영 묻힌다.
 후보마다 노트 §8에 둘 중 하나를 적는다: **오늘 재료에 근거가 있으면** 시그널 `watchlist_candidates`로 재제안(근거 한 줄),
 아니면 `[내림] <이유>`. **근거 없는 습관적 재제안은 하지 않는다** — 그러면 냉각이 무력해진다(`crosscheck.py check_queue_one_day`가 센다 ·
@@ -236,6 +257,15 @@ python3 scenarios.py act --id SC-260910-14 --n 1 --note "e1 발화·4주 체결"
 실현 판정과 대응 집행은 **다른 run에서 일어난다**(밤에 실현되고 아침에 집행된다).
 그 사이를 잇는 목록이 없으면 **실현은 기록됐는데 대응은 아무도 안 하는** 상태가 조용히 남는다.
 **이 목록이 0이 아니면 오늘 run은 여기서부터 시작한다.**
+
+**★ 대응 완료는 발생 단위다(2026-10-19 · Codex S05).** `judge --realized y`가 그 가지의 열린 발생이 없으면 **새 발생**(발생 n+1 ·
+`--observation '<JSON>'`·`--price-reaction`이 그 발생에 남는다)을 열고, 같은 조건이 이어지는 동안(y·y·y)은 같은 발생이다 — 대응을 두 번
+요구하지 않는다. `--realized n`이 발생을 닫고, 다시 실현되면 발생 2가 열려 **대응을 새로 기다린다**(지난 발생의 완료는 그 발생의 기록으로 남는다).
+`due`는 열린 발생의 미완료 대응만 `☐ SC-… 발생 n(실현 …)`으로 내고, `영향 없음 — …` 대응은 대기가 아니다. 집행했으면
+`act --id SC-… --n <k> --order-ref trades_<st>_<mkt>.json#<n>`으로 주문을 잇는다. `judge --observation`의 관측값이 다른 가지에 해당하면 경고가 나온다 —
+판정한 가지를 다시 본다. `stage.py carry`가 붙이는 `### 가지 완결성`(`scenarios.py check --open`)에 미커버·겹침 사건이 있으면 오늘 시그널에서
+그 사건에 `delayed`·`else` 행을 더하거나 조건을 고친다(`stage3_map.md` 〈gaps〉). *실사례(Codex 재현): 지난번 완료 표시가 남아 재발한 조건의
+대응이 대기에 안 떴다.*
 
 ### 노트 §1-A · §1-B 규격
 
@@ -254,7 +284,7 @@ python3 scenarios.py act --id SC-260910-14 --n 1 --note "e1 발화·4주 체결"
 **직전 run이 같은 시장이면 ③ 대응 매핑만 빼고 나머지는 그대로 쓴다.**
 **회고는 채점표가 아니라 오늘 준비의 첫 입력이므로 §3보다 앞에 온다.**
 세 부분: ① 판단 채점 ② 그 시장 섹터 등락 상·하위 ③ **대응 매핑** —
-`market_map.py bridge --closed <닫힌 시장>`. 짝은 `config/sector_bridge.json`에 고정돼 있다.
+`market_map.py bridge --closed <닫힌 시장>`. 짝은 저장소 `dim_sector_link`(`python3 db.py show dim_sector_link`)에 고정돼 있다.
 **매번 즉흥으로 짝지으면 그날 서사에 맞는 짝만 고르게 된다.**
 매핑은 가설이므로 **적중/역행을 세어 §9에 남기고, 같은 짝이 3회 역행하면 파일에서 내린다.**
 **④ 교차 시장 판단 이어받기(2026-10-12 사용자: "국내장과 미국장은 100% 연계되지는 않지만 독립적이지도 않다")** — ③은 반대
@@ -294,6 +324,7 @@ python3 scenarios.py act --id SC-260910-14 --n 1 --note "e1 발화·4주 체결"
 ## 이 단계의 자가점검 — 이어받기
 
 - [ ] 직전 시그널의 `scenarios` 조건이 실현됐는지 **먼저 판정**했는가
+- [ ] **carry 파일 `### 출처 재사용 후보` 블록을 읽었는가** — 거기 있는 사실을 다시 조사하지 않았는가
 - [ ] **열린 영속 시나리오를 전건 판정했는가** — `scenarios.py list --open`에 남은 것마다
       `judge`로 실현·대응을 기록했는가. **미판정으로 넘긴 것 0** (판정 안 하면 회피가 안 보인다)
       — `--needs-check` 대상은 직접 판정, 나머지는 `--carry-forward`로 이월 기록. 미실현 행에 `next_check`를 달았는가

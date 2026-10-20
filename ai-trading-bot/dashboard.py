@@ -59,19 +59,6 @@ def _read(path: Path, default=None):
         return default
 
 
-def _read_jsonl(path: Path) -> list:
-    if not path.exists():
-        return []
-    rows = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return rows
-
-
 def latest_per_day(rows: list) -> list:
     """(날짜, 시장)마다 마지막 행만. journal.latest_per_day와 같은 규칙이다."""
     keep = {}
@@ -99,15 +86,17 @@ def pct(v, digits=2) -> str:
 def collect() -> dict:
     # equity_curve는 append-only라 같은 날 행이 여러 개 있을 수 있다(하루 두 슬롯·재시도).
     # 그대로 그리면 추이에 같은 날 점이 겹치고 누적 수치가 부풀어 보인다 → 날짜별 마지막만.
-    # ★ 지금 계좌 계열의 기록만(2026-10-15 · 실계좌 전환) — 모의 자산·거래가 실계좌 화면에 섞이지 않게. 표시 없는 옛 기록은 모의.
+    # ★ 지금 계좌 계열의 기록만(2026-10-15 · 실계좌 전환 준비) — 모의 자산·거래가 실계좌 화면에 섞이지 않게. 표시 없는 옛 기록은 모의.
+    # 자산 곡선·run 기록·벤치마크 기준점은 저장소(ex_equity_point · op_run_log · op_benchmark_anchor)에서 읽는다(읽기 전용).
+    import db
     from kis_client import acct_family, same_account
     fam = acct_family()
-    equity = latest_per_day([r for r in _read_jsonl(JOURNAL_DIR / "equity_curve.jsonl") if same_account(r, fam)])
-    runs = _read_jsonl(JOURNAL_DIR / "run_log.jsonl")
+    equity = latest_per_day([r for r in db.equity_rows() if same_account(r, fam)])
+    runs = db.log_rows("run_log")
     limits = _read(CONFIG_DIR / "limits.json", {}) or {}
-    bench = _read(CONFIG_DIR / "benchmark.json", {}) or {}
-    if fam != "paper":                       # 실계좌 기준점 키는 `KR:real`·`US:real`(journal.daily)
-        bench = {k.split(":")[0]: v for k, v in bench.items() if k.endswith(":" + fam)}
+    bench = db.benchmark_get() or {}
+    if fam != "paper":                       # 실계좌 기준점 키는 `KR:real`·`US:real`(journal.daily) — 저장소 키는 대문자로 올 수 있다
+        bench = {k.split(":")[0]: v for k, v in bench.items() if k.lower().endswith(":" + fam)}
 
     trades = []
     for p in sorted(JOURNAL_DIR.glob("trades_*.json")):
@@ -149,11 +138,14 @@ def discipline_stats(d: dict) -> dict:
     """성공 지표 3종. 수익률이 아니라 이게 이 시스템의 채점표다."""
     trades = d["trades"]
     # status는 전송 상태다 — 9/15 세션이 손수 FILLED로 고쳐 쓴 행도 '나간 것'으로 센다(fill.py 규칙).
-    sent = [t for t in trades if t.get("status") not in ("FAILED", "UNKNOWN", None)]
-    failed = [t for t in trades if t.get("status") == "FAILED"]
-    unknown = [t for t in trades if t.get("status") == "UNKNOWN"]
+    # 2026-10-19 상태 어휘: 접수 0 = REJECTED·UNSENT·옛 FAILED · 접수 불명 = UNKNOWN·PENDING(fill이 당일 목록으로 푼다)
+    zero = ("FAILED", "REJECTED", "UNSENT")
+    unres = ("UNKNOWN", "PENDING")
+    sent = [t for t in trades if t.get("status") not in zero + unres + (None,)]
+    failed = [t for t in trades if t.get("status") in zero]
+    unknown = [t for t in trades if t.get("status") in unres]
     disc = [t for t in trades if t.get("source") == "discipline"]
-    disc_done = [t for t in disc if t.get("status") not in ("FAILED", "UNKNOWN", None)]
+    disc_done = [t for t in disc if t.get("status") not in zero + unres + (None,)]
 
     runs = d["runs"]
     real_runs = [r for r in runs if not str(r.get("outcome", "")).startswith("skipped")

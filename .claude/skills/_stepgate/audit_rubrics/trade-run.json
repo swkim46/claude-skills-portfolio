@@ -317,7 +317,7 @@
       },
       {
         "id": "queue_from_memory",
-        "ask": "§8의 유니버스 편입 대기열 서술이 실제 대기열 파일(journal/universe_pending.json)과 어긋나는가 — 기억으로 쓰면 틀린다",
+        "ask": "§8의 유니버스 편입 대기열 서술이 실제 대기열(저장소 op_pending — python3 db.py show op_pending)과 어긋나는가 — 기억으로 쓰면 틀린다",
         "severity": "high",
         "cite_or_pass": true
       },
@@ -540,7 +540,7 @@
         "id": "ad_hoc_bridge",
         "severity": "major",
         "cite_or_pass": true,
-        "ask": "섹터 대응 짝 중 config/sector_bridge.json에 없는 것을 그날 만들어 쓴 곳이 있는가"
+        "ask": "섹터 대응 짝 중 저장소 섹터 짝(dim_sector_link — python3 db.py show dim_sector_link)에 없는 것을 그날 만들어 쓴 곳이 있는가"
       },
       {
         "id": "result_not_reason",

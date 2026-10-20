@@ -20,7 +20,9 @@
     (종료코드 0 = 전건 종결 · 3 = 미확정 잔존 → 다시 부르면 파일에서 이어간다)
 """
 import argparse
+import contextlib
 import json
+import os
 import re
 import sys
 import time
@@ -29,9 +31,10 @@ from pathlib import Path
 
 from kis_client import (KisClient, KisError, market_session, order_excd, quote_excd, snap_kr_price,
                         EXCD_ORDER, buy_qty_within, us_daytime_session, next_trading_day, DAYTIME_QUOTE_EXCD)
+import db
 
 HERE = Path(__file__).parent
-JOURNAL_DIR = HERE / "journal"
+JOURNAL_DIR = HERE / "journal"          # 그날 거래 기록(trades_*.json)이 있는 곳 — 논지·사고·감사 소급은 저장소(db.py)에 쓴다
 LIMITS_PATH = HERE / "config" / "limits.json"
 KST = timezone(timedelta(hours=9))
 
@@ -63,10 +66,131 @@ def _parse_ts(s: str) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=KST)
 
 
+# ★ 하루 기록 행의 `status` = 전송 상태(2026-10-19 · Codex R01·R02). 종결 상태는 `fill.verdict`다.
+#   PENDING  — 보내기 **전에** 적은 의도. 결과가 아직 안 적혔다(그 사이 프로세스가 죽었을 수 있다) → 접수됐을 수 있다.
+#   SENT     — 증권사가 접수했다(주문번호 있음).
+#   UNKNOWN  — 보낸 뒤 응답을 잃었다(타임아웃·끊김·주문번호 없는 성공) → 접수됐을 수 있다.
+#   REJECTED — 증권사가 분명히 거절했다(접수 0) · UNSENT — 우리가 보내지 않았다(가격 이탈·상한·수량 0·검증 오류).
+#   FAILED   — 옛 기록의 값(REJECTED·UNSENT를 가르지 않던 시절). 접수 0으로 읽는다.
+# PENDING·UNKNOWN은 **해소 전까지 같은 주문도, 같은 종목·방향도 다시 보내지 않는다** — `resolve_pending`이 당일 주문 목록으로 푼다.
+UNSENT_STATES = ("FAILED", "REJECTED", "UNSENT")      # 접수된 것이 없다 — 같은 승인으로 다시 보낼 수 있다
+UNRESOLVED = ("PENDING", "UNKNOWN")                   # 접수됐을 수 있다 — 해소 전 재전송 금지
+
+
+class DayLocked(RuntimeError):
+    """그날 거래 기록을 다른 프로세스가 쓰고 있다 — 끝난 뒤 다시(종료코드 5). 사람 결정이 아니라 재시도다."""
+
+
+class DayRecordCorrupt(RuntimeError):
+    """그날 거래 기록을 읽을 수 없다 — 빈 기록으로 보고 다시 보내면 이미 나간 주문이 두 번 나간다. 멈춘다."""
+
+
+_HELD_LOCKS: dict = {}
+# 잠금 파일이 이보다 오래됐으면 남은 찌꺼기로 본다 — 거래 기록은 세션 하루치이고 그것을 하루 넘게 쓰는 프로세스는 없다.
+DAY_LOCK_STALE_SEC = 24 * 3600
+
+
+def _lock_info(lp: Path) -> dict:
+    try:
+        return json.loads(lp.read_text(encoding="utf-8")) or {}
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+
+
+def _pid_alive(pid) -> bool:
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+@contextlib.contextmanager
+def day_lock(path: Path, cmd: str = ""):
+    """그날 거래 기록 하나에 **한 번에 한 쓰기만**(2026-10-19 · Codex R02). `journal/.trades_<st>_<mk>.lock`을
+    O_CREAT|O_EXCL로 잡는다. 같은 프로세스 안에서는 다시 잡을 수 있다(execute --send가 안에서 fill.confirm을 부른다).
+    주인 프로세스가 죽었거나 하루가 넘은 잠금은 찌꺼기로 보고 치운다. 다른 살아 있는 쓰기가 있으면 `DayLocked`."""
+    path = Path(path)
+    lp = path.with_name(f".{path.stem}.lock")
+    key = str(lp.absolute())
+    if _HELD_LOCKS.get(key):
+        _HELD_LOCKS[key] += 1
+        try:
+            yield lp
+        finally:
+            _HELD_LOCKS[key] -= 1
+        return
+    lp.parent.mkdir(parents=True, exist_ok=True)
+    fd = None
+    for _ in range(3):
+        try:
+            fd = os.open(str(lp), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            break
+        except FileExistsError:
+            info = _lock_info(lp)
+            try:
+                age = time.time() - lp.stat().st_mtime
+            except OSError:
+                continue
+            mine_dead = int(info.get("pid") or 0) == os.getpid()           # 이 프로세스가 전에 잡고 못 푼 찌꺼기
+            if mine_dead or not _pid_alive(info.get("pid")) or age > DAY_LOCK_STALE_SEC:
+                with contextlib.suppress(FileNotFoundError):
+                    lp.unlink()
+                continue
+            raise DayLocked(f"다른 쓰기(pid {info.get('pid')} · {str(info.get('cmd') or '')[:80]}) 진행 중 — "
+                            f"끝난 뒤 다시 돌려라({lp.name})")
+    if fd is None:
+        raise DayLocked(f"잠금을 잡지 못했다({lp.name}) — 잠시 뒤 다시")
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump({"pid": os.getpid(), "ts": datetime.now(KST).isoformat(),
+                   "cmd": (cmd or " ".join(sys.argv))[:200]}, fh, ensure_ascii=False)
+    _HELD_LOCKS[key] = 1
+    try:
+        yield lp
+    finally:
+        _HELD_LOCKS.pop(key, None)
+        with contextlib.suppress(FileNotFoundError):
+            lp.unlink()
+
+
+def read_day(path: Path, strict: bool = True) -> dict:
+    """그날 거래 기록. 없으면 {}. **깨졌으면 `DayRecordCorrupt`**(strict) — 빈 기록으로 읽으면 중복 검사가 아무것도
+    못 보고 이미 나간 주문을 다시 보낸다(2026-10-19 · Codex R02). 화면 표시용만 strict=False로 {}를 받는다."""
+    path = Path(path)
+    if not path.exists():
+        return {}
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        if strict:
+            raise DayRecordCorrupt(f"그날 거래 기록을 읽을 수 없다 — {path} ({type(e).__name__}: {str(e)[:120]}). "
+                                   f"빈 기록으로 보고 다시 보내지 않는다 — 파일을 확인·복구한 뒤 다시") from e
+        return {}
+    if not isinstance(d, dict):
+        if strict:
+            raise DayRecordCorrupt(f"그날 거래 기록 형식이 아니다 — {path} (최상위 {type(d).__name__})")
+        return {}
+    return d
+
+
+def was_sent(t: dict) -> bool:
+    """증권사에 걸렸을 수 있는 행인가 — SENT·UNKNOWN·PENDING·(손수 고친) FILLED. 접수 0(거절·미전송·옛 FAILED)과 빈 상태는 아니다."""
+    st = t.get("status")
+    return st is not None and st not in UNSENT_STATES
+
+
 def is_open_trade(t: dict) -> bool:
-    """확정이 필요한 건인가 — 전송됐고(SENT/UNKNOWN) 아직 종결 판정이 없는 것."""
-    # status는 전송 상태다 — FAILED만 '나가지 않은 것'이다(손수 FILLED로 고쳐 쓴 행도 나간 것).
-    if t.get("status") in ("FAILED", None):
+    """확정이 필요한 건인가 — 전송됐고(SENT/UNKNOWN/PENDING) 아직 종결 판정이 없는 것."""
+    # status는 전송 상태다 — 접수 0(거절·미전송·옛 FAILED)만 '나가지 않은 것'이다(손수 FILLED로 고쳐 쓴 행도 나간 것).
+    if not was_sent(t):
         return False
     fl = t.get("fill") or {}
     # ★ execute.py의 **즉시 판정** PARTIAL(잔고 한 번 대조)은 종결이 아니다 — 잔량이 살아 있다. fill.py가 `_finish`로
@@ -131,10 +255,14 @@ def _live_price(client, t: dict, excd: str):
 
 
 def chase_price(side: str, market: str, live: float, cur_limit: float,
-                approved_px: float, max_pct: float):
-    """정정가. 불리한 쪽으로만 옮기고 승인가 ±max_pct 안에 가둔다. 바뀌지 않으면 None."""
+                approved_px: float, max_pct: float, floor: bool = True):
+    """정정가. 불리한 쪽으로만 옮기고 승인가 ±max_pct 안에 가둔다. 바뀌지 않으면 None.
+    `floor=False` — **위험 축소 매도**(손절·추적·논지 무효·소급 · `risk_reducing`)는 한도 없이 시세를 따라간다
+    (2026-10-19 사용자 결정 · Codex R08). 한도는 추격을 막는 장치인데 손절의 목적은 그 반대다. 횟수·대기 제한은 그대로."""
     if not live or live <= 0:
         return None
+    if not floor:
+        max_pct = float("inf")
     if side == "BUY":
         bound = approved_px * (1 + max_pct / 100)
         px = min(max(live, cur_limit), bound)
@@ -187,10 +315,13 @@ def _place_new(client, t: dict, excd: str, qty: int, price: float) -> dict:
                                  limit_price=float(price), excd=excd)
 
 
-def reorder_price(side: str, market: str, live: float, approved_px: float, max_pct: float):
-    """재발주 가격 — 최신가. 승인가 ±max_pct 밖이면 None(가격 이탈 — 쫓지 않는다)."""
+def reorder_price(side: str, market: str, live: float, approved_px: float, max_pct: float, floor: bool = True):
+    """재발주 가격 — 최신가. 승인가 ±max_pct 밖이면 None(가격 이탈 — 쫓지 않는다).
+    `floor=False`(위험 축소 매도 · 2026-10-19 사용자 결정)면 한도 없이 최신가."""
     if not live or live <= 0 or approved_px <= 0:
         return None
+    if not floor:
+        return float(snap_kr_price(live, side)) if market == "KR" else round(live, 2)
     if side == "BUY":
         bound = approved_px * (1 + max_pct / 100)
         if live > bound + 1e-9:
@@ -205,12 +336,16 @@ def reorder_price(side: str, market: str, live: float, approved_px: float, max_p
 
 
 def _try_reorder(client, t: dict, cfg: dict, now: datetime, excd: str, approved_qty: int,
-                 approved_px: float, approved_amt: float, filled: int, filled_amt: float, log) -> str:
+                 approved_px: float, approved_amt: float, filled: int, filled_amt: float, log, persist=None) -> str:
     """취소가 **확정된** 자리에서 1회 재발주를 시도한다. 반환: "sent" · "skip:<사유>".
 
     이중 매수 방지 — ① 호출 조건이 '잔량 0 + 취소 표시'(살아 있는 주문 없음) ② 수량은
-    `approved_qty − filled`와 승인 금액 잔여 안 ③ 횟수 `fill_reorder_max` ④ 장중만.
+    `approved_qty − filled`와 승인 금액 잔여 안 ③ 횟수 `fill_reorder_max` ④ 장중만
+    ⑤ ★ 보내기 **전에** 재발주 의도(번호 없는 링크)를 기록에 넣고 `persist()`로 디스크에 쓴다(2026-10-19 · Codex W01).
+       접수 직후 프로세스가 죽어도 다음 실행은 그 링크를 보고 다시 보내지 않고 당일 주문 목록으로 붙이거나(접수) 두 번 없음을
+       확인한 뒤 뺀다(미접수 · `_resolve_links`). 분명한 거절이면 의도를 거둔다.
     """
+    persist = persist or (lambda: None)
     f = t.setdefault("fill", {})
     reorders = f.setdefault("reorders", [])
     max_n = int(cfg.get("fill_reorder_max", 0) or 0)
@@ -222,29 +357,61 @@ def _try_reorder(client, t: dict, cfg: dict, now: datetime, excd: str, approved_
     if now > sess["close"]:
         return "skip:장 마감"
     live = _live_price(client, t, excd)
-    px = reorder_price(side, market, live, approved_px, float(cfg.get("fill_reorder_max_pct", 1.0)))
+    px = reorder_price(side, market, live, approved_px, float(cfg.get("fill_reorder_max_pct", 1.0)),
+                       floor=not t.get("risk_reducing"))
     if px is None:
         return ("skip:가격 이탈 — 시세 %s, 승인가 %.2f ±%.1f%% 밖 — 재발주 안 함(다음 run 재판단)"
                 % (f"{live:,.2f}" if live else "미확인", approved_px, float(cfg.get("fill_reorder_max_pct", 1.0))))
     qty = chase_qty(side, approved_qty - filled, filled_amt, approved_amt, px)
     if qty <= 0:
         return "skip:승인 금액 안에서 0주"
-    try:
-        res = _place_new(client, t, excd, qty, px)
-    except (KisError, ValueError) as e:
-        f["last_error"] = f"재발주 실패: {e}"[:200]
-        return f"skip:재발주 실패 {e}"[:200]
-    entry = {"ts": now.isoformat(), "order_no": res.get("order_no", ""), "orgno": res.get("orgno", ""),
-             "qty": qty, "price": px, "live": live,
-             "why": f"취소 확정 뒤 재발주 {len(reorders) + 1}/{max_n} — " + (f.get("cancel_why") or "")}
+    # ★ 보내기 전 기록(W01) — 재발주 이력·체인에 번호 없는 링크를 넣고 디스크에 쓴 뒤에 보낸다. 새 주문의 대기는 여기서 다시
+    #   센다. 취소 표시는 옛 주문의 것이므로 지운다(분명한 거절이면 아래에서 되돌린다).
+    ts = now.isoformat()
+    cancel_why = f.get("cancel_why") or ""
+    entry = {"ts": ts, "order_no": "", "pending": True, "qty": qty, "price": px, "live": live,
+             "why": f"취소 확정 뒤 재발주 {len(reorders) + 1}/{max_n} — " + cancel_why}
+    link = {"order_no": "", "orgno": "", "pending": True, "qty": qty, "price": px, "ts": ts, "why": "재발주"}
+    saved = {k: f[k] for k in ("cancel_sent", "cancel_why", "cancel_order_no", "reorder_started") if k in f}
     reorders.append(entry)
-    _chain(t).append({"order_no": res.get("order_no", ""), "orgno": res.get("orgno", ""),
-                      "qty": qty, "price": px, "ts": now.isoformat(), "why": "재발주"})
-    # 새 주문의 대기는 여기서 다시 센다. 취소 표시는 옛 주문의 것이므로 지운다.
-    f["reorder_started"] = now.isoformat()
+    _chain(t).append(link)
+    f["reorder_started"] = ts
     for k in ("cancel_sent", "cancel_why", "cancel_order_no"):
         f.pop(k, None)
-    log(f"  ↺ 재발주 {t['ticker']} x{qty} @ {px:,.2f} (시세 {live:,.2f}) → 주문번호 {res.get('order_no')}")
+    persist()
+    try:
+        res = _place_new(client, t, excd, qty, px)
+    except Exception as e:                              # noqa: BLE001 — 아래에서 접수 가능성으로 가른다
+        kind = getattr(e, "kind", None) if isinstance(e, KisError) else ("rejected" if isinstance(e, ValueError) else "unknown")
+        f["last_error"] = f"재발주 실패({kind}): {e}"[:200]
+        if kind != "unknown":
+            # 분명히 접수되지 않았다 — 의도를 거두고 원래 상태(취소 확정)로 되돌린다
+            reorders.remove(entry)
+            _chain(t).remove(link)
+            f.pop("reorder_started", None)
+            f.update(saved)
+            persist()
+            return f"skip:재발주 실패 {e}"[:200]
+        # ★ 응답을 잃은 재발주 — 증권사가 받았을 수 있다. 번호 없는 링크 그대로 두고 다음 폴링이 당일 주문 목록으로
+        #   붙이거나(접수) 두 번 없음을 확인하면 뺀다(미접수 · 2026-10-19 · R01).
+        entry["why"] = f"취소 확정 뒤 재발주 {len(reorders)}/{max_n} — 응답 유실(접수 확인 중)"
+        persist()
+        log(f"  ? 재발주 응답 유실 {t['ticker']} x{qty} @ {px:,.2f} — 다시 보내지 않고 당일 목록으로 확인한다")
+        return "sent"
+    no = str(res.get("order_no") or "")
+    if not _norm_no(no):
+        # 성공 응답인데 주문번호가 없다 — 접수됐을 수 있다. 번호 없는 링크로 두고 당일 목록으로 확인한다(다시 보내지 않는다).
+        entry["why"] = f"취소 확정 뒤 재발주 {len(reorders)}/{max_n} — 주문번호 없는 성공 응답(접수 확인 중)"
+        f["last_error"] = f"재발주 응답에 주문번호 없음: {str(res.get('raw') or res)[:120]}"
+        persist()
+        log(f"  ? 재발주 {t['ticker']} — 응답에 주문번호가 없다 · 당일 목록으로 확인한다")
+        return "sent"
+    entry.update({"order_no": no, "orgno": res.get("orgno", "")})
+    entry.pop("pending", None)
+    link.update({"order_no": no, "orgno": res.get("orgno", "")})
+    link.pop("pending", None)
+    persist()
+    log(f"  ↺ 재발주 {t['ticker']} x{qty} @ {px:,.2f} (시세 {live:,.2f}) → 주문번호 {no}")
     return "sent"
 
 
@@ -252,7 +419,7 @@ def _finish(t: dict, verdict: str, filled: int, avg: float, now: datetime, sourc
     f = t.setdefault("fill", {})
     f.update({"verdict": verdict, "filled_qty": filled, "avg_price": avg,
               "confirmed_at": now.isoformat(), "source": source})
-    # ★ 결제일·결제일 환율(2026-10-12 실계좌 전환) — 해외주식 양도소득세는 결제일 기준환율로 원화 환산한다.
+    # ★ 결제일·결제일 환율(2026-10-12 실계좌 전환 계획) — 해외주식 양도소득세는 결제일 기준환율로 원화 환산한다.
     #   환율은 결제일이 지나야 정해지므로 여기서는 날짜만 적고, `tax_ledger.py --fill-fx`가 결제일 뒤 채운다.
     if verdict in ("FILLED", "PARTIAL") and filled:
         try:
@@ -269,7 +436,7 @@ def _finish(t: dict, verdict: str, filled: int, avg: float, now: datetime, sourc
 
 def summarize(record: dict, now: datetime) -> dict:
     trades = record.get("trades") or []
-    sent = [t for t in trades if t.get("status") not in ("FAILED", None)]
+    sent = [t for t in trades if was_sent(t)]
     verdicts = [(t.get("fill") or {}).get("verdict") for t in sent]
     summ = {
         "at": now.isoformat(),
@@ -278,7 +445,7 @@ def summarize(record: dict, now: datetime) -> dict:
         "partial": verdicts.count("PARTIAL"),
         "cancelled": verdicts.count("CANCELLED"),
         "expired": verdicts.count("EXPIRED"),
-        # 브로커 거부(status FAILED)는 애초에 걸린 주문이 없어 여기서 세지 않고 fill_summary가 센다.
+        # 접수 0(status REJECTED·UNSENT·옛 FAILED)은 애초에 걸린 주문이 없어 여기서 세지 않고 fill_summary가 센다.
         "rejected": verdicts.count("REJECTED"),
         "unknown": sum(1 for v in verdicts if v not in TERMINAL),
     }
@@ -292,7 +459,34 @@ def confirm(path: Path, client=None, cfg: dict = None, now_fn=None, sleep_fn=Non
     now_fn = now_fn or (lambda: datetime.now(KST))
     sleep_fn = sleep_fn or time.sleep
     cfg = cfg or fill_cfg(load_limits())
-    record = json.loads(path.read_text(encoding="utf-8"))
+    sid = _stage_start_try(Path(path))
+    rc = None
+    try:
+        with day_lock(Path(path), "fill.confirm"):
+            rc = _confirm_locked(Path(path), client, cfg, now_fn, sleep_fn, max_sec, chase, note, quiet)
+            return rc
+    finally:
+        if sid:      # 단계 결과(v4 · U02) — 전건 종결이면 ok(ex_run.filled_at) · 미확정이 남으면 unknown · 예외면 failed
+            try:
+                db.stage_finish(sid, "ok" if rc == 0 else ("unknown" if rc == 3 else "failed"), rc, (), None,
+                                "" if rc == 0 else ("미확정 잔존" if rc == 3 else "확정 중 중단"))
+            except Exception as e:                   # noqa: BLE001 — 기록 실패가 체결 확정을 막지 않는다
+                print(f"  (단계 기록 실패: {type(e).__name__}: {str(e)[:80]})", file=sys.stderr)
+
+
+def _stage_start_try(path: Path):
+    m = re.match(r"trades_(\d{6})_(kr|us)\.json$", path.name)
+    if not m:
+        return None
+    try:
+        return db.stage_start(m.group(1), m.group(2), "fill")
+    except Exception as e:                           # noqa: BLE001
+        print(f"  (단계 기록 실패: {type(e).__name__}: {str(e)[:80]})", file=sys.stderr)
+        return None
+
+
+def _confirm_locked(path: Path, client, cfg: dict, now_fn, sleep_fn, max_sec: int, chase: bool, note, quiet: bool) -> int:
+    record = read_day(path, strict=True)
     trades = record.get("trades") or []
     todo = [t for t in trades if is_open_trade(t)]
     log = (lambda *a, **k: None) if quiet else (lambda *a, **k: print(*a, **k))
@@ -308,14 +502,24 @@ def confirm(path: Path, client=None, cfg: dict = None, now_fn=None, sleep_fn=Non
             f"정정 {cfg['fill_chase_max']}회/±{cfg['fill_chase_max_pct']}% · "
             f"취소 확정 뒤 재발주 {cfg.get('fill_reorder_max', 0)}회/±{cfg.get('fill_reorder_max_pct', 1.0)}%")
         t0 = now_fn()
+
+        def persist():
+            # ★ 외부 요청(정정·재발주) 전에 의도를, 취소 뒤에 결과를 디스크에 쓴다(W01) — 폴링 끝까지 기다리면 그사이 죽을 때 잃는다
+            db.write_json_atomic(path, record)
         while True:
             now = now_fn()
             pending = 0
+            # ★ 접수 불명(UNKNOWN·PENDING)을 먼저 푼다 — 다시 보내지 않고 당일 주문 목록·잔고로(2026-10-19 · R01·R02).
+            try:
+                resolve_pending(client, record, now, log)
+            except Exception as e:                       # noqa: BLE001 — 해소 실패는 다음 폴링에 다시
+                log(f"  ★ 접수 불명 해소 예외 — {type(e).__name__}: {str(e)[:100]} (다음 폴링에 계속)", file=sys.stderr)
+            claimed = claimed_order_nos(record)
             for t in todo:
                 if not is_open_trade(t):
                     continue
                 try:
-                    _step(client, t, cfg, now, chase, log)
+                    _step(client, t, cfg, now, chase, log, claimed, persist)
                 except Exception as e:                   # noqa: BLE001 — 한 건의 예외가 다른 건의 확정을 막지 않는다
                     t.setdefault("fill", {})["last_error"] = f"{type(e).__name__}: {str(e)[:160]}"
                     log(f"  ★ {t.get('ticker')} 폴링 예외 — {type(e).__name__}: {str(e)[:100]} (다음 폴링에 계속)", file=sys.stderr)
@@ -323,8 +527,7 @@ def confirm(path: Path, client=None, cfg: dict = None, now_fn=None, sleep_fn=Non
                     pending += 1
                 else:
                     _close_theses_after_exit(t, now, log)
-            path.write_text(json.dumps(_with_summary(record, now_fn(), path), ensure_ascii=False, indent=2),
-                            encoding="utf-8")
+            db.write_json_atomic(path, _with_summary(record, now_fn(), path))
             if not pending:
                 break
             if (now_fn() - t0).total_seconds() + cfg["fill_poll_sec"] > max_sec:
@@ -339,17 +542,17 @@ def confirm(path: Path, client=None, cfg: dict = None, now_fn=None, sleep_fn=Non
         if not is_open_trade(t):
             _close_theses_after_exit(t, now, log)
     record = _with_summary(record, now, path)
-    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    db.write_json_atomic(path, record)
     summ = record["fill_confirmed"]
     if note:
         write_note_line(Path(note), summ)
     log(_line(summ))
     if summ.get("overfill"):
         log(f"★★ 승인 초과 {summ['overfill']}건 — 사고 기록 {', '.join(summ.get('incidents') or []) or '(기록 실패)'} "
-            f"(journal/incidents.jsonl). 복구 주문을 내지 말 것.", file=sys.stderr)
+            f"(저장소 op_incident). 복구 주문을 내지 말 것.", file=sys.stderr)
     for t in trades:
         f = t.get("fill") or {}
-        if t.get("status") not in ("FAILED", None):
+        if was_sent(t):
             log(f"  {f.get('verdict', '미확정'):9} {t.get('action')} {t.get('ticker')} "
                 f"{t.get('name', '')} 요청 {t.get('qty')} → 체결 {f.get('filled_qty', abs(f.get('delta') or 0) or '?')}"
                 + (f" @ {f.get('avg_price'):,.2f}" if f.get("avg_price") else "")
@@ -380,30 +583,31 @@ def _close_theses_after_exit(t: dict, now: datetime, log) -> None:
 
     취소·만료·거부는 찍지 않는다 — 목표를 **못 가져간** 것이라 다리는 살아 있어야 한다.
     손절이 나갔는데 논지가 held로 남으면 다음 run이 없는 보유의 매도 조건을 계속 본다.
+
+    ★ 저장소(2026-10-17): 논지는 `db.thesis_update`로 **한 논지씩 한 트랜잭션 안에서** 읽고-고치고-쓴다. 예전에는
+    theses.json 통째를 읽고 다시 써서, 같은 run의 `theses.py set-status`·`execute.refresh_thesis_unsynced`가 그 사이에
+    고친 판을 덮어쓸 수 있었다. 고칠 것이 있는 논지만 연다(읽기 전용 훑기 → 그 논지만 갱신 · 갱신 안에서 같은 판정을 다시 한다).
     """
     f = t.get("fill") or {}
     if t.get("action") != "SELL" or f.get("verdict") not in ("FILLED", "PARTIAL"):
         return
     if t.get("source") == "audit_reversal":
-        # 감사 소급 매도(2026-10-13) — 체결 확정을 원장에 적는다(전량 filled · 부분이면 잔량 pending). 멱등(주문번호로 한 번만).
+        # 감사 소급 매도(2026-10-13) — 체결 확정을 저장소에 적는다(전량 filled · 부분이면 잔량 pending). 멱등(주문번호로 한 번만).
         try:
-            import reversals as rv
-            rv.settle_trade(t, JOURNAL_DIR, log=log)
-        except Exception as e:                   # noqa: BLE001 — 원장 갱신 실패가 체결 확정을 막지 않게
-            log(f"  ★ 감사 소급 원장 갱신 실패 — {type(e).__name__}: {e}", file=sys.stderr)
-    store = JOURNAL_DIR / "theses.json"
-    if not store.exists():
-        return
-    try:
-        data = json.loads(store.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
-    changed, marked = 0, []
+            _settle_reversal(t, log)
+        except db.TestGuard:                     # 테스트가 임시 저장소 없이 왔다 — 삼키지 않는다
+            raise
+        except Exception as e:                   # noqa: BLE001 — 기록 갱신 실패가 체결 확정을 막지 않게
+            log(f"  ★ 감사 소급 기록 갱신 실패 — {type(e).__name__}: {e}", file=sys.stderr)
     tid, gid = _leg_of(t)
     qty = f.get("filled_qty") or abs(int(f.get("delta") or 0)) or t.get("qty")
     px = f.get("avg_price") or t.get("price")
     order_no = (t.get("result") or {}).get("order_no") or ""
-    for th in data.get("theses") or []:
+    full = bool(t.get("full_exit")) and f.get("verdict") == "FILLED"
+
+    def _apply(th: dict, marked: list) -> int:
+        """논지 하나에 이 체결을 반영한다(제자리 수정) — 바꾼 칸 수."""
+        changed = 0
         same = (th.get("ticker") == t.get("ticker")
                 and str(th.get("market", "")).upper() == str(t.get("market", "")).upper())
         # ① 다리 소진 — 규율·회전 매도가 집행한 트리거를 찍는다(논지 id가 있으면 그것으로, 없으면 종목·시장으로)
@@ -419,20 +623,70 @@ def _close_theses_after_exit(t: dict, now: datetime, log) -> None:
                 marked.append(f"{th.get('id')}.{gid}")
                 changed += 1
         # ② 전량 매도면 논지를 닫는다(부분이면 held 유지)
-        if (same and th.get("status") == "held"
-                and t.get("full_exit") and f.get("verdict") == "FILLED"):
+        if same and th.get("status") == "held" and full:
             th["status"] = "closed"
             th.setdefault("history", []).append(
                 {"at": now.isoformat(), "status": "closed",
                  "note": f"{t.get('source')} 매도 전량 체결 {f.get('filled_qty')}주 @{f.get('avg_price')}"
                          + (f" — {t.get('discipline_reasons')[0]}" if t.get("discipline_reasons") else "")})
             changed += 1
+        return changed
+
+    changed, marked = 0, []
+    try:
+        for th in db.theses_all():
+            if not th.get("id") or not _apply(json.loads(json.dumps(th)), []):
+                continue                             # 고칠 것이 없는 논지는 열지 않는다
+            got = {"n": 0, "marked": []}
+
+            def fn(cur, got=got):
+                got["marked"] = []                   # 갱신 안에서 다시 판정한다(그 사이 다른 쓰기가 찍었으면 0)
+                got["n"] = _apply(cur, got["marked"])
+                return cur
+            db.thesis_update(th["id"], fn)
+            changed += got["n"]
+            marked += got["marked"]
+    except db.TestGuard:                             # 테스트가 임시 저장소 없이 왔다 — 삼키지 않는다
+        raise
+    except Exception as e:                           # noqa: BLE001 — 논지 갱신 실패가 체결 기록 쓰기를 막지 않게(다음 확정 호출이 다시 한다 · 멱등)
+        log(f"  ★ 논지 원장 갱신 실패 — {type(e).__name__}: {str(e)[:160]} · 체결 기록은 그대로 쓴다. "
+            f"`python3 fill.py <거래 기록>`을 다시 돌리면 다리 소진·논지 종료를 다시 시도한다", file=sys.stderr)
     if changed:
-        store.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         if marked:
             log(f"  다리 소진 표시 {', '.join(marked)} — 같은 다리는 다시 발화하지 않는다")
-        if t.get("full_exit") and f.get("verdict") == "FILLED":
+        if full:
             log(f"  논지 closed — {t.get('ticker')} 전량 매도 체결")
+
+
+def _settle_reversal(t: dict, log=print) -> None:
+    """체결이 확정된 감사 소급 되돌림 매도로 소급 기록을 닫는다(저장소 `ex_reversal_event`에 한 행 덧붙임 · 멱등).
+    전량 → filled · 부분 → 남은 수량으로 pending · 취소·만료·거부 → 그대로 pending(다음 run이 다시 보낸다).
+    옛 `reversals.settle_trade`와 같은 규칙이고, 읽기와 덧붙이기를 한 트랜잭션으로 묶는다(같은 주문을 두 번 세지 않게)."""
+    if t.get("source") != "audit_reversal" or t.get("action") != "SELL":
+        return
+    f = t.get("fill") or {}
+    v = f.get("verdict")
+    if v not in ("FILLED", "PARTIAL"):
+        return
+    import risk_guard as rg                      # 대기 행 규칙(id 있는 pending만)을 risk_guard와 같이 쓴다
+    sold = int(f.get("filled_qty") or abs(int(f.get("delta") or 0)) or (t.get("qty") if v == "FILLED" else 0) or 0)
+    mk = str(t.get("market", "")).upper()
+    order_no = (t.get("result") or {}).get("order_no") or ""
+    with db.tx():
+        for r in rg.reversals_pending(mk):
+            if r.get("ticker") != t.get("ticker"):
+                continue
+            if order_no and order_no in (r.get("settled_orders") or []):
+                return
+            left = max(0, int(r.get("qty") or 0) - sold)
+            done = (r.get("settled_orders") or []) + ([order_no] if order_no else [])
+            if left == 0 or v == "FILLED":
+                db.reversal_mark(r["id"], "filled", sold_qty=int(r.get("sold_qty") or 0) + sold, qty=0, settled_orders=done)
+                log(f"  · 감사 소급 {r['id']} {t.get('ticker')} {sold}주 매도 체결 — 닫음")
+            else:
+                db.reversal_mark(r["id"], "pending", sold_qty=int(r.get("sold_qty") or 0) + sold, qty=left, settled_orders=done)
+                log(f"  · 감사 소급 {r['id']} {t.get('ticker')} {sold}주 부분 체결 — 잔량 {left}주는 다음 run이 보낸다")
+            return
 
 
 def _with_summary(record: dict, now: datetime, path: Path = None) -> dict:
@@ -441,7 +695,7 @@ def _with_summary(record: dict, now: datetime, path: Path = None) -> dict:
     try:
         import execute as ex
         fills = {t["ticker"]: (t.get("fill") or {}) for t in (record.get("trades") or [])
-                 if t.get("action") == "BUY" and t.get("status") != "FAILED"}
+                 if t.get("action") == "BUY" and was_sent(t)}
         record["thesis_unsynced"] = ex._thesis_unsynced(fills)
     except Exception:                                  # noqa: BLE001 — 동기화 계산이 확정을 막지 않는다
         pass
@@ -471,7 +725,7 @@ def _with_summary(record: dict, now: datetime, path: Path = None) -> dict:
 # ────────────────────────────────────────────────────────── 승인 대비 대조 · 사고
 # ★ 왜 — 2026-09-21 두산 46주가 승인 없이 한 번 더 팔렸는데(승인 46 / 집행 92) `execute` 게이트가
 #   그대로 열렸다. 접수·체결 건수는 셌지만 **승인 수량과 집행 수량을 대조하는 자리가 없었다.**
-#   여기서 종목·방향별 집행 합을 승인 합과 대조하고, 넘으면 사고(`journal/incidents.jsonl`)로
+#   여기서 종목·방향별 집행 합을 승인 합과 대조하고, 넘으면 사고(저장소 `op_incident` · 옛 `journal/incidents.jsonl`)로
 #   자동 기록한다. 게이트는 "초과 0건" 또는 "사고 기록됨"만 통과시킨다 — 조용히 지나가는 길이 없다.
 
 def _resolve_approved(ref: str):
@@ -526,7 +780,7 @@ def reconcile(record: dict) -> dict:
     executed, rows_by_key = {}, {}
     sent_rows = 0
     for t in record.get("trades") or []:
-        if t.get("status") in ("FAILED", None):
+        if not was_sent(t):
             continue
         sent_rows += 1
         f = t.get("fill") or {}
@@ -560,23 +814,12 @@ def reconcile(record: dict) -> dict:
 
 
 def _incident_rows() -> list:
-    p = JOURNAL_DIR / "incidents.jsonl"
-    if not p.exists():
-        return []
-    rows = []
-    for line in p.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rows.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return rows
+    """사고 기록 전체(저장소 `op_incident` — 추가만 하는 표)."""
+    return db.log_rows("incidents")
 
 
 def record_incidents(record: dict, path: Path, now: datetime) -> list:
-    """초과가 있으면 `journal/incidents.jsonl`에 `INC-<stamp>-<n>`으로 남긴다 — (stamp, market, 종목, 방향)당 한 번.
+    """초과가 있으면 사고 기록(저장소 `op_incident`)에 `INC-<stamp>-<n>`으로 남긴다 — (stamp, market, 종목, 방향)당 한 번.
     초과를 만든 행(누적이 승인을 넘어선 뒤의 행)에 `incident_id`를 찍는다. 기존 `incident` 서술은 보존."""
     rec = record.get("reconcile") or {}
     if not rec.get("overfill"):
@@ -587,14 +830,13 @@ def record_incidents(record: dict, path: Path, now: datetime) -> list:
     stamp = m.group(1) if m else format(now, "%y%m%d")
     market = (m.group(2) if m else str((record.get("trades") or [{}])[0].get("market") or "")).lower()
     existing = _incident_rows()
-    store = JOURNAL_DIR / "incidents.jsonl"
     ids = []
     for ov in rec["overfill_list"]:
         key = (stamp, market, ov["ticker"], ov["action"])
         hit = next((e for e in existing
                     if (e.get("stamp"), e.get("market"), e.get("ticker"), e.get("action")) == key), None)
         rows = [t for t in record.get("trades") or []
-                if t.get("status") not in ("FAILED", None)
+                if was_sent(t)
                 and (t.get("ticker"), t.get("action")) == (ov["ticker"], ov["action"])]
         if hit:
             iid = hit["id"]
@@ -607,9 +849,7 @@ def record_incidents(record: dict, path: Path, now: datetime) -> list:
                    "approved_refs": rec.get("refs"), "trades": f"journal/{Path(path).name}",
                    "why": "승인 초과 — 같은 종목·방향의 집행 수량이 승인 합계를 넘었다(중복 전송 의심)",
                    "note": next((t.get("incident") for t in rows if isinstance(t.get("incident"), str)), "")}
-            store.parent.mkdir(parents=True, exist_ok=True)
-            with store.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            db.log_append("incidents", row)
             existing.append(row)
         ids.append(iid)
         # 누적이 승인을 넘어선 행부터 사고다 — 첫 46주는 승인된 것이고 둘째 46주가 사고다.
@@ -639,7 +879,7 @@ def backfill_settle(record: dict) -> int:
     n = 0
     for t in record.get("trades") or []:
         f = t.get("fill") or {}
-        if t.get("status") in ("FAILED", None) or f.get("verdict") not in ("FILLED", "PARTIAL") or "settle_date" in f:
+        if not was_sent(t) or f.get("verdict") not in ("FILLED", "PARTIAL") or "settle_date" in f:
             continue
         try:
             qty = int(f.get("filled_qty") or abs(int(f.get("delta") or 0)))
@@ -667,8 +907,11 @@ def finalize(record: dict, path: Path, now: datetime) -> dict:
     return record
 
 
-def _step(client, t: dict, cfg: dict, now: datetime, chase: bool, log) -> None:
-    """주문 1건을 한 번 살핀다 — 종결이면 판정을 쓰고, 아니면 정정·취소 여부를 정한다."""
+def _step(client, t: dict, cfg: dict, now: datetime, chase: bool, log, claimed: set = None, persist=None) -> None:
+    """주문 1건을 한 번 살핀다 — 종결이면 판정을 쓰고, 아니면 정정·취소 여부를 정한다.
+    `claimed` = 기록 전체가 차지한 주문번호(`claimed_order_nos`) — 응답을 잃은 링크가 남의 주문을 채택하지 않게.
+    `persist` = 그날 기록 전체를 디스크에 원자적으로 쓰는 함수(W01 — 정정·재발주는 보내기 전에, 취소는 응답 직후에 부른다)."""
+    persist = persist or (lambda: None)
     f = t.setdefault("fill", {})
     market = t.get("market", "KR")
     side = t.get("action", "BUY")
@@ -676,10 +919,12 @@ def _step(client, t: dict, cfg: dict, now: datetime, chase: bool, log) -> None:
         if market != "KR" else ""
     chain = _chain(t)
     if not chain:
-        _adopt_unknown(client, t, now, log)
-        chain = _chain(t)
-        if not chain:
-            return                                  # 여전히 주문번호를 모른다 → 미확정으로 남는다
+        # 주문번호 없는 행(UNKNOWN·PENDING)은 confirm이 폴링마다 기록 전체로 `resolve_pending`을 먼저 돌려 푼다 —
+        # 행 하나만 보고 채택하면 같은 종목의 다른 행 주문을 가져올 수 있다.
+        return
+    if _resolve_links(client, t, now, log, claimed if claimed is not None else claimed_order_nos({"trades": [t]})):
+        return                                      # 응답을 잃은 재발주·정정 링크 — 확인될 때까지 판정하지 않는다
+    chain = _chain(t)
     approved_qty = int(t.get("qty") or 0)
     approved_px = float(t.get("price") or 0)
     approved_amt = approved_qty * approved_px
@@ -687,6 +932,8 @@ def _step(client, t: dict, cfg: dict, now: datetime, chase: bool, log) -> None:
     # 체인 전체의 체결을 합산한다 — 정정하면 잔량이 새 번호로 옮겨가고 옛 번호엔 체결분만 남는다.
     filled, filled_amt, latest = 0, 0.0, None
     for link in chain:
+        if not _norm_no(link.get("order_no")):
+            continue                                # 번호 없는 링크는 상태 조회에 넣지 않는다("0"과 맞는 사고)
         st = _status(client, t, link["order_no"], excd)
         if st is None:
             return                                  # 조회 실패 — 다음 폴에 다시
@@ -721,7 +968,7 @@ def _step(client, t: dict, cfg: dict, now: datetime, chase: bool, log) -> None:
         if closed_by_us:
             # ★ 취소가 브로커 TR로 확정된 자리 — 살아 있는 주문이 없으므로 여기서만 재발주한다.
             why = _try_reorder(client, t, cfg, now, excd, approved_qty, approved_px, approved_amt,
-                               filled, filled_amt, log)
+                               filled, filled_amt, log, persist)
             if why == "sent":
                 return                              # 새 주문을 다음 폴부터 본다
             skip = why.split(":", 1)[1] if ":" in why else why
@@ -767,6 +1014,7 @@ def _step(client, t: dict, cfg: dict, now: datetime, chase: bool, log) -> None:
                 # 취소 번호는 체인에 넣지 않는다 — 잔량의 주인은 원주문이고, 취소 반영은 원주문의
                 # 잔량 0·취소 표시로 확인한다(취소 번호는 조회에 안 잡힐 수 있다).
                 f["cancel_order_no"] = res.get("order_no", "")
+                persist()                            # 취소는 응답 직후 바로 쓴다(되풀이 취소는 증권사가 거절할 뿐 노출을 늘리지 않는다)
                 log(f"  ✂ 취소 전송 {t['ticker']} 잔량 {remain} — {f['cancel_why']}")
             except (KisError, ValueError) as e:
                 f["last_error"] = f"취소 실패: {e}"[:200]
@@ -785,7 +1033,8 @@ def _step(client, t: dict, cfg: dict, now: datetime, chase: bool, log) -> None:
         return
     live = _live_price(client, t, excd)
     cur_limit = float(tail.get("price") or approved_px)
-    new_px = chase_price(side, market, live, cur_limit, approved_px, float(cfg["fill_chase_max_pct"]))
+    new_px = chase_price(side, market, live, cur_limit, approved_px, float(cfg["fill_chase_max_pct"]),
+                         floor=not t.get("risk_reducing"))
     if new_px is None:
         return
     new_qty = chase_qty(side, remain, filled_amt, approved_amt, new_px)
@@ -793,34 +1042,65 @@ def _step(client, t: dict, cfg: dict, now: datetime, chase: bool, log) -> None:
         chases.append({"ts": now.isoformat(), "skipped": True, "live": live, "price": new_px,
                        "why": "승인 금액 안에서 0주 — 정정 없이 대기"})
         return
+    # ★ 보내기 전 기록(W01) — 정정 의도를 번호 없는 '정정' 링크(원주문 = 지금 꼬리 번호)로 넣고 디스크에 쓴 뒤 보낸다.
+    #   접수 직후 죽으면 다음 실행이 당일 목록의 원주문 번호(orgn_odno) 행으로 붙이거나 두 번 없음을 확인한 뒤 뺀다.
+    ts = now.isoformat()
+    plink = {"order_no": "", "orgno": tail.get("orgno", ""), "pending": True, "qty": new_qty, "price": new_px,
+             "ts": ts, "why": "정정(보내기 전 기록)", "orgn_order_no": tail["order_no"]}
+    chain.append(plink)
+    persist()
     try:
         res = _modify(client, t, tail["order_no"], tail.get("orgno", ""), excd, new_qty, new_px, cancel=False)
-    except (KisError, ValueError) as e:
-        # 정정 실패는 **한 번만** 기록하고(예전엔 폴마다 되풀이해 13번 찍혔다) 취소→재발주로 간다.
-        f["last_error"] = f"정정 실패: {e}"[:200]
-        chases.append({"ts": now.isoformat(), "failed": True, "price": new_px, "qty": new_qty,
-                       "live": live, "error": str(e)[:160], "why": "정정 거부 — 취소 뒤 재발주로 전환"})
-        log(f"  ★ 정정 실패 {t['ticker']}: {e}", file=sys.stderr)
-        if int(cfg.get("fill_reorder_max", 0) or 0) > len(f.get("reorders") or []):
-            try:
-                cres = _modify(client, t, tail["order_no"], tail.get("orgno", ""), excd, remain, 0, cancel=True)
-                f["cancel_sent"] = now.isoformat()
-                f["cancel_why"] = f"정정 불가(서버 거부) — 잔량 {remain} 취소 뒤 최신가 재발주"
-                f["cancel_order_no"] = cres.get("order_no", "")
-                log(f"  ✂ 취소 전송 {t['ticker']} 잔량 {remain} — {f['cancel_why']}")
-            except (KisError, ValueError) as ce:
-                f["last_error"] = f"취소 실패: {ce}"[:200]
-                log(f"  ★ 취소 실패 {t['ticker']}: {ce}", file=sys.stderr)
+    except KisError as e:
+        if getattr(e, "kind", "unknown") != "unknown":
+            chain.remove(plink)                      # 분명한 거절 — 의도를 거둔다
+            persist()
+            return _modify_rejected(client, t, f, cfg, now, tail, excd, remain, new_px, new_qty, live, chases, e, log, persist)
+        # ★ 응답을 잃은 정정 — 정정이 반영됐을 수 있다(잔량이 새 번호로 옮겨 갔을 수 있다). 옛 번호를 바로 취소하고
+        #   재발주로 가면 살아 있는 새 주문 위에 또 얹는다(2026-10-19 · R01). 번호 없는 '정정' 링크를 그대로 두고 다음 폴링이
+        #   당일 목록의 원주문 번호(orgn_odno = 지금 꼬리 번호) 행으로 붙이거나, 두 번 없음을 확인하면 뺀다.
+        chases.append({"ts": ts, "price": new_px, "qty": new_qty, "live": live, "order_no": "",
+                       "pending": True, "error": str(e)[:160], "why": "정정 응답 유실 — 접수 확인 중"})
+        plink["why"] = "정정(응답 유실)"
+        f["last_error"] = f"정정 응답 유실: {e}"[:200]
+        persist()
+        log(f"  ? 정정 응답 유실 {t['ticker']} — 옛 번호를 취소하지 않고 당일 목록으로 확인한다", file=sys.stderr)
         return
-    entry = {"ts": now.isoformat(), "from_price": cur_limit, "price": new_px, "qty": new_qty,
+    except ValueError as e:
+        chain.remove(plink)
+        persist()
+        return _modify_rejected(client, t, f, cfg, now, tail, excd, remain, new_px, new_qty, live, chases, e, log, persist)
+    entry = {"ts": ts, "from_price": cur_limit, "price": new_px, "qty": new_qty,
              "live": live, "order_no": res.get("order_no", ""),
              "why": f"미체결 {int((now - last_change).total_seconds())}s — 현재가 쪽으로 정정"
                     + (f" · 수량 {remain}→{new_qty}(승인 금액 안)" if new_qty < remain else "")}
     chases.append(entry)
-    chain.append({"order_no": res.get("order_no") or tail["order_no"],
-                  "orgno": res.get("orgno", tail.get("orgno", "")),
-                  "qty": new_qty, "price": new_px, "ts": now.isoformat(), "why": "정정"})
+    plink.update({"order_no": res.get("order_no") or tail["order_no"], "orgno": res.get("orgno", tail.get("orgno", "")),
+                  "why": "정정"})
+    plink.pop("pending", None)
+    plink.pop("orgn_order_no", None)
+    persist()
     log(f"  ↻ 정정 {t['ticker']} {cur_limit:,.2f}→{new_px:,.2f} x{new_qty} → 주문번호 {res.get('order_no')}")
+
+
+def _modify_rejected(client, t, f, cfg, now, tail, excd, remain, new_px, new_qty, live, chases, e, log, persist=None) -> None:
+    """정정이 **분명히 거절**됐다 — 한 번만 기록하고 취소→재발주로 간다(모의 `[40660000] 잔량정정취소만 가능`)."""
+    # 정정 실패는 **한 번만** 기록하고(예전엔 폴마다 되풀이해 13번 찍혔다) 취소→재발주로 간다.
+    f["last_error"] = f"정정 실패: {e}"[:200]
+    chases.append({"ts": now.isoformat(), "failed": True, "price": new_px, "qty": new_qty,
+                   "live": live, "error": str(e)[:160], "why": "정정 거부 — 취소 뒤 재발주로 전환"})
+    log(f"  ★ 정정 실패 {t['ticker']}: {e}", file=sys.stderr)
+    if int(cfg.get("fill_reorder_max", 0) or 0) > len(f.get("reorders") or []):
+        try:
+            cres = _modify(client, t, tail["order_no"], tail.get("orgno", ""), excd, remain, 0, cancel=True)
+            f["cancel_sent"] = now.isoformat()
+            f["cancel_why"] = f"정정 불가(서버 거부) — 잔량 {remain} 취소 뒤 최신가 재발주"
+            f["cancel_order_no"] = cres.get("order_no", "")
+            (persist or (lambda: None))()            # 취소는 응답 직후 바로 쓴다(W01)
+            log(f"  ✂ 취소 전송 {t['ticker']} 잔량 {remain} — {f['cancel_why']}")
+        except (KisError, ValueError) as ce:
+            f["last_error"] = f"취소 실패: {ce}"[:200]
+            log(f"  ★ 취소 실패 {t['ticker']}: {ce}", file=sys.stderr)
 
 
 def _fallback_balance(client, t: dict, approved_qty: int, side: str, now: datetime, log) -> None:
@@ -851,10 +1131,175 @@ def _fallback_balance(client, t: dict, approved_qty: int, side: str, now: dateti
         f["partial_seen"] = abs(delta)
 
 
-def _adopt_unknown(client, t: dict, now: datetime, log) -> None:
-    """주문번호를 못 읽은 건(UNKNOWN) — 그날 체결내역에서 같은 종목·방향·수량·시각의 주문을 찾는다."""
-    # 조회 TR이 주문번호 없이 목록을 주지 않으므로 여기서는 잔고 대조만 시도한다.
-    _fallback_balance(client, t, int(t.get("qty") or 0), t.get("action", "BUY"), now, log)
+# ────────────────────────────────────────────────────────── 접수 불명 해소(2026-10-19 · Codex R01·R02)
+# 응답을 잃은 주문(UNKNOWN)·결과를 못 적은 의도(PENDING)·응답을 잃은 재발주/정정 링크(pending)는 **다시 보내지 않고**
+# 증권사의 당일 주문 목록으로 푼다. 사람에게 묻지 않는다 — 목록이 답하면 그 주문을 행에 붙이고, 목록이 '없다'고
+# 확정하고(실계좌 KIOK0560 · 다음 쪽 없음) 잔고도 그대로면 미접수(UNSENT)로 내려 다시 보낼 수 있게 한다.
+# 둘 다 아니면 열린 채로 두고 마감 뒤 잔고가 그대로면 만료(EXPIRED)로 닫는다 — 어느 쪽도 이중 주문을 만들지 않는다.
+
+# 증권사 접수 시각과 이 맥의 시계 차 — 후보를 '의도 시각 이후'로 거를 때의 여유. 주 필터는 종목·방향·수량·미배정이고,
+# 시각은 어제 남은 주문을 빼는 데만 쓴다(목록이 이미 당일·세션일로 묶여 있다).
+RESOLVE_CLOCK_SLACK_SEC = 120
+# '없다'를 확정으로 쓰는 관측 수 — 접수 직후 목록 반영이 늦을 수 있어 서로 다른 두 폴링에서 같은 답을 받아야 내린다.
+RESOLVE_EMPTY_OBS = 2
+
+
+def _norm_no(no) -> str:
+    return str(no or "").strip().lstrip("0") or ("0" if str(no or "").strip() else "")
+
+
+def claimed_order_nos(record: dict) -> set:
+    """기록이 이미 차지한 주문번호 전부 — 접수 불명 행이 남의 주문을 채택하지 않게."""
+    out = set()
+    for t in record.get("trades") or []:
+        res = t.get("result") or {}
+        f = t.get("fill") or {}
+        nos = [res.get("order_no"), f.get("cancel_order_no")]
+        for k in ("order_chain", "reorders", "chase"):
+            nos += [x.get("order_no") for x in (f.get(k) or []) if isinstance(x, dict)]
+        out |= {_norm_no(n) for n in nos if _norm_no(n)}
+    return out
+
+
+def _day_orders(client, t: dict):
+    """이 행 종목의 당일 주문 목록. 조회 실패면 None(행은 열린 채로 다음 폴링에 다시)."""
+    try:
+        if t.get("market", "KR") == "KR":
+            return client.domestic_orders(ticker=t["ticker"])
+        excd = order_excd((t.get("proposal") or {}).get("excd") or t.get("excd") or "NASD")
+        return client.overseas_orders(ticker=t["ticker"], excd=excd)
+    except (KisError, AttributeError, TypeError, ValueError) as e:
+        t.setdefault("fill", {})["last_error"] = f"당일 주문 목록 조회 실패: {e}"[:200]
+        return None
+
+
+def _since(ts: str):
+    try:
+        return _parse_ts(ts) - timedelta(seconds=RESOLVE_CLOCK_SLACK_SEC) if ts else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _after(row: dict, since) -> bool:
+    if since is None or not row.get("ord_at"):
+        return True
+    try:
+        return _parse_ts(row["ord_at"]) >= since
+    except (TypeError, ValueError):
+        return True
+
+
+def _empty_twice(f: dict, key: str, now: datetime) -> bool:
+    """'없다'는 관측을 이번 폴링 시각으로 쌓고, 서로 다른 폴링에서 두 번 이상이면 True."""
+    seen = list(f.get(key) or [])
+    stamp = now.isoformat()
+    if stamp not in seen:
+        seen.append(stamp)
+    f[key] = seen[-4:]
+    return len(set(seen)) >= RESOLVE_EMPTY_OBS
+
+
+def resolve_pending(client, record: dict, now: datetime, log) -> int:
+    """접수 불명 행(UNKNOWN·PENDING)을 당일 주문 목록으로 푼다. 반환: 이번에 상태가 정해진 행 수."""
+    rows = [t for t in (record.get("trades") or []) if t.get("status") in UNRESOLVED and is_open_trade(t)]
+    if not rows:
+        return 0
+    claimed = claimed_order_nos(record)
+    cache, n = {}, 0
+    for t in sorted(rows, key=lambda x: str(x.get("ts") or "")):
+        key = (t.get("market", "KR"), t.get("ticker"))
+        if key not in cache:
+            cache[key] = _day_orders(client, t)
+        lst = cache[key]
+        f = t.setdefault("fill", {})
+        prev = t.get("status")
+        if lst and lst.get("ok"):
+            since = _since(t.get("ts"))
+            # 대사는 **실제로 보낸 요청** 수량으로(W02 · execute가 보내기 전에 request를 쓴다 — 옛 행은 qty)
+            want_qty = int((t.get("request") or {}).get("qty") or t.get("qty") or 0)
+            cands = [r for r in lst.get("rows") or []
+                     if r.get("is_original") and r.get("side") == t.get("action") and r.get("ticker") == t.get("ticker")
+                     and int(r.get("ord_qty") or 0) == want_qty
+                     and _norm_no(r.get("order_no")) and _norm_no(r.get("order_no")) not in claimed and _after(r, since)]
+            if cands:
+                c = min(cands, key=lambda r: r.get("ord_at") or "")
+                t["status"] = "SENT"
+                res = t.setdefault("result", {})
+                res.update({"order_no": c["order_no"], "orgno": c.get("orgno", ""),
+                            "resolved": {"how": "day-list", "at": now.isoformat(), "from": prev,
+                                         "candidate": {k: c.get(k) for k in ("order_no", "ord_at", "ord_qty", "price",
+                                                                            "filled_qty", "excg")}}})
+                if c.get("excg") and t.get("market", "KR") == "KR":
+                    res.setdefault("excg", c["excg"])
+                f.pop("order_chain", None)            # 채택한 번호로 체인을 새로 짓는다(_chain)
+                claimed.add(_norm_no(c["order_no"]))
+                log(f"  ✓ 접수 확인 {t.get('action')} {t.get('ticker')} — 당일 목록의 주문 {c['order_no']}"
+                    f"({c.get('ord_at') or '시각 미상'})를 이 행에 붙였다({prev} → SENT · 재전송 없음)")
+                n += 1
+                continue
+            if lst.get("authoritative_empty") and lst.get("complete"):
+                _fallback_balance(client, t, int(t.get("qty") or 0), t.get("action", "BUY"), now, log)
+                if not is_open_trade(t):              # 잔고가 요청만큼 움직였다 — 체결로 닫혔다
+                    n += 1
+                    continue
+                if f.get("qty_after") is not None and int(f.get("delta") or 0) == 0 and _empty_twice(f, "empty_seen", now):
+                    t["status"] = "UNSENT"
+                    t.setdefault("result", {})["resolved"] = {"how": "day-list-empty", "at": now.isoformat(), "from": prev}
+                    f.update({"verdict": "REJECTED", "confirmed_at": now.isoformat(), "source": "resolve_pending",
+                              "note": f"접수 불명 → 미접수 확인(당일 목록에 이 종목 주문 없음 {RESOLVE_EMPTY_OBS}회 · 잔고 불변) "
+                                      f"— 걸린 주문이 없다 · 같은 승인으로 다시 보낼 수 있다"})
+                    log(f"  ⊘ 미접수 확인 {t.get('action')} {t.get('ticker')} — 당일 목록에 없고 잔고 불변({prev} → UNSENT)")
+                    n += 1
+                continue
+        # 목록을 못 읽었거나 결론을 못 냈다 — 잔고로만 체결을 확인하고, 마감 뒤 잔고 불변이면 만료로 닫는다.
+        _fallback_balance(client, t, int(t.get("qty") or 0), t.get("action", "BUY"), now, log)
+        if not is_open_trade(t):
+            n += 1
+            continue
+        if now > _session(t, now)["close"] and f.get("qty_after") is not None and int(f.get("delta") or 0) == 0:
+            _finish(t, "EXPIRED", 0, 0.0, now, "resolve_pending",
+                    "접수 불명 — 마감 뒤 잔고 불변 · 당일 목록으로 확인하지 못했다(체결 0)")
+            n += 1
+    return n
+
+
+def _resolve_links(client, t: dict, now: datetime, log, claimed: set) -> bool:
+    """응답을 잃은 재발주·정정 링크(order_no 빈 pending)를 푼다. 반환 True = 아직 미해소(이번 폴링은 판정하지 않는다)."""
+    f = t.setdefault("fill", {})
+    chain = f.get("order_chain") or []
+    pend = [lk for lk in chain if lk.get("pending") and not _norm_no(lk.get("order_no"))]
+    if not pend:
+        return False
+    lst = _day_orders(client, t)
+    if not lst or not lst.get("ok"):
+        return True
+    for lk in pend:
+        if lk.get("why", "").startswith("정정"):
+            want = _norm_no(lk.get("orgn_order_no"))
+            cands = [r for r in lst.get("rows") or [] if want and _norm_no(r.get("orgn_order_no")) == want
+                     and _norm_no(r.get("order_no")) not in claimed]
+        else:
+            since = _since(lk.get("ts"))
+            cands = [r for r in lst.get("rows") or []
+                     if r.get("is_original") and r.get("side") == t.get("action") and r.get("ticker") == t.get("ticker")
+                     and int(r.get("ord_qty") or 0) == int(lk.get("qty") or 0)
+                     and _norm_no(r.get("order_no")) and _norm_no(r.get("order_no")) not in claimed and _after(r, since)]
+        if cands:
+            c = min(cands, key=lambda r: r.get("ord_at") or "")
+            lk.update({"order_no": c["order_no"], "orgno": c.get("orgno", "") or lk.get("orgno", ""),
+                       "pending": False, "resolved": {"how": "day-list", "at": now.isoformat()}})
+            for rr in f.get("reorders") or []:
+                if rr.get("pending") and rr.get("ts") == lk.get("ts"):
+                    rr.update({"order_no": c["order_no"], "pending": False})
+            claimed.add(_norm_no(c["order_no"]))
+            log(f"  ✓ {lk.get('why')} 접수 확인 {t.get('ticker')} — 당일 목록 주문 {c['order_no']}")
+        elif lst.get("complete") and _empty_twice(lk, "absent_seen", now):
+            # 목록이 끝까지 왔는데 두 번 다 없다 — 그 재발주·정정은 접수되지 않았다. 링크를 빼고 원래 흐름으로 돌아간다.
+            chain.remove(lk)
+            f["reorders"] = [rr for rr in (f.get("reorders") or []) if not (rr.get("pending") and rr.get("ts") == lk.get("ts"))]
+            log(f"  ⊘ {lk.get('why')} 미접수 확인 {t.get('ticker')} — 당일 목록에 없다(링크 제거)")
+    return any(lk.get("pending") and not _norm_no(lk.get("order_no")) for lk in chain)
+
 
 
 def _line(summ: dict) -> str:
@@ -908,8 +1353,15 @@ def main() -> int:
     if not path.exists():
         print(f"파일 없음: {path}", file=sys.stderr)
         return 2
-    return confirm(path, max_sec=args.max_sec, chase=not args.no_chase,
-                   note=Path(args.note) if args.note else None)
+    try:
+        return confirm(path, max_sec=args.max_sec, chase=not args.no_chase,
+                       note=Path(args.note) if args.note else None)
+    except DayLocked as e:
+        print(f"확정 보류 — {e}", file=sys.stderr)
+        return 5
+    except DayRecordCorrupt as e:
+        print(f"확정 중단 — {e}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@
 
 왜(2026-10-13 차트스쿨 01 반영 · 사용자 승인): 지지는 평균 한 값이 아니라 반응한 저가들의 **구간**이고, 손절은 구간 아랫선 아래에,
 진입은 구간 안에 건다. 가격이 빠졌다고 손절선을 내리는 것은 기계가 거부한다(정당한 재설정은 --allow-loosen). 실제 원장·시세는 건드리지 않는다.
+원장은 저장소(SQLite)다 — 테스트 전체가 임시 저장소(`testkit.db_case`) 안에서 돌고, 논지는 행으로 심는다.
 
     python3 test_levels.py          # run_tests.py가 부른다
 """
@@ -18,8 +19,10 @@ from pathlib import Path
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
+import db                   # noqa: E402
 import price_levels as pl   # noqa: E402
 import theses as th         # noqa: E402
+from testkit import db_case, seed  # noqa: E402
 
 PASS, FAIL = "PASS", "FAIL"
 results = []
@@ -104,13 +107,9 @@ def t2_leg_rules_zone():
 
 def t3_set_trigger_refuses_loosening():
     p = []
-    tmp = Path(tempfile.mkdtemp(prefix="lvtest_"))
-    saved = th.STORE
-    try:
-        th.STORE = tmp / "theses.json"
-        th.STORE.write_text(json.dumps({"theses": [{"id": "t1", "ticker": "AAA", "market": "KR", "status": "held",
-                                                     "exit_triggers": [{"id": "x1", "check": "price <= 100", "basis": "low_20 100", "size_pct": 100}]}]}),
-                            encoding="utf-8")
+    with db_case():                                   # 논지 원장 = 저장소 행(jd_thesis) — 임시 저장소에 심는다
+        seed(theses=[{"id": "t1", "ticker": "AAA", "market": "KR", "status": "held",
+                      "exit_triggers": [{"id": "x1", "check": "price <= 100", "basis": "low_20 100", "size_pct": 100}]}])
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
             try:
@@ -127,15 +126,12 @@ def t3_set_trigger_refuses_loosening():
                 th.cmd_set_trigger("t1", "x1", "price <= 95", "low_20 95 (과거 고정 기준으로 정정)", "현재가 의존 기준 정정", allow_loosen=True)
             except SystemExit as e:
                 p.append(f"--allow-loosen인데 막았다: {e}")
-        d = json.loads(th.STORE.read_text(encoding="utf-8"))["theses"][0]
+        d = db.thesis_get("t1")
         if d["exit_triggers"][0]["check"] != "price <= 95":
             p.append(f"허용된 내리기가 반영되지 않았다: {d['exit_triggers'][0]}")
         lo = [c for c in d.get("corrections") or [] if c.get("loosened")]
         if len(lo) != 1:
             p.append(f"내린 교정에 loosened 표시가 하나여야: {d.get('corrections')}")
-    finally:
-        th.STORE = saved
-        shutil.rmtree(tmp, ignore_errors=True)
     report("(3) theses.set-trigger — 손절 내리기 거부 · 올리기 허용 · --allow-loosen이면 loosened 표시", p)
 
 
@@ -209,6 +205,7 @@ def t5_breaks_and_carry():
         shutil.rmtree(tmp, ignore_errors=True)
     # risk_guard — 이탈 종목 매수는 거부, 다른 종목은 이 검사로 막지 않는다
     lim = json.loads(rg.LIMITS_PATH.read_text(encoding="utf-8"))
+    lim["scenario_cond_required"] = False            # 형식 적용일은 그 형식을 재는 시험이 켠다
     wl = {"KR": [{"ticker": "AAA", "name": "Alpha"}, {"ticker": "BBB", "name": "Beta"}]}
     bal = {"cash": 100_000_000, "currency": "KRW", "positions": []}
     sig = {"market": "KR", "proposals": [{"ticker": t, "name": t, "action": "BUY", "weight_target_pct": 3.0, "confidence": 0.7,
@@ -263,8 +260,10 @@ def t6_crosscheck_support_break():
     report("(6) crosscheck.check_support_break — 이탈 종목마다 §6 [지지 이탈] 재판정 줄 · 절 누락은 실패", p)
 
 
-for fn in (t1_zone_lo_hi, t2_leg_rules_zone, t3_set_trigger_refuses_loosening, t4_last_close, t5_breaks_and_carry, t6_crosscheck_support_break):
-    _safe(fn)
+with db_case():                                       # 어느 구간도 실제 journal/trading.db를 열지 않는다
+    for fn in (t1_zone_lo_hi, t2_leg_rules_zone, t3_set_trigger_refuses_loosening, t4_last_close, t5_breaks_and_carry,
+               t6_crosscheck_support_break):
+        _safe(fn)
 
 _STATE["done"] = True
 n_fail = sum(1 for s, _, _ in results if s == FAIL)
