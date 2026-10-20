@@ -184,7 +184,7 @@ flowchart LR
 
 ## English
 
-Seventeen Claude Code skills that call, check, and fix one another. Working skills write learning notes from financial newsletters, run paper trades on scenarios prepared in advance, and produce source-checked consulting research. Between them sit the skills that keep the ecosystem honest: source verification, stage checks, audits, a knowledge map, and a maintenance procedure that turns repeated findings into new checks. Weekday cycles and a Saturday review are scheduled jobs. I set the goals and standards, read the results, and approve the changes that need approval. This repository shows how the skills fit together, what they produce for me, and the problems and trial-and-error behind each design choice. Account details, fund sizes, and performance figures are not disclosed.
+Seventeen Claude Code skills that call, check, and fix one another. Working skills write learning notes from financial newsletters, execute paper trades on scenarios prepared in advance, and produce source-checked consulting research. Between them sit the skills that keep the ecosystem honest: source verification, stage checks, audits, a knowledge map, and a maintenance procedure that turns repeated findings into new checks. Weekday cycles and a Saturday review are scheduled jobs. I set the goals and standards, read the results, and approve the changes that need approval. This repository shows how the skills fit together, what they produce for me, and the problems and trial-and-error behind each design choice. Account details, fund sizes, and performance figures are not disclosed.
 
 ## License
 
